@@ -219,6 +219,20 @@ class TowerClient(
         return post(FocusResponse.serializer(), body, "focus")
     }
 
+    /**
+     * `POST /v1/sessions/{address}/show`: brings the session to the front in
+     * Herdr on the Mac (`tower show`). A tower without it (404) gets the
+     * request as words instead, which its brain carries out.
+     */
+    suspend fun showSession(address: String) {
+        try {
+            post(Ignored.serializer(), ByteArray(0).toRequestBody(null), "sessions", address, "show")
+        } catch (e: TowerApiException) {
+            if (e.status != 404 || e.code == "no_session") throw e
+            ask("Show $address in Herdr.")
+        }
+    }
+
     // Behaviors (docs/behaviors.md)
 
     suspend fun behaviors(): BehaviorsResponse = get(BehaviorsResponse.serializer(), "behaviors")

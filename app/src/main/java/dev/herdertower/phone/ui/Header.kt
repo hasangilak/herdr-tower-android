@@ -74,9 +74,16 @@ fun headerTop(): Dp = WindowInsets.statusBars.asPaddingValues().calculateTopPadd
  * actions on the right, and [StopSlot] last, always in the same place.
  */
 @Composable
-fun GlassScaffold(header: @Composable RowScope.() -> Unit, modifier: Modifier = Modifier, content: @Composable BoxScope.() -> Unit) {
+fun GlassScaffold(
+    header: @Composable RowScope.() -> Unit,
+    modifier: Modifier = Modifier,
+    /** Something pinned under the header's row, inside the glass ("Active now" on Chat). */
+    below: (@Composable () -> Unit)? = null,
+    belowHeight: Dp = 0.dp,
+    content: @Composable BoxScope.() -> Unit,
+) {
     val blurred = rememberGraphicsLayer()
-    val top = headerTop()
+    val top = headerTop() + belowHeight
     val tint = tc.bgTop
     val edge = tc.edge
     val canBlur = Build.VERSION.SDK_INT >= Build.VERSION_CODES.S
@@ -100,11 +107,14 @@ fun GlassScaffold(header: @Composable RowScope.() -> Unit, modifier: Modifier = 
             },
             content = content,
         )
-        Row(
-            Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars).height(HEADER_HEIGHT).padding(start = 6.dp, end = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            content = header,
-        )
+        androidx.compose.foundation.layout.Column(Modifier.fillMaxWidth().windowInsetsPadding(WindowInsets.statusBars)) {
+            Row(
+                Modifier.fillMaxWidth().height(HEADER_HEIGHT).padding(start = 6.dp, end = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+                content = header,
+            )
+            if (below != null) Box(Modifier.fillMaxWidth().height(belowHeight)) { below() }
+        }
     }
 }
 

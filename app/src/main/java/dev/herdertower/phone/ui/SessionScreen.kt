@@ -119,6 +119,10 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, on
         agent?.doing?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.text) }
         // What it asks, with the tower's answers.
         QuestionCards(QuestionModel.forUser(questions, address), onQuestion)
+        val snackShow = LocalSnack.current
+        androidx.compose.material3.TextButton(onClick = { showInHerdr(session, address, name, snackShow) }) {
+            Text("Show it in Herdr on the Mac", color = tc.accentHi.takeIf { tc.dark } ?: tc.accent)
+        }
 
         if (blocked) {
             GlassCard(Modifier.fillMaxWidth(), highlighted = true) {

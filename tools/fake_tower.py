@@ -78,6 +78,8 @@ STATE = {
         {"address": "t5", "name": "web", "status": "working", "app": "claude-code", "account": "main"},
         {"address": "t7", "name": "docs", "status": "working", "app": "claude-code", "account": "main"},
         {"address": "vps/t2", "name": "deploy", "status": "idle", "app": "codex"},
+        {"address": "t9", "name": "infra-bot", "status": "working", "app": "codex", "account": "main"},
+        {"address": "t11", "name": "qfix-ask", "status": "working", "app": "claude-code", "account": "main"},
     ],
     "error": "", "talk_key": "ctrl", "voice": "af_bella", "stt_model": "fake", "lan": "", "phone": None,
     "screenshots": [], "work": None, "questions": [], "question_policy": "normal", "behaviors": None,
@@ -111,7 +113,7 @@ JOBS = [
 ]
 FOCUS = [None]
 ROUTE = {}  # device id -> "phone" | "mac"
-SPACES = [("Storefront", ["t3", "t5", "t7"], "The shop: checkout, onboarding and the orders API."), ("Infra", ["vps/t2"], None)]
+SPACES = [("Storefront", ["t3", "t5", "t7"], "The shop: checkout, onboarding and the orders API."), ("Infra", ["vps/t2", "t9"], None)]
 SCREEN = """╭─ Claude Code ────────────────────────╮
 │ Bash command                                   │
 │   npm run migrate -- --env staging             │
@@ -743,6 +745,9 @@ class H(BaseHTTPRequestHandler):
             if seg == ["focus"]:
                 FOCUS[0] = json.loads(b).get("space")
                 return self.send(200, {"focus": FOCUS[0]})
+            if len(seg) == 3 and seg[0] == "sessions" and seg[2] == "show":
+                print(f"show {seg[1]} in Herdr", flush=True)
+                return self.send(200, {"shown": seg[1]})
             if seg == ["hush"]:
                 HUSHED[0] = True
                 publish("hush", {}, voice_only=True)

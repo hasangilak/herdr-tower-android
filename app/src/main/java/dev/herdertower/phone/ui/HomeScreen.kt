@@ -167,6 +167,7 @@ fun HomeScreen(
     HomeContent(
         ui = ui,
         notice = { ConnectionNotice(link, session, onRepair) },
+        activeNow = { ActiveNow(session, onOpen) },
         questions = {
             QuestionCards(QuestionModel.forUser(questions), onQuestion, Modifier.padding(horizontal = 20.dp))
         },
@@ -211,6 +212,8 @@ fun HomeContent(
     notice: @Composable () -> Unit = {},
     /** The questions sessions leave to the user, as cards. */
     questions: @Composable () -> Unit = {},
+    /** The sessions at work right now. */
+    activeNow: @Composable () -> Unit = {},
     askBox: @Composable () -> Unit,
     onSuggestion: (Suggestion) -> Unit,
     onAlerts: () -> Unit,
@@ -225,7 +228,7 @@ fun HomeContent(
         }
         androidx.compose.foundation.layout.BoxWithConstraints(Modifier.weight(1f).padding(horizontal = 6.dp)) {
             // Narrow (a small phone, large text, Stop showing): what matters only, on two lines.
-            val roomy = maxWidth >= 150.dp
+            val roomy = maxWidth >= 120.dp
             Column {
                 if (roomy) Text("${ui.greeting} · ${ui.towerName}", style = MaterialTheme.typography.bodySmall, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(
@@ -240,9 +243,10 @@ fun HomeContent(
     }) {
     Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            Spacer(Modifier.height(headerTop()))
+            Spacer(Modifier.height(headerTop() + 10.dp))
+            activeNow()
             Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) { notice() }
-            Spacer(Modifier.height(40.dp))
+            Spacer(Modifier.height(28.dp))
             Text(
                 "What should the tower do?",
                 Modifier.padding(horizontal = 24.dp).semantics { heading() },
