@@ -4,6 +4,9 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import dev.herdertower.phone.api.AccountsResponse
+import dev.herdertower.phone.api.BehaviorChange
+import dev.herdertower.phone.api.BehaviorResult
+import dev.herdertower.phone.api.BehaviorsResponse
 import dev.herdertower.phone.api.Question
 import dev.herdertower.phone.api.QuestionsApi
 import dev.herdertower.phone.api.TabAnswer
@@ -288,6 +291,11 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             TowerEvent.Hush -> player.hush()
             TowerEvent.Pause -> player.pause()
             TowerEvent.Resume -> player.resume()
+            is TowerEvent.BehaviorsChanged -> {
+                _behaviorsSupported.value = true
+                _lastBehaviorChange.value = ev.change
+                scope.launch { loadBehaviors() }
+            }
             is TowerEvent.QuestionChanged -> {
                 _questionsSupported.value = true
                 setQuestions(QuestionsApi.apply(_questions.value, ev.change))
@@ -295,6 +303,37 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             is TowerEvent.Hello, TowerEvent.Ping, is TowerEvent.Unknown -> {}
         }
     }
+
+    // Behaviors
+
+    private val _behaviors = MutableStateFlow<BehaviorsResponse?>(null)
+    /** How the tower works: every behavior, the fixed core; null until loaded (or a tower without them). */
+    val behaviors: StateFlow<BehaviorsResponse?> = _behaviors.asStateFlow()
+
+    private val _behaviorsSupported = MutableStateFlow(false)
+    val behaviorsSupported: StateFlow<Boolean> = _behaviorsSupported.asStateFlow()
+
+    private val _behaviorHistory = MutableStateFlow<List<BehaviorChange>>(emptyList())
+    val behaviorHistory: StateFlow<List<BehaviorChange>> = _behaviorHistory.asStateFlow()
+
+    private val _lastBehaviorChange = MutableStateFlow<BehaviorChange?>(null)
+    /** The latest change seen live (from here, the Mac or the brain). */
+    val lastBehaviorChange: StateFlow<BehaviorChange?> = _lastBehaviorChange.asStateFlow()
+
+    suspend fun loadBehaviors() {
+        quietly { c ->
+            _behaviors.value = c.behaviors()
+            _behaviorsSupported.value = true
+            _behaviorHistory.value = c.behaviorHistory(30)
+        }
+    }
+
+    /** Runs a behavior change and reloads (the `behaviors` event reloads too, for changes made elsewhere). */
+    suspend fun changeBehavior(block: suspend (TowerClient) -> BehaviorResult): Result<BehaviorResult> =
+        act(block).onSuccess { r ->
+            r.change?.let { _lastBehaviorChange.value = it }
+            loadBehaviors()
+        }
 
     // Questions
 
@@ -346,6 +385,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     private fun refreshAll() {
         scope.launch { loadThread() }
         scope.launch { loadQuestions() }
+        scope.launch { loadBehaviors() }
         scope.launch {
             quietly { r -> setRouteLocal(r.audioRoute().route) }
             catchUp()

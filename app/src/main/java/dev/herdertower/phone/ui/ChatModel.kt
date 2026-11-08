@@ -7,7 +7,7 @@ object ChatModel {
     /** Requests, answers, reports, alerts and summaries; finished or blocked jobs with words; never news held for an unfocused space. */
     fun items(entries: List<HistoryEntry>, max: Int = 300): List<HistoryEntry> = entries.filter { e ->
         !e.held && when (e.kind) {
-            "request", "answer", "watch", "alert", "summary", "screenshot", "answered" -> true
+            "request", "answer", "watch", "alert", "summary", "screenshot", "answered", "behavior" -> true
             "job" -> e.status in setOf("done", "failed", "error", "exited", "blocked") && e.text.isNotEmpty()
             else -> false
         }
@@ -54,7 +54,7 @@ object ChatModel {
             else -> m.kind ?: m.role
         },
         session = m.session, name = m.name, account = m.account, status = m.status,
-        text = m.text, attachments = m.attachmentPaths(), id = m.id,
+        text = m.text, attachments = m.attachmentPaths(), id = m.id, diff = m.diff,
     )
 
     /** A message sent from here, shown until the thread brings it back. */

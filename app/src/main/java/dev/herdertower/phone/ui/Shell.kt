@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.Forum
 import androidx.compose.material.icons.filled.Computer
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.PhotoLibrary
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material.icons.filled.Workspaces
 import androidx.compose.material3.AlertDialog
@@ -100,6 +101,10 @@ sealed interface Route {
     data class Screenshots(val session: String? = null, val open: String? = null) : Route
     /** Answering a question a session asks. */
     data class Question(val id: String) : Route
+    /** How the tower works; [open] a behavior's title to open (from a chat card). */
+    data object Behaviors : Route
+    /** One behavior, or a new one ([id] null). */
+    data class Behavior(val id: String?) : Route
 
     companion object {
         fun encode(r: Route): String = when (r) {
@@ -112,6 +117,8 @@ sealed interface Route {
             is Space -> "space:${r.name}"
             is Screenshots -> "shots:${r.session.orEmpty()}:${r.open.orEmpty()}"
             is Question -> "question:${r.id}"
+            Behaviors -> "behaviors"
+            is Behavior -> "behavior:${r.id.orEmpty()}"
         }
 
         fun decode(s: String): Route = when {
@@ -122,6 +129,8 @@ sealed interface Route {
             s.startsWith("session:") -> Session(s.removePrefix("session:"))
             s.startsWith("space:") -> Space(s.removePrefix("space:"))
             s.startsWith("question:") -> Question(s.removePrefix("question:"))
+            s == "behaviors" -> Behaviors
+            s.startsWith("behavior:") -> Behavior(s.removePrefix("behavior:").ifEmpty { null })
             s.startsWith("shots:") -> s.removePrefix("shots:").split(":", limit = 2).let { Screenshots(it[0].ifEmpty { null }, it.getOrNull(1)?.ifEmpty { null }) }
             else -> Home
         }
@@ -254,12 +263,18 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
                 when (route) {
                     Route.Home -> HomeScreen(session, voice, onVoice = { go(Route.Voice(it)) }, onChat = { go(Route.Chat) }, onOpen = { go(Route.Session(it)) }, onAlerts = { go(Route.Activity) }, onMenu = { menu = true }, onRepair = onRepair, onQuestion = { go(Route.Question(it)) })
                     is Route.Voice -> VoiceScreen(session, voice, startListening = route.listen, onClose = { back() }, onChat = { go(Route.Chat) })
-                    Route.Chat -> ChatScreen(session, onClose = { back() }, onVoice = { go(Route.Voice(true)) }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) }, onQuestion = { go(Route.Question(it)) })
+                    Route.Chat -> ChatScreen(session, onClose = { back() }, onVoice = { go(Route.Voice(true)) }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) }, onQuestion = { go(Route.Question(it)) }, onBehavior = { title ->
+                        val b = session.behaviors.value?.behaviors?.let { all -> dev.herdertower.phone.api.BehaviorsApi.fromChatLine(title, all) }
+                        go(Route.Behaviors)
+                        if (b != null) go(Route.Behavior(b.id))
+                    })
                     Route.Spaces -> SpacesScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onSpace = { go(Route.Space(it)) })
                     Route.Activity -> ActivityScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
                     is Route.Space -> SpaceScreen(session, route.name, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
                     is Route.Session -> SessionScreen(session, route.address, onBack = { back() }, onShot = { go(Route.Screenshots(route.address, it)) }, onQuestion = { go(Route.Question(it)) })
                     is Route.Question -> QuestionScreen(session, route.id, onClose = { back() }, onSession = { go(Route.Session(it)) })
+                    Route.Behaviors -> BehaviorsScreen(session, onBack = { back() }, onOpen = { go(Route.Behavior(it)) }, onAdd = { go(Route.Behavior(null)) })
+                    is Route.Behavior -> BehaviorScreen(session, route.id, onBack = { back() })
                     is Route.Screenshots -> ScreenshotsScreen(session, route.session, route.open, onBack = { back() })
                 }
             }
@@ -302,6 +317,9 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
             SheetRow(Icons.Filled.Timeline, "Activity", if (running > 0) "$running running" else "Jobs and history") { onGo(Route.Activity) }
             SheetRow(Icons.Filled.Forum, "Conversation", "Everything you and the tower said") { onGo(Route.Chat) }
             val shots by session.screenshots.collectAsStateWithLifecycle()
+            val behaviorsOn by session.behaviorsSupported.collectAsStateWithLifecycle()
+            val behaviorData by session.behaviors.collectAsStateWithLifecycle()
+            if (behaviorsOn) SheetRow(Icons.Filled.Tune, "Behaviors", behaviorData?.let { "${it.behaviors.count { b -> b.enabled }} rules · how the tower works" } ?: "How the tower works") { onGo(Route.Behaviors) }
             SheetRow(Icons.Filled.PhotoLibrary, "Screenshots", if (shots.isEmpty()) "What sessions show you" else plural(shots.size, "screenshot")) { onGo(Route.Screenshots()) }
             Spacer(Modifier.height(10.dp))
             val route by session.audioRoute.collectAsStateWithLifecycle()

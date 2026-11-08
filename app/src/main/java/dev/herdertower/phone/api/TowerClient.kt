@@ -219,6 +219,30 @@ class TowerClient(
         return post(FocusResponse.serializer(), body, "focus")
     }
 
+    // Behaviors (docs/behaviors.md)
+
+    suspend fun behaviors(): BehaviorsResponse = get(BehaviorsResponse.serializer(), "behaviors")
+
+    suspend fun addBehavior(title: String, category: String, summary: String, text: String): BehaviorResult =
+        post(BehaviorResult.serializer(), BehaviorPatch(title, category, summary, text).json().toRequestBody(JSON), "behaviors")
+
+    /** `PUT /v1/behaviors/{id}`: any of title, category, summary, text, enabled (enabled alone turns it on or off). */
+    suspend fun updateBehavior(id: String, patch: BehaviorPatch): BehaviorResult =
+        call(http, request(url("behaviors", id)).put(patch.json().toRequestBody(JSON)).build(), BehaviorResult.serializer())
+
+    /** What an edit of the rule's text would change, not saved. */
+    suspend fun previewBehavior(id: String, text: String): BehaviorPreview =
+        post(BehaviorPreview.serializer(), BehaviorPatch(text = text).json().toRequestBody(JSON), "behaviors", id, "preview")
+
+    suspend fun removeBehavior(id: String): BehaviorResult =
+        call(http, request(url("behaviors", id)).delete().build(), BehaviorResult.serializer())
+
+    /** Undoes the latest change not undone yet (`400` when there's nothing to undo). */
+    suspend fun undoBehavior(): BehaviorResult = post(BehaviorResult.serializer(), ByteArray(0).toRequestBody(null), "behaviors", "undo")
+
+    suspend fun behaviorHistory(limit: Int = 50): List<BehaviorChange> =
+        get(BehaviorHistory.serializer(), "behaviors", "history", query = mapOf("limit" to limit.toString())).changes
+
     // Questions (docs/questions.md)
 
     suspend fun questions(): List<Question> = get(QuestionsResponse.serializer(), "questions").questions

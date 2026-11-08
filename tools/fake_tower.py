@@ -80,7 +80,7 @@ STATE = {
         {"address": "vps/t2", "name": "deploy", "status": "idle", "app": "codex"},
     ],
     "error": "", "talk_key": "ctrl", "voice": "af_bella", "stt_model": "fake", "lan": "", "phone": None,
-    "screenshots": [], "work": None, "questions": [], "question_policy": "normal",
+    "screenshots": [], "work": None, "questions": [], "question_policy": "normal", "behaviors": None,
 }
 SHOTS = [
     {"id": "1794160000003-onboarding.png", "at": T0 - 4 * MIN, "session": "t5", "name": "web", "space": "Storefront", "account": "main", "job": "j1", "caption": "The new onboarding page, three steps"},
@@ -202,6 +202,8 @@ def chat_message(e, i):
     for k in ("session", "name", "account", "status"):
         if k in e:
             m[k] = e[k]
+    if kind == "behavior":
+        m["diff"] = e.get("diff", "")
     if kind == "screenshot":
         s = next((x for x in SHOTS if x["id"] == e["id"]), {"id": e["id"]})
         m["screenshots"] = [{k: s.get(k) for k in ("id", "caption", "session", "name", "account", "at")} | {"url": "/v1/screenshots/" + e["id"]}]
@@ -209,7 +211,7 @@ def chat_message(e, i):
 
 
 def thread():
-    return [chat_message(e, i + 1) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot", "answered") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
+    return [chat_message(e, i + 1) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot", "answered", "behavior") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
 
 
 def add_history(e):
@@ -255,7 +257,8 @@ def reply_to(text, attachments=()):
     time.sleep(1.5)
     set_state(work={"word": "Reading", "detail": "web", "since_ms": t, "at_ms": now(), "done_ms": 0})
     time.sleep(2.5)
-    answer = ["You said: " + text + ".", "This is the fake tower, so nothing really happened.", "Web is still on the checkout page.", "Api is waiting for your answer."]
+    said = brain_behavior(text)
+    answer = [said] if said else ["You said: " + text + ".", "This is the fake tower, so nothing really happened.", "Web is still on the checkout page.", "Api is waiting for your answer."]
     # While it speaks, what it says is the state's `said`; the answer lands on the thread after.
     speak(answer)
     add_history({"at": now(), "kind": "answer", "text": " ".join(answer)})
@@ -458,6 +461,166 @@ def questions_route(h, method, seg, q, b):
 FAIL_NEXT = [bool(os.environ.get("FAKE_FAIL_FIRST_ANSWER"))]
 
 
+# Behaviors (docs/behaviors.md in herder-tower): the rules the tower follows, changed from a screen or by the brain.
+BCATS = ["Talking", "Sessions", "Spaces and focus", "Accounts", "Releases and safety", "Questions 90/10", "Screenshots", "Browsers", "Misc"]
+BCORE = {"title": "The tower's core", "read_only": True, "text": "You are the tower: the voice and hands of the user's terminal sessions.\nMessages reach you as [voice] (the user), [watch] (a session finished), [question] (a session asks).\nYour tools: tower ask, tower answer, tower recommend, tower behavior.\nBehaviors below are the user's rules; change them only with tower behavior."}
+
+
+def _b(id, title, cat, source, summary, text, enabled=True):
+    return {"id": id, "title": title, "category": cat, "enabled": enabled, "source": source, "summary": summary,
+            "created_ms": T0 - 30 * 86400_000, "updated_ms": T0 - 2 * 86400_000, "text": text}
+
+
+BEHAVIORS = {b["id"]: b for b in [
+    _b("heard-not-read", "You are heard, not read", "Talking", "builtin", "Answers are spoken, so they are short and plain",
+       "Everything you say is spoken aloud.\nKeep answers to one or two sentences.\nNo lists, no markdown, no code unless asked."),
+    _b("be-brief", "Be brief", "Talking", "learned", "One sentence when one will do", "Say the result first, then stop.\nDon't repeat the question back."),
+    _b("leave-sessions-running", "Leave sessions running", "Sessions", "builtin", "Never stop or close a session that's working",
+       "Don't stop, restart or close a session that is working.\nAsk the user first if a session seems stuck."),
+    _b("look-then-hand-off", "Look before you act, then hand off", "Sessions", "builtin", "Read a session's screen before sending it work",
+       "Before sending work to a session, read its screen.\nThen hand the work off in one clear message."),
+    _b("focus-holds-news", "Focus holds other news", "Spaces and focus", "builtin", "While a space is in focus, news from others waits",
+       "When a space is in focus, only its news is spoken.\nOther spaces' news is held until focus clears."),
+    _b("browser-per-account", "The browser per account", "Browsers", "learned", "Each Claude account opens links in its own browser",
+       "Open links for orca sessions in Brave.\nOpen links for main sessions in Chrome."),
+    _b("release-dev-then-prod", "Release dev then prod", "Releases and safety", "learned", "Releases always go to dev first, then dev to prod",
+       "Always release via dev first (PR merged into dev), then promote dev to prod.\nNever push straight to prod."),
+    _b("questions-90-10", "Questions: answer routine ones", "Questions 90/10", "builtin", "Answer about 90% of questions, leave the rest to the user",
+       "Answer routine questions yourself: naming, tests, the safe default.\nLeave deploys, pushes, deleting and money to the user."),
+    _b("screenshots-with-replies", "Show screenshots with replies", "Screenshots", "builtin", "When a session sends a screenshot, show it with the answer",
+       "When you talk about a session that sent screenshots, add [shot:<id>] to your reply."),
+    _b("dev-ports", "Dev ports 3000-3050", "Misc", "user", "Dev servers use ports 3000 to 3050", "Start dev servers on a free port between 3000 and 3050.", enabled=False),
+]}
+BHIST = []  # {at, op, id, title, by, undid, before, after}
+
+
+def bdiff(before, after):
+    import difflib
+    a, b = (before or "").splitlines(), (after or "").splitlines()
+    out = []
+    for tag, i1, i2, j1, j2 in difflib.SequenceMatcher(None, a, b).get_opcodes():
+        if tag == "equal":
+            out += ["  " + l for l in a[i1:i2]]
+        else:
+            out += ["- " + l for l in a[i1:i2]] + ["+ " + l for l in b[j1:j2]]
+    return "\n".join(out)
+
+
+def bview(c):
+    return {"at": c["at"], "op": c["op"], "id": c["id"], "title": c["title"], "by": c["by"], "undid": c.get("undid"),
+            "diff": bdiff((c["before"] or {}).get("text", ""), (c["after"] or {}).get("text", ""))}
+
+
+def bchange(op, id, before, after, by, undid=None):
+    title = (after or before or {}).get("title", id)
+    if after is None:
+        BEHAVIORS.pop(id, None)
+    else:
+        BEHAVIORS[id] = after
+    c = {"at": now(), "op": op, "id": id, "title": title, "by": by, "undid": undid, "before": before, "after": after}
+    BHIST.append(c)
+    v = bview(c)
+    set_state(behaviors=bsummary())
+    publish("behaviors", v)
+    verb = {"add": "Added", "edit": "Changed", "enable": "Turned on", "disable": "Turned off", "remove": "Removed", "undo": "Undid the last change to"}.get(op, op)
+    add_history({"at": now(), "kind": "behavior", "text": f"{verb} a behavior: {title}", "diff": v["diff"]})
+    return v
+
+
+def bsummary():
+    by = {}
+    for b in BEHAVIORS.values():
+        by[b["category"]] = by.get(b["category"], 0) + 1
+    return {"count": len(BEHAVIORS), "enabled": sum(1 for b in BEHAVIORS.values() if b["enabled"]), "by_category": by, "updated_ms": max([c["at"] for c in BHIST] or [T0])}
+
+
+def slug(title):
+    base = re.sub(r"[^a-z0-9]+", "-", title.lower()).strip("-")[:40] or "behavior"
+    id, k = base, 2
+    while id in BEHAVIORS:
+        id, k = f"{base}-{k}", k + 1
+    return id
+
+
+def behaviors_route(h, method, seg, q, b):
+    if seg == ["behaviors"] and method == "GET":
+        h.send(200, {"categories": BCATS, "behaviors": sorted(BEHAVIORS.values(), key=lambda x: (BCATS.index(x["category"]) if x["category"] in BCATS else 99, x["title"])),
+                     "core": BCORE, "summary": bsummary()})
+        return True
+    if seg == ["behaviors"] and method == "POST":
+        d = json.loads(b or b"{}")
+        if not d.get("title") or not d.get("text"):
+            h.err(400, "behavior", "a behavior needs a title and its text")
+            return True
+        nb = {"id": slug(d["title"]), "title": d["title"], "category": d.get("category") if d.get("category") in BCATS else "Misc", "enabled": True,
+              "source": "user", "summary": d.get("summary", ""), "created_ms": now(), "updated_ms": now(), "text": d["text"]}
+        v = bchange("add", nb["id"], None, nb, "user")
+        h.send(201, {"behavior": nb, "change": v})
+        return True
+    if seg == ["behaviors", "history"]:
+        lim = int(q.get("limit", 50))
+        h.send(200, {"changes": [bview(c) for c in reversed(BHIST)][:lim]})
+        return True
+    if seg == ["behaviors", "undo"] and method == "POST":
+        last = next((c for c in reversed(BHIST) if c["op"] != "undo" and not c.get("undone")), None)
+        if not last:
+            h.err(400, "behavior", "nothing to undo")
+            return True
+        last["undone"] = True
+        v = bchange("undo", last["id"], last["after"], last["before"], "user", undid=last["at"])
+        h.send(200, {"behavior": last["before"], "change": v})
+        return True
+    if len(seg) >= 2 and seg[0] == "behaviors":
+        cur = BEHAVIORS.get(seg[1])
+        if cur is None:
+            h.err(404, "behavior", "no behavior " + seg[1])
+            return True
+        if len(seg) == 2 and method == "GET":
+            h.send(200, cur)
+            return True
+        if seg[2:] == ["preview"] and method == "POST":
+            h.send(200, {"id": cur["id"], "diff": bdiff(cur["text"], json.loads(b or b"{}").get("text", cur["text"]))})
+            return True
+        if len(seg) == 2 and method == "PUT":
+            d = json.loads(b or b"{}")
+            nb = dict(cur)
+            for k in ("title", "category", "summary", "text", "enabled"):
+                if k in d:
+                    nb[k] = d[k]
+            nb["updated_ms"] = now()
+            op = ("enable" if d["enabled"] else "disable") if set(d) == {"enabled"} else "edit"
+            v = bchange(op, cur["id"], cur, nb, "user")
+            h.send(200, {"behavior": nb, "change": v})
+            return True
+        if len(seg) == 2 and method == "DELETE":
+            v = bchange("remove", cur["id"], cur, None, "user")
+            h.send(200, {"change": v})
+            return True
+    h.err(404, "not_found", "no such path")
+    return True
+
+
+def brain_behavior(text):
+    """The brain turning 'add a behavior: …' / 'turn off …' into a change; its one-line answer, or None."""
+    t = text.strip()
+    low = t.lower()
+    m = re.match(r"(?:add a behaviou?r|from now on|always|never)[:,]?\s*(.+)", t, re.I)
+    if m:
+        rule = m.group(1).strip().rstrip(".") + "."
+        title = rule.split(",")[0].split(".")[0][:48].strip().capitalize()
+        nb = {"id": slug(title), "title": title, "category": "Misc", "enabled": True, "source": "learned", "summary": rule,
+              "created_ms": now(), "updated_ms": now(), "text": rule}
+        bchange("add", nb["id"], None, nb, "brain")
+        return "Added to your behaviors."
+    m = re.match(r"turn off (?:the )?(.+?)(?: behaviou?r)?\.?$", low)
+    if m:
+        hit = next((b for b in BEHAVIORS.values() if m.group(1) in b["title"].lower()), None)
+        if hit and hit["enabled"]:
+            bchange("disable", hit["id"], hit, dict(hit, enabled=False, updated_ms=now()), "brain")
+            return f"Turned off {hit['title']}."
+    return None
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -504,6 +667,9 @@ class H(BaseHTTPRequestHandler):
         dev = self.device()
         if dev is None:
             return self.err(401, "unauthorized", "unknown token")
+        if seg[:1] == ["behaviors"]:
+            if behaviors_route(self, method, seg, q, self.body() if method in ("POST", "PUT") else b""):
+                return
         if seg[:1] in (["questions"], ["questions-policy"]):
             if questions_route(self, method, seg, q, self.body() if method in ("POST", "PUT") else b""):
                 return

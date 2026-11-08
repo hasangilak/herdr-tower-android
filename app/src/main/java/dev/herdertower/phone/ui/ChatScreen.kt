@@ -94,7 +94,7 @@ private sealed interface ChatRow {
 }
 
 @Composable
-fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit, onQuestion: (String) -> Unit = {}) {
+fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit, onQuestion: (String) -> Unit = {}, onBehavior: (String) -> Unit = {}) {
     val questions by session.questions.collectAsStateWithLifecycle()
     val history by session.history.collectAsStateWithLifecycle()
     val thread by session.thread.collectAsStateWithLifecycle()
@@ -147,6 +147,7 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
         onLoadOlder = { scope.launch { if (useThread) session.loadOlderThread() else if (session.loadOlder() == 0) snack("That's everything.") } },
         rowShots = { e -> shotsById[e.id].orEmpty().takeIf { it.isNotEmpty() }?.let { shots -> ShotStrip(session, shots) { onShot(it.id) } } },
         onOpen = onOpen,
+        onBehavior = onBehavior,
         onShot = onShot,
         thumb = { e, m -> Thumb(session, shotOf(e), m, maxSide = 600) },
         replyShots = { refs, m ->
@@ -258,6 +259,8 @@ fun ChatContent(
     canLoadMore: Boolean = true,
     /** Screenshots that came with a thread message. */
     rowShots: @Composable (HistoryEntry) -> Unit = {},
+    /** A behavior change card was tapped (its line, to find the behavior). */
+    onBehavior: (String) -> Unit = {},
     inputBar: @Composable () -> Unit,
 ) {
     val list = rememberLazyListState()
@@ -329,6 +332,7 @@ fun ChatContent(
                     is ChatRow.Item -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
                         when (r.e.kind) {
                             "request" -> UserBubble(r.e, sentFiles)
+                            "behavior" -> BehaviorChangeCard(r.e.text, r.e.diff) { onBehavior(r.e.text) }
                             "answer" -> ReplyBubble(r.e, replyShots)
                             "screenshot" -> if (r.e.id != null && !curated) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
                             else -> EventLine(r.e, accounts, onOpen)

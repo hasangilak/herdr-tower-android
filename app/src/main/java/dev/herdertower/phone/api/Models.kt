@@ -203,6 +203,8 @@ data class HistoryEntry(
     val id: String? = null,
     val caption: String? = null,
     val path: String? = null,
+    /** kind = behavior: the rule's diff. */
+    val diff: String? = null,
 )
 
 @Serializable
@@ -306,6 +308,8 @@ data class ChatMessage(
     /** The files for its `#n` tokens: `{n, kind, name, path, url}` (or bare paths). */
     val attachments: List<JsonElement> = emptyList(),
     @kotlinx.serialization.SerialName("updated_at") val updatedAt: Long = 0,
+    /** A behavior change's diff (`kind: behavior`). */
+    val diff: String? = null,
     /** Screenshots shown with it: ids, or whole screenshot objects. */
     val screenshots: List<JsonElement> = emptyList(),
     val session: String? = null,

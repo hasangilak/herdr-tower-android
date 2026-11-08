@@ -12,6 +12,8 @@ sealed interface TowerEvent {
     data class Chat(val message: ChatMessage) : TowerEvent
     /** A question set appeared, changed or closed. */
     data class QuestionChanged(val change: QuestionEvent) : TowerEvent
+    /** The behaviors changed (from any screen, or the brain). */
+    data class BehaviorsChanged(val change: BehaviorChange) : TowerEvent
     data object Hush : TowerEvent
     data object Pause : TowerEvent
     data object Resume : TowerEvent
@@ -30,6 +32,7 @@ sealed interface TowerEvent {
                 "audio" -> Audio(TowerJson.decodeFromString(AudioClip.serializer(), raw.data))
                 "chat" -> Chat(ChatApi.message(raw.data))
                 "question" -> QuestionChanged(QuestionsApi.event(raw.data))
+                "behaviors" -> BehaviorsChanged(TowerJson.decodeFromString(BehaviorChange.serializer(), raw.data))
                 "hush" -> Hush
                 "pause" -> Pause
                 "resume" -> Resume

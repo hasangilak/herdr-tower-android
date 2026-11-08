@@ -330,6 +330,29 @@ class TowerClientTest {
         assertEquals("DELETE", taken().method)
     }
 
+    @Test fun behaviorCalls() = runBlocking {
+        server.enqueue(json("""{"behavior":{"id":"x","title":"T"},"change":{"at":1,"op":"add","id":"x","title":"T","by":"user","diff":"+ rule"}}""", 201))
+        val added = client().addBehavior("T", "Misc", "one line", "rule")
+        assertEquals("add", added.change!!.op)
+        var req = taken()
+        assertEquals("POST", req.method)
+        assertEquals("""{"title":"T","category":"Misc","summary":"one line","text":"rule"}""", req.body!!.utf8())
+        server.enqueue(json("""{"behavior":{"id":"x","enabled":false},"change":{"op":"disable"}}"""))
+        client().updateBehavior("x", BehaviorPatch(enabled = false))
+        req = taken()
+        assertEquals("PUT", req.method)
+        assertEquals("/v1/behaviors/x", req.url.encodedPath)
+        server.enqueue(json("""{"id":"x","diff":"- a\n+ b"}"""))
+        assertEquals("- a\n+ b", client().previewBehavior("x", "b").diff)
+        assertEquals("/v1/behaviors/x/preview", taken().url.encodedPath)
+        server.enqueue(json("""{"error":{"code":"behavior","message":"nothing to undo"}}""", 400))
+        val e = runCatching { client().undoBehavior() }.exceptionOrNull()
+        assertTrue(e is TowerApiException && e.message!!.contains("nothing to undo"))
+        server.enqueue(json("""{"changes":[{"at":2,"op":"edit","id":"x","title":"T","by":"brain","diff":""}]}"""))
+        assertEquals("brain", client().behaviorHistory(10).single().by)
+        assertEquals("limit=10", taken().let { taken() }.url.encodedQuery)
+    }
+
     @Test fun hushPostsAnEmptyBody() = runBlocking {
         server.enqueue(json("""{"ok": true}"""))
         client().hush()

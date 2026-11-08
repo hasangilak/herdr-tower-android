@@ -88,7 +88,7 @@ fun QuestionCard(q: Question, onOpen: () -> Unit, modifier: Modifier = Modifier,
                 Text("${q.who} asks", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = tc.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 Text(QuestionModel.kindWord(q), style = MaterialTheme.typography.labelMedium, color = tc.faint)
             }
-            Text(q.headline, style = if (compact) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.titleMedium, color = tc.text, maxLines = if (compact) 2 else 3, overflow = TextOverflow.Ellipsis)
+            Text(q.headline, style = if (compact) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.titleMedium, color = tc.text, maxLines = if (compact) 1 else 3, overflow = TextOverflow.Ellipsis)
             val words = QuestionModel.statusWords(q)
             when {
                 words != null -> Text(words, style = MaterialTheme.typography.bodySmall, color = if (q.status == "failed") tc.failed else tc.muted)
