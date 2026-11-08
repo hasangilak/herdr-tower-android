@@ -1,0 +1,149 @@
+package dev.herdertower.phone.ui
+
+import androidx.compose.foundation.layout.Arrangement
+import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
+import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.items
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.CheckCircle
+import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Warning
+import androidx.compose.material3.Icon
+import androidx.compose.material3.MaterialTheme
+import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
+import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableLongStateOf
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.Modifier
+import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
+import androidx.compose.ui.unit.dp
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.herdertower.phone.api.Job
+import dev.herdertower.phone.data.TowerSession
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
+
+private enum class Filter { Working, Done, History }
+
+@Composable
+fun ActivityScreen(session: TowerSession, onOpen: (String) -> Unit) {
+    val jobs by session.jobs.collectAsStateWithLifecycle()
+    val history by session.history.collectAsStateWithLifecycle()
+    val acc = rememberAccounts(session)
+    var filter by rememberSaveable { mutableStateOf(Filter.Working) }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    val scope = rememberCoroutineScope()
+    var loading by remember { mutableStateOf(false) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(1000)
+            now = System.currentTimeMillis()
+        }
+    }
+    val working = jobs.filter { it.open }
+    val done = jobs.filterNot { it.open }
+
+    Column(Modifier.fillMaxSize()) {
+        Segments(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+            Segment("Working · ${working.size}", filter == Filter.Working) { filter = Filter.Working }
+            Segment("Done", filter == Filter.Done) { filter = Filter.Done }
+            Segment("History", filter == Filter.History) { filter = Filter.History }
+        }
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 4.dp, 16.dp, 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            when (filter) {
+                Filter.Working, Filter.Done -> {
+                    val list = if (filter == Filter.Working) working else done
+                    if (list.isEmpty()) item {
+                        Empty(
+                            if (filter == Filter.Working) "No work running" else "Nothing finished yet",
+                            if (filter == Filter.Working) "When the tower hands a session a job, it shows here with how long it's been going." else "Finished jobs show here with what they did.",
+                        )
+                    }
+                    items(list, key = { it.job.ifEmpty { "${it.session}${it.startedMs}" } }) { JobCard(it, now, acc) { onOpen(it.session) } }
+                }
+                Filter.History -> {
+                    val lines = history.filter { it.kind != "request" && it.kind != "answer" }.asReversed()
+                    if (lines.isEmpty()) item { Empty("Nothing yet", "What sessions report, alerts and summaries show here.") }
+                    var day = ""
+                    lines.forEach { e ->
+                        val d = dayLabel(e.at)
+                        if (d != day) {
+                            day = d
+                            item(key = "day$d") { Text(d, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.labelSmall, color = tc.faint) }
+                        }
+                        item(key = "h${e.at}${e.kind}${e.text.hashCode()}") { EventLine(e, acc, onOpen) }
+                    }
+                    if (history.isNotEmpty()) item {
+                        Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                            TextButton(enabled = !loading, onClick = {
+                                loading = true
+                                scope.launch {
+                                    session.loadOlder()
+                                    loading = false
+                                }
+                            }) { Text(if (loading) "Loading…" else "Earlier", color = tc.faint) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun Empty(title: String, text: String) {
+    Column(Modifier.fillMaxWidth().padding(top = 80.dp, start = 24.dp, end = 24.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Text(title, style = MaterialTheme.typography.titleMedium, color = tc.text)
+        Text(text, style = MaterialTheme.typography.bodyMedium, color = tc.muted)
+    }
+}
+
+/** A job, as the panel's job card: mark, what was asked, summary, how long, who, account. */
+@Composable
+fun JobCard(j: Job, now: Long, acc: AccountLookup, onClick: () -> Unit) {
+    val who = j.name.ifEmpty { j.session }
+    val color = tc.status(j.status)
+    val whenText = when (j.status) {
+        "working" -> "running ${span(now - j.startedMs)}"
+        "blocked" -> "waiting for you · ${span(now - j.startedMs)}"
+        else -> "${statusWord(j.status)} ${ago(j.updatedMs, now)} · took ${span(j.updatedMs - j.startedMs)}"
+    }
+    GlassCard(Modifier.fillMaxWidth(), onClick = onClick) {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Box(Modifier.width(16.dp), contentAlignment = Alignment.Center) {
+                    when (j.status) {
+                        "working" -> Dot(color)
+                        "blocked" -> Icon(Icons.Filled.Warning, null, Modifier.size(16.dp), tint = color)
+                        "done", "idle" -> Icon(Icons.Filled.CheckCircle, null, Modifier.size(16.dp), tint = color)
+                        else -> Icon(Icons.Filled.Error, null, Modifier.size(16.dp), tint = color)
+                    }
+                }
+                Text(j.asked.ifEmpty { "Work in $who" }, Modifier.weight(1f), style = MaterialTheme.typography.bodyLarge, fontWeight = FontWeight.Medium, color = tc.text, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            }
+            if (j.summary.isNotEmpty()) Text(j.summary, Modifier.padding(start = 24.dp), style = MaterialTheme.typography.bodyMedium, color = tc.text, maxLines = 6, overflow = TextOverflow.Ellipsis)
+            Row(Modifier.padding(start = 24.dp), horizontalArrangement = Arrangement.spacedBy(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                Text(whenText, style = MaterialTheme.typography.labelMedium, color = color)
+                Text(listOf(who, j.space).filter { it.isNotEmpty() }.joinToString(" · "), Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                (j.account ?: acc.of(j.session))?.let { AccountBadge(it, it == acc.default) }
+            }
+        }
+    }
+}
