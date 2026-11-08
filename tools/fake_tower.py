@@ -183,7 +183,7 @@ def whisper(wav):
         f.write(wav)
         f.flush()
         r = subprocess.run([cli, "-m", model, "-f", f.name, "-nt", "-np"], capture_output=True, text=True, timeout=30)
-    text = " ".join(r.stdout.split()).strip()
+    text = re.sub(r"\[[A-Z_ ]+\]|\((?:silence|music|noise)\)", "", " ".join(r.stdout.split()), flags=re.I).strip()
     print(f"transcribed: {text!r}", flush=True)
     return text
 

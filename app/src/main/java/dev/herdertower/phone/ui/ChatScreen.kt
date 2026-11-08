@@ -164,7 +164,9 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
         },
         inputBar = {
             // Questions left to the user stay in view above the input, until answered.
-            QuestionCards(QuestionModel.forUser(questions), onQuestion, Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp).heightIn(max = 260.dp).verticalScroll(rememberScrollState()), compact = true)
+            // A short screen (landscape, large text) keeps room for the input: the cards scroll in less.
+            val tall = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp >= 560
+            QuestionCards(QuestionModel.forUser(questions), onQuestion, Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp).heightIn(max = if (tall) 260.dp else 96.dp).verticalScroll(rememberScrollState()), compact = true)
             Column(
                 Modifier
                     .padding(horizontal = 12.dp, vertical = 10.dp)
@@ -301,14 +303,17 @@ fun ChatContent(
     val atTop by remember { androidx.compose.runtime.derivedStateOf { list.firstVisibleItemIndex == 0 && list.layoutInfo.totalItemsCount > 1 } }
     LaunchedEffect(atTop, canLoadMore, follow) { if (atTop && !follow && canLoadMore && rows.isNotEmpty()) onLoadOlder() }
 
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
-        Box(Modifier.fillMaxWidth().padding(top = 12.dp, start = 16.dp, end = 16.dp, bottom = 4.dp)) {
-            ClosePill(modifier = Modifier.align(Alignment.Center), onClick = onClose)
-        }
+    GlassScaffold(header = {
+        HeaderClose(onClose)
+        HeaderTitle("Conversation")
+        StopSlot()
+    }) {
+    Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth(),
             state = list,
-            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            // Under the header at first, scrolling under its glass after.
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = headerTop() + 8.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             item {
@@ -346,6 +351,7 @@ fun ChatContent(
             if (work != null) item(key = "working") { WorkingLine(work, now) }
         }
         inputBar()
+    }
     }
 }
 

@@ -249,7 +249,9 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
     val orbPhase = HomeModel.orbPhase(connected, state?.phase, phase is VoiceController.Phase.Recording, phase is VoiceController.Phase.Sending, playing)
     val needsYou = HomeModel.needsYou(connected, state?.phase, blocked)
 
-    CompositionLocalProvider(LocalSnack provides show) {
+    // The headers' Stop: shown the moment the tower talks, here or on the Mac.
+    val stop = StopState(talking = connected && (playing != null || state?.speaking == true || state?.announcing == true), onStop = { session.hush() })
+    CompositionLocalProvider(LocalSnack provides show, LocalStop provides stop) {
         Backdrop(orbPhase, needsYou) {
             AnimatedContent(
                 targetState = stack.last(),
@@ -278,12 +280,6 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
                     is Route.Screenshots -> ScreenshotsScreen(session, route.session, route.open, onBack = { back() })
                 }
             }
-            // The moment the tower speaks (here or on the Mac), one big Stop on every screen.
-            StopButton(
-                visible = connected && (playing != null || state?.speaking == true || state?.announcing == true),
-                onStop = { session.hush() },
-                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().imePadding().padding(bottom = 92.dp),
-            )
             SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp))
         }
         if (menu) {
@@ -503,29 +499,3 @@ fun ConnectionNotice(link: Link, session: TowerSession, onRepair: () -> Unit, mo
     }
 }
 
-/** Stops the tower talking: quiet here at once, the Mac told too. */
-@Composable
-fun StopButton(visible: Boolean, onStop: () -> Unit, modifier: Modifier = Modifier) {
-    val reduce = LocalReduceMotion.current
-    androidx.compose.animation.AnimatedVisibility(
-        visible = visible,
-        modifier = modifier,
-        enter = if (reduce) EnterTransition.None else fadeIn(tween(160)) + scaleIn(tween(160), initialScale = 0.85f),
-        exit = if (reduce) ExitTransition.None else fadeOut(tween(220)),
-    ) {
-        Row(
-            Modifier
-                .shadow(12.dp, CircleShape)
-                .clip(CircleShape)
-                .background(tc.text)
-                .clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = "Stop the tower talking", onClick = onStop)
-                .heightIn(min = 56.dp)
-                .padding(start = 18.dp, end = 24.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            Icon(Icons.Filled.Stop, null, Modifier.size(28.dp), tint = tc.bgTop)
-            Spacer(Modifier.width(8.dp))
-            Text("Stop", style = MaterialTheme.typography.titleMedium, color = tc.bgTop, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
-        }
-    }
-}

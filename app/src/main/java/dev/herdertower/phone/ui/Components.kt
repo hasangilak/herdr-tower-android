@@ -248,9 +248,12 @@ fun SubHeader(title: String, subtitle: String? = null, onBack: () -> Unit) {
     ) {
         RoundIcon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack, "Back", onClick = onBack)
         androidx.compose.foundation.layout.Spacer(Modifier.size(14.dp))
-        androidx.compose.foundation.layout.Column {
+        androidx.compose.foundation.layout.Column(Modifier.weight(1f, fill = false)) {
             Text(title, style = MaterialTheme.typography.headlineMedium, color = tc.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
             subtitle?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         }
+        // Stop stays reachable on every screen while the tower talks.
+        androidx.compose.foundation.layout.Spacer(Modifier.weight(1f))
+        StopSlot()
     }
 }

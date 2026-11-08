@@ -217,28 +217,32 @@ fun HomeContent(
     onMenu: () -> Unit,
     onChat: () -> Unit,
 ) {
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
-        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
-            // Greeting
-            Row(Modifier.fillMaxWidth().padding(start = 24.dp, end = 20.dp, top = 16.dp), verticalAlignment = Alignment.CenterVertically) {
-                Box {
-                    OrbGlyph(Modifier.padding(5.dp).size(34.dp).semantics { contentDescription = if (ui.connected) "Tower, connected" else "Tower, not connected" })
-                    Dot(if (ui.connected) tc.working else tc.idle, 10.dp, Modifier.align(Alignment.BottomEnd).border(2.dp, tc.bgTop, CircleShape))
-                }
-                Spacer(Modifier.width(12.dp))
-                Column(Modifier.weight(1f)) {
-                    Text("${ui.greeting} · ${ui.towerName}", style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                    Text(
-                        ui.needsLine.replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodyLarge, color = tc.text,
-                        fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
-                    )
-                }
-                RoundIcon(Icons.Filled.Notifications, "Activity", badge = ui.alerts, onClick = onAlerts)
-                Spacer(Modifier.width(10.dp))
-                RoundIcon(Icons.Filled.Menu, "Menu", onClick = onMenu)
+    GlassScaffold(header = {
+        // The tower, how it is: where the other screens have Close.
+        Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
+            OrbGlyph(Modifier.size(34.dp).semantics { contentDescription = if (ui.connected) "Tower, connected" else "Tower, not connected" })
+            Dot(if (ui.connected) tc.working else tc.idle, 10.dp, Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp).border(2.dp, tc.bgTop, CircleShape))
+        }
+        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.weight(1f).padding(horizontal = 6.dp)) {
+            // Narrow (a small phone, large text, Stop showing): what matters only, on two lines.
+            val roomy = maxWidth >= 150.dp
+            Column {
+                if (roomy) Text("${ui.greeting} · ${ui.towerName}", style = MaterialTheme.typography.bodySmall, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Text(
+                    ui.needsLine.replaceFirstChar { it.uppercase() }, style = if (roomy) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.bodyMedium, color = tc.text,
+                    fontWeight = FontWeight.Medium, maxLines = if (roomy) 1 else 2, overflow = TextOverflow.Ellipsis,
+                )
             }
+        }
+        HeaderButton(Icons.Filled.Notifications, "Activity", badge = ui.alerts, onClick = onAlerts)
+        HeaderButton(Icons.Filled.Menu, "Menu", onClick = onMenu)
+        StopSlot()
+    }) {
+    Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
+        Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
+            Spacer(Modifier.height(headerTop()))
             Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) { notice() }
-            Spacer(Modifier.height(64.dp))
+            Spacer(Modifier.height(40.dp))
             Text(
                 "What should the tower do?",
                 Modifier.padding(horizontal = 24.dp).semantics { heading() },
@@ -283,6 +287,7 @@ fun HomeContent(
             Spacer(Modifier.height(16.dp))
         }
         askBox()
+    }
     }
 }
 

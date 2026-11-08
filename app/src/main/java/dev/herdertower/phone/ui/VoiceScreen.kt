@@ -138,15 +138,18 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
         else -> "Hold the button and talk, or tap it once." to 0f
     }
 
-    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
-        Box(Modifier.fillMaxWidth().padding(top = 12.dp, start = 16.dp, end = 16.dp)) {
-            ClosePill(modifier = Modifier.align(Alignment.Center)) {
-                if (recording) voice.cancel()
-                onClose()
-            }
-            RouteToggle(session, Modifier.align(Alignment.CenterEnd))
-            RoundIcon(Icons.Filled.Forum, "Conversation", Modifier.align(Alignment.CenterStart), size = 40.dp, onClick = onChat)
+    GlassScaffold(header = {
+        HeaderClose {
+            if (recording) voice.cancel()
+            onClose()
         }
+        Spacer(Modifier.weight(1f))
+        HeaderButton(Icons.Filled.Forum, "Conversation", onClick = onChat)
+        Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) { RouteToggle(session, size = 40.dp) }
+        StopSlot()
+    }) {
+    Column(Modifier.fillMaxSize().navigationBarsPadding(), horizontalAlignment = Alignment.CenterHorizontally) {
+        Spacer(Modifier.height(headerTop()))
         Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {
             TowerOrb(
                 orbPhase,
@@ -173,6 +176,7 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
             Spacer(Modifier.weight(1f))
             SmallRound(Icons.Filled.ArrowUpward, "Send what you said", enabled = recording) { voice.toggle() }
         }
+    }
     }
 }
 

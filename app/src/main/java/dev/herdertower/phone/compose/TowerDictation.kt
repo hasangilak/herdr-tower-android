@@ -61,7 +61,7 @@ class TowerDictation(private val session: TowerSession) : DictationEngine {
                     val ms = t.durationMs
                     if (!t.heardSpeech || ms < 700 || ms - sentMs < 600) continue
                     sentMs = ms
-                    session.act { it.transcribe(t.snapshot()) }.onSuccess { r -> if (r.heard.isNotBlank()) onText(r.heard) }
+                    session.act { it.transcribe(t.snapshot()) }.onSuccess { r -> dev.herdertower.phone.voice.VoiceController.clean(r.heard).takeIf { it.isNotBlank() }?.let(onText) }
                 }
             }
             val reason = t.ended.await()
@@ -92,7 +92,7 @@ class TowerDictation(private val session: TowerSession) : DictationEngine {
                 _error.value = "Didn't hear anything."
             }
             wav != null && t.durationMs >= 300 -> session.act { it.transcribe(wav) }
-                .onSuccess { r -> if (r.heard.isNotBlank()) onText(r.heard) else _error.value = "Didn't catch that." }
+                .onSuccess { r -> dev.herdertower.phone.voice.VoiceController.clean(r.heard).let { if (it.isNotBlank()) onText(it) else _error.value = "Didn't catch that." } }
                 .onFailure { _error.value = "Couldn't transcribe: ${TowerSession.describe(it)}" }
         }
         _active.value = false

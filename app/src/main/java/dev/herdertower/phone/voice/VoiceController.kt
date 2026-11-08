@@ -160,7 +160,7 @@ class VoiceController(private val session: TowerSession) {
             session.act { it.voice(wav) }
                 .onSuccess { r ->
                     if (r.sent) session.linger()
-                    _heard.value = Heard(r.heard, r.sent, System.currentTimeMillis())
+                    _heard.value = Heard(clean(r.heard), r.sent, System.currentTimeMillis())
                     if (!r.sent && r.heard.isBlank()) _error.value = "The Mac heard nothing it could send."
                 }
                 .onFailure { _error.value = TowerSession.describe(it) }
@@ -168,9 +168,11 @@ class VoiceController(private val session: TowerSession) {
         }
     }
 
-    private companion object {
-        const val TAP_MS = 350L
-        const val MIN_MS = 300L
+    companion object {
+        /** Whisper's markers for no speech ("[BLANK_AUDIO]", "(silence)") aren't words. */
+        fun clean(heard: String): String = heard.replace(Regex("""\[[A-Z_ ]+]|\((?:silence|music|noise)\)""", RegexOption.IGNORE_CASE), "").trim()
+        private const val TAP_MS = 350L
+        private const val MIN_MS = 300L
     }
 }
 
