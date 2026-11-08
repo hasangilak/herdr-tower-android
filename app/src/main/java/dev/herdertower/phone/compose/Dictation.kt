@@ -11,27 +11,26 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 
 /**
- * Dictation into the draft with the phone's own speech recognizer: the
- * words appear as you say them, then stay in the input to edit, and nothing
- * is sent until you send it. (The tower's `POST /v1/voice` sends what it
- * hears at once, so it can't be used for this.)
+ * Dictation with the phone's own speech recognizer, for when the tower
+ * isn't reachable (otherwise [TowerDictation] uses the Mac's Whisper): the
+ * words appear as you say them, then stay in the input to edit.
  */
-class Dictation(private val context: Context) {
+class Dictation(private val context: Context) : DictationEngine {
     private val _active = MutableStateFlow(false)
-    val active: StateFlow<Boolean> = _active.asStateFlow()
+    override val active: StateFlow<Boolean> = _active.asStateFlow()
 
     private val _level = MutableStateFlow(0f)
-    val level: StateFlow<Float> = _level.asStateFlow()
+    override val level: StateFlow<Float> = _level.asStateFlow()
 
     private val _error = MutableStateFlow<String?>(null)
-    val error: StateFlow<String?> = _error.asStateFlow()
+    override val error: StateFlow<String?> = _error.asStateFlow()
 
     private var recognizer: SpeechRecognizer? = null
 
     val available: Boolean get() = SpeechRecognizer.isRecognitionAvailable(context)
 
     /** Starts listening; [onText] gets the whole dictation so far each time it grows. Call on the main thread. */
-    fun start(onText: (String) -> Unit) {
+    override fun start(onText: (String) -> Unit) {
         stop()
         _error.value = null
         if (!available) {
@@ -82,7 +81,7 @@ class Dictation(private val context: Context) {
         r.startListening(intent)
     }
 
-    fun stop() {
+    override fun stop() {
         recognizer?.let {
             runCatching { it.stopListening() }
             runCatching { it.destroy() }

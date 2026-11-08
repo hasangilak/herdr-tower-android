@@ -52,8 +52,9 @@ adb shell am start -a android.intent.action.VIEW -d '"<the link>"' dev.herdertow
 
 Writing is as good as talking. Home and Chat share one draft. It is saved on every change, so it survives rotation, switching apps, the process being killed, and going to the voice screen and back.
 - On a hardware keyboard, Enter sends and Shift+Enter starts a new line. The keyboard's Send action sends too.
-- Pictures come from ＋ (the photo picker, several at once, or the camera), or are pasted or inserted from the keyboard. Each becomes an `[Image #N]` token where you were typing, with a thumbnail above. Remove a thumbnail and its token goes; delete a token and the picture goes. They go with the text as multipart `POST /v1/ask` (six at most; HEIC or very large photos are re-encoded as JPEG).
-- Dictate (the small mic) puts what you say into the draft as you say it, after what's there, to edit before sending. It uses the phone's own speech recognizer, because `POST /v1/voice` sends what it hears at once.
+- Files come from ＋: Photos and videos (the photo picker, several at once), Files (anything: PDF, text, …), or Camera. They can also be pasted or inserted from the keyboard. Each becomes the panel's token where you were typing (`[Image #N]`, `[Video #N]`, `[File #N: name]`), with a thumbnail or file card above. Remove one and its token goes; delete a token and the file goes. They go with the text as multipart `POST /v1/ask`, streamed from disk: six at most, pictures 15 MB (HEIC or very large photos are re-encoded as JPEG), videos and files 50 MB.
+- Dictate (the small mic) puts what you say into the draft as you say it, after what's there, to edit before sending. While connected it uses the tower's Whisper: the take so far goes to `POST /v1/transcribe` about once a second (one request at a time, only once speech is heard), and the whole take once more at the end. Offline it falls back to the phone's own recognizer.
+- Sent pictures show in your bubbles (`GET /v1/attachments/…`) and open in the zoomable viewer; videos and files show by name. While the brain works, the chat's working line shows its step and the turn's time (`work` in the state).
 - The round button sends when there's a draft and talks to the tower when there isn't.
 
 ## The look

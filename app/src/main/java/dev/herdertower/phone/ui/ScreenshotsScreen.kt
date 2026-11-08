@@ -161,16 +161,30 @@ fun ShotStrip(session: TowerSession, shots: List<Screenshot>, onOpen: (Screensho
     }
 }
 
-/** Full screen: swipe between images, pinch or double-tap to zoom, a clear Close. */
+/** A picture the viewer can show: a key, words under it, and how to load it at a size. */
+class Pic(val key: String, val caption: String, val meta: String, val load: suspend (Int) -> androidx.compose.ui.graphics.ImageBitmap?)
+
+/** Screenshots in the viewer. */
 @Composable
 fun ShotViewer(session: TowerSession, shots: List<Screenshot>, start: Int, onClose: () -> Unit) {
+    val pics = remember(shots) {
+        shots.map { s ->
+            Pic(s.id, s.caption, listOfNotNull(s.who.ifBlank { null }, s.space, "${clock(s.at)} · ${dayLabel(s.at)}").joinToString(" · ")) { side -> session.images.load(s, side) }
+        }
+    }
+    PicViewer(pics, start, onClose)
+}
+
+/** Full screen: swipe between pictures, pinch or double-tap to zoom, a clear Close. */
+@Composable
+fun PicViewer(shots: List<Pic>, start: Int, onClose: () -> Unit) {
     val pager = rememberPagerState(initialPage = start) { shots.size }
     var zoomed by remember { mutableStateOf(false) }
     BackHandler(onBack = onClose)
     Box(Modifier.fillMaxSize().background(Color.Black)) {
         // The image sits between the top bar and the caption; zoomed, it may cover them.
-        HorizontalPager(pager, Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(top = 64.dp, bottom = 96.dp), userScrollEnabled = !zoomed, key = { shots[it].id }) { page ->
-            ZoomableShot(session, shots[page], onZoom = { if (page == pager.currentPage) zoomed = it })
+        HorizontalPager(pager, Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().padding(top = 64.dp, bottom = 96.dp), userScrollEnabled = !zoomed, key = { shots[it].key }) { page ->
+            ZoomableShot(shots[page], onZoom = { if (page == pager.currentPage) zoomed = it })
         }
         val s = shots.getOrNull(pager.currentPage)
         Box(
@@ -199,16 +213,16 @@ fun ShotViewer(session: TowerSession, shots: List<Screenshot>, start: Int, onClo
                 verticalArrangement = Arrangement.spacedBy(4.dp),
             ) {
                 if (s.caption.isNotBlank()) Text(s.caption, style = MaterialTheme.typography.bodyLarge, color = Color.White, maxLines = 3, overflow = TextOverflow.Ellipsis)
-                Text(listOfNotNull(s.who.ifBlank { null }, s.space, "${clock(s.at)} · ${dayLabel(s.at)}").joinToString(" · "), style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.75f))
+                if (s.meta.isNotBlank()) Text(s.meta, style = MaterialTheme.typography.labelMedium, color = Color.White.copy(alpha = 0.75f))
             }
         }
     }
 }
 
 @Composable
-private fun ZoomableShot(session: TowerSession, s: Screenshot, onZoom: (Boolean) -> Unit) {
+private fun ZoomableShot(s: Pic, onZoom: (Boolean) -> Unit) {
     val maxSide = with(LocalDensity.current) { 2400.dp.toPx().toInt().coerceAtMost(3200) }
-    val img by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, s.id) { value = session.images.load(s, maxSide) }
+    val img by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, s.key) { value = s.load(maxSide) }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var size by remember { mutableStateOf(IntSize.Zero) }
@@ -226,7 +240,7 @@ private fun ZoomableShot(session: TowerSession, s: Screenshot, onZoom: (Boolean)
     Box(
         Modifier
             .fillMaxSize()
-            .pointerInput(s.id) {
+            .pointerInput(s.key) {
                 size = this.size
                 // Pinch to zoom, and drag while zoomed; one finger at 1x is left to the pager.
                 awaitEachGesture {
@@ -240,7 +254,7 @@ private fun ZoomableShot(session: TowerSession, s: Screenshot, onZoom: (Boolean)
                     } while (event.changes.any { it.pressed })
                 }
             }
-            .pointerInput(s.id) {
+            .pointerInput(s.key) {
                 detectTapGestures(onDoubleTap = { p ->
                     if (scale > 1f) set(1f, Offset.Zero)
                     else set(2.5f, Offset((size.width / 2f - p.x) * 1.5f, (size.height / 2f - p.y) * 1.5f))
@@ -253,7 +267,7 @@ private fun ZoomableShot(session: TowerSession, s: Screenshot, onZoom: (Boolean)
             CircularProgressIndicator(color = Color.White)
         } else {
             Image(
-                i, s.caption.ifBlank { "Screenshot" },
+                i, s.caption.ifBlank { "Picture" },
                 Modifier.fillMaxSize().graphicsLayer {
                     scaleX = scale
                     scaleY = scale

@@ -29,13 +29,18 @@ class Images(private val session: TowerSession) {
 
     private fun lock(id: String) = synchronized(locks) { locks.getOrPut(id) { Mutex() } }
 
-    /** The image at most [maxSide] pixels on its longer side, or null when it can't be had. */
-    suspend fun load(shot: Screenshot, maxSide: Int): ImageBitmap? {
-        val key = "${shot.id}@$maxSide"
+    /** A screenshot at most [maxSide] pixels on its longer side, or null when it can't be had. */
+    suspend fun load(shot: Screenshot, maxSide: Int): ImageBitmap? = load("shot:${shot.id}", maxSide) { it.screenshotImage(shot) }
+
+    /** A picture sent with a message, from its path on the Mac. */
+    suspend fun loadAttachment(path: String, maxSide: Int): ImageBitmap? = load("att:$path", maxSide) { it.attachmentImage(path) }
+
+    private suspend fun load(id: String, maxSide: Int, fetch: suspend (dev.herdertower.phone.api.TowerClient) -> ByteArray): ImageBitmap? {
+        val key = "$id@$maxSide"
         decoded.get(key)?.let { return it.asImageBitmap() }
-        return lock(shot.id).withLock {
+        return lock(id).withLock {
             decoded.get(key)?.let { return@withLock it.asImageBitmap() }
-            val data = raw.get(shot.id) ?: session.act { it.screenshotImage(shot) }.getOrNull()?.also { raw.put(shot.id, it) } ?: return@withLock null
+            val data = raw.get(id) ?: session.act { fetch(it) }.getOrNull()?.also { raw.put(id, it) } ?: return@withLock null
             val bmp = withContext(Dispatchers.Default) { decode(data, maxSide) } ?: return@withLock null
             decoded.put(key, bmp)
             bmp.asImageBitmap()

@@ -41,4 +41,22 @@ object ChatModel {
 
     /** What the working line says while the brain thinks: the panel's words, turning over every 3 s. */
     fun thinkingWord(elapsedMs: Long): String = listOf("Thinking", "Considering", "Working it out")[((elapsedMs / 3000) % 3).toInt()]
+
+    /**
+     * The working line's words for the brain's [work], as the panel's
+     * `working_line`: the step ("Delegating", "to orb-rust"), or the turning
+     * thinking words when it's plain thinking or a step finished over 3 s ago.
+     */
+    fun workLine(work: dev.herdertower.phone.api.Work, now: Long): Pair<String, String> {
+        val elapsed = (now - work.sinceMs).coerceAtLeast(0)
+        val thinking = (work.word == "Thinking" && work.detail.isEmpty()) || (work.doneMs > 0 && now - work.doneMs > 3000)
+        return if (thinking || work.word.isBlank()) thinkingWord(elapsed) to "" else work.word to work.detail
+    }
+
+    /** Whether the working line shows: a turn under way, not answered yet, under half an hour old (as the panel). */
+    fun showWork(work: dev.herdertower.phone.api.Work?, entries: List<HistoryEntry>, now: Long): Boolean =
+        work != null && now - work.sinceMs < 30 * 60 * 1000 && entries.asReversed().take(20).none { it.kind == "answer" && it.at >= work.sinceMs }
+
+    /** Pictures are shown; videos and other files by name. */
+    fun isPicture(path: String) = path.substringAfterLast('.', "").lowercase() in setOf("png", "jpg", "jpeg", "webp", "gif")
 }

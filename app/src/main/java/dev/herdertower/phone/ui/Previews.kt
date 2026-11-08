@@ -43,7 +43,7 @@ private fun HomePreview(mode: String) = TowerTheme(mode) {
 private fun ChatPreview(mode: String) = TowerTheme(mode) {
     Backdrop("thinking", needsYou = false) {
         ChatContent(
-            sampleChat, working = true, workingSince = now - 15_000, accounts = AccountLookup(mapOf("t3" to "eyz"), "main"),
+            sampleChat, work = dev.herdertower.phone.api.Work("Delegating", "to api", now - 15_000, now - 4_000, 0), now = now, accounts = AccountLookup(mapOf("t3" to "eyz"), "main"),
             onClose = {}, onLoadOlder = {}, onOpen = {}, inputBar = { AskBox(field = { androidx.compose.material3.Text("Ask the tower", color = tc.faint) }) },
         )
     }

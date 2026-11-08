@@ -29,6 +29,24 @@ class DraftTokensTest {
         assertEquals(mapOf(3 to 1, 1 to 2), map)
     }
 
+    @Test fun videosAndFilesHaveThePanelsTokens() {
+        assertEquals("[Video #2]", DraftTokens.token(2, Kind.Video))
+        assertEquals("[File #3: notes.pdf]", DraftTokens.token(3, Kind.File, "notes.pdf"))
+        val text = "see [File #3: notes #1.pdf] and [Video #2] and [Image #1]"
+        assertEquals(listOf(3, 2, 1), DraftTokens.numbers(text))
+        assertEquals("see [File #1: notes #1.pdf] and [Video #2] and [Image #3]", DraftTokens.renumber(text).first)
+        assertEquals("see and [Video #2] and [Image #1]", DraftTokens.remove(text, 3))
+        assertEquals("look [File #1: a.pdf] " to 22, DraftTokens.insert("look", 4, 1, Kind.File, "a.pdf"))
+    }
+
+    @Test fun filesAreSortedIntoKinds() {
+        assertEquals(Kind.Video, Composer.Files.kind("video/mp4", "clip.mp4"))
+        assertEquals(Kind.Video, Composer.Files.kind("", "screen.MOV"))
+        assertEquals(Kind.Image, Composer.Files.kind("image/heic", "IMG_1.HEIC"))
+        assertEquals(Kind.File, Composer.Files.kind("application/pdf", "spec.pdf"))
+        assertEquals("a_b_c.txt", Composer.Files.safeName("a/b\\c.txt").replace("__", "_"))
+    }
+
     @Test fun picturesAreKnownByTheirBytes() {
         val png = byteArrayOf(0x89.toByte(), 'P'.code.toByte(), 'N'.code.toByte(), 'G'.code.toByte(), 13, 10, 26, 10)
         assertEquals("image/png", Composer.Images.sniff(png))

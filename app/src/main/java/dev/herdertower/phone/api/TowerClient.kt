@@ -21,6 +21,7 @@ import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
 import okhttp3.RequestBody
+import okhttp3.RequestBody.Companion.asRequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
 import okhttp3.Response
 import java.io.IOException
@@ -67,6 +68,9 @@ class TowerClient(
 
     /** Voice uploads wait for the transcription. */
     private val slow: OkHttpClient = http.newBuilder().readTimeout(60, TimeUnit.SECONDS).build()
+
+    /** Files up to 6 x 50 MB: give the upload time on a slow network. */
+    private val upload: OkHttpClient = http.newBuilder().writeTimeout(5, TimeUnit.MINUTES).readTimeout(2, TimeUnit.MINUTES).build()
 
     private fun url(vararg segments: String, query: Map<String, String?> = emptyMap()): HttpUrl {
         val b = HttpUrl.Builder().scheme("https").host(endpoint.host).port(endpoint.port).addPathSegment("v1")
@@ -146,23 +150,39 @@ class TowerClient(
     suspend fun ask(text: String): AskResponse = post(AskResponse.serializer(), json(AskRequest.serializer(), AskRequest(text)), "ask")
 
     /**
-     * `POST /v1/ask` with pictures: multipart, a `text` field and one `image`
-     * part per picture (in token order; the tower saves them on the Mac and
-     * passes their paths after the text, `[Image #N]` marking each).
+     * `POST /v1/ask` with files: multipart, a `text` field and one part per
+     * file (`image` for pictures, `file` for videos and others), in token
+     * order. The tower saves them on the Mac and passes their paths after the
+     * text, `[Image #N]`, `[Video #N]` or `[File #N: name]` marking each.
      */
-    suspend fun ask(text: String, images: List<ImagePart>): AskResponse {
-        if (images.isEmpty()) return ask(text)
+    suspend fun ask(text: String, files: List<FilePart>): AskResponse {
+        if (files.isEmpty()) return ask(text)
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("text", text)
-            .apply { images.forEach { addFormDataPart("image", it.name, it.bytes.toRequestBody(it.mime.toMediaType())) } }
+            .apply { files.forEach { addFormDataPart(if (it.isImage) "image" else "file", it.name, partBody(it)) } }
             .build()
         return try {
-            post(AskResponse.serializer(), body, "ask", client = slow)
+            post(AskResponse.serializer(), body, "ask", client = upload)
         } catch (e: TowerApiException) {
-            // A tower from before pictures reads the multipart body as empty JSON.
-            if (e.status == 400 && e.code in setOf("empty", "bad_json")) throw TowerApiException(400, "no_images", "This tower can't take pictures yet: it needs the update that adds images to POST /v1/ask.")
+            // A tower from before files reads the multipart body as empty JSON.
+            if (e.status == 400 && e.code in setOf("empty", "bad_json")) throw TowerApiException(400, "no_images", "This tower can't take files yet: it needs the update that adds them to POST /v1/ask.")
             throw e
         }
+    }
+
+    private fun partBody(f: FilePart): RequestBody {
+        val type = f.mime.toMediaType()
+        return f.file?.asRequestBody(type) ?: (f.bytes ?: ByteArray(0)).toRequestBody(type)
+    }
+
+    /** `POST /v1/transcribe`: what the Mac hears in a recording, sent nowhere (dictation into the text box). */
+    suspend fun transcribe(wav: ByteArray): VoiceResult = post(VoiceResult.serializer(), wav.toRequestBody(WAV), "transcribe", client = slow)
+
+    /** `GET /v1/attachments/{folder}/{name}`: a picture sent with a message, from its path on the Mac. */
+    suspend fun attachmentImage(path: String): ByteArray {
+        val parts = path.trimEnd('/').split('/')
+        require(parts.size >= 2) { "not an attachment path" }
+        return bytes("", listOf("attachments", parts[parts.size - 2], parts.last()), "image/*")
     }
 
     suspend fun answer(address: String, approve: Boolean, note: String? = null) {

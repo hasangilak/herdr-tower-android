@@ -39,6 +39,9 @@ import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Image
+import androidx.compose.material.icons.filled.PlayCircle
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.runtime.produceState
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NorthEast
@@ -98,14 +101,25 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
     val composer = context.tower.composer
     val actions = rememberComposerActions(composer, onTalk = onVoice)
     val thinking = link is Link.Live && (state?.phase == "thinking" || state?.phase == "transcribing")
-    // When the brain began this turn (the API doesn't say: from when the phone saw it start).
+    // A tower from before `work`: the phone times the turn from when it saw it start.
     var since by remember { mutableLongStateOf(0L) }
     LaunchedEffect(thinking) { since = if (thinking) System.currentTimeMillis() else 0L }
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            now = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1000)
+        }
+    }
+    val work = state?.work?.takeIf { link is Link.Live && ChatModel.showWork(it, history, now) }
+        ?: if (thinking && since > 0) dev.herdertower.phone.api.Work("Thinking", "", since, since, 0) else null
+    var viewing by remember { mutableStateOf<Pair<List<Pic>, Int>?>(null) }
 
+    Box(Modifier.fillMaxSize()) {
     ChatContent(
         entries = history,
-        working = thinking,
-        workingSince = since,
+        work = work,
+        now = now,
         accounts = acc,
         onClose = onClose,
         onLoadOlder = { scope.launch { if (session.loadOlder() == 0) snack("That's everything.") } },
@@ -120,6 +134,9 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
                 }
             }.distinctBy { it.id }
             if (found.isNotEmpty()) ShotStrip(session, found) { onShot(it.id) }
+        },
+        sentFiles = { e ->
+            SentFiles(session, e) { pics, i -> viewing = pics to i }
         },
         inputBar = {
             Column(
@@ -145,6 +162,48 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
             }
         },
     )
+    viewing?.let { (pics, i) -> PicViewer(pics, i) { viewing = null } }
+    }
+}
+
+/** The files sent with a message: its pictures (from `GET /v1/attachments/…`), videos and files by name. */
+@Composable
+private fun SentFiles(session: TowerSession, e: HistoryEntry, onOpen: (List<Pic>, Int) -> Unit) {
+    val pictures = e.attachments.filter(ChatModel::isPicture)
+    val pics = remember(e.attachments) {
+        pictures.mapIndexed { i, path ->
+            Pic("att:$path", path.substringAfterLast('/').substringAfter('-'), "Sent ${clock(e.at)} · ${dayLabel(e.at)}") { side -> session.images.loadAttachment(path, side) }
+        }
+    }
+    Column(Modifier.padding(top = 8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+        if (pictures.isNotEmpty()) {
+            Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                pictures.forEachIndexed { i, path ->
+                    val img by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, path) { value = session.images.loadAttachment(path, 360) }
+                    Box(
+                        Modifier.size(if (pictures.size == 1) 180.dp else 88.dp).clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.18f))
+                            .clickable(role = Role.Button, onClickLabel = "View picture ${i + 1}") { onOpen(pics, i) }
+                            .semantics { contentDescription = "Picture ${i + 1} you sent" },
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        img?.let { androidx.compose.foundation.Image(it, null, Modifier.fillMaxSize(), contentScale = androidx.compose.ui.layout.ContentScale.Crop) }
+                            ?: Icon(Icons.Filled.Image, null, Modifier.size(22.dp), tint = tc.onBubble)
+                    }
+                }
+            }
+        }
+        e.attachments.filterNot(ChatModel::isPicture).forEach { path ->
+            val name = path.substringAfterLast('/').substringAfter('-')
+            val video = path.substringAfterLast('.', "").lowercase() in setOf("mov", "mp4", "m4v", "webm", "mkv", "avi")
+            Row(
+                Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.18f)).padding(horizontal = 10.dp, vertical = 6.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(if (video) Icons.Filled.PlayCircle else Icons.Filled.Description, null, Modifier.size(16.dp), tint = tc.onBubble)
+                Text(" $name", style = MaterialTheme.typography.labelMedium, color = tc.onBubble, maxLines = 1)
+            }
+        }
+    }
 }
 
 /** The screenshot a history entry announces. */
@@ -156,8 +215,8 @@ fun shotOf(e: HistoryEntry) = dev.herdertower.phone.api.Screenshot(
 @Composable
 fun ChatContent(
     entries: List<HistoryEntry>,
-    working: Boolean,
-    workingSince: Long,
+    work: dev.herdertower.phone.api.Work?,
+    now: Long,
     accounts: AccountLookup,
     onClose: () -> Unit,
     onLoadOlder: () -> Unit,
@@ -165,6 +224,7 @@ fun ChatContent(
     onShot: (String) -> Unit = {},
     thumb: @Composable (HistoryEntry, Modifier) -> Unit = { _, _ -> },
     replyShots: @Composable (List<ChatModel.ShotRef>, Modifier) -> Unit = { _, _ -> },
+    sentFiles: @Composable (HistoryEntry) -> Unit = {},
     inputBar: @Composable () -> Unit,
 ) {
     val list = rememberLazyListState()
@@ -181,6 +241,7 @@ fun ChatContent(
             }
         }
     }
+    val working = work != null
     LaunchedEffect(rows.size, working) { if (rows.isNotEmpty()) list.animateScrollToItem(rows.size + (if (working) 1 else 0)) }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
@@ -212,14 +273,14 @@ fun ChatContent(
                         Text(r.label, style = MaterialTheme.typography.labelSmall, color = tc.faint)
                     }
                     is ChatRow.Item -> when (r.e.kind) {
-                        "request" -> UserBubble(r.e)
+                        "request" -> UserBubble(r.e, sentFiles)
                         "answer" -> ReplyBubble(r.e, replyShots)
                         "screenshot" -> if (r.e.id != null) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
                         else -> EventLine(r.e, accounts, onOpen)
                     }
                 }
             }
-            if (working) item { WorkingLine(workingSince) }
+            if (work != null) item { WorkingLine(work, now) }
         }
         inputBar()
     }
@@ -227,7 +288,7 @@ fun ChatContent(
 
 /** What you said: warm copper, on the right. */
 @Composable
-fun UserBubble(e: HistoryEntry) {
+fun UserBubble(e: HistoryEntry, files: @Composable (HistoryEntry) -> Unit = {}) {
     val voice = e.text.startsWith("[voice] ")
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Column(
@@ -239,20 +300,7 @@ fun UserBubble(e: HistoryEntry) {
                 .padding(horizontal = 18.dp, vertical = 12.dp),
         ) {
             Text(e.text.removePrefix("[voice] "), style = MaterialTheme.typography.bodyLarge, color = tc.onBubble)
-            if (e.attachments.isNotEmpty()) {
-                Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    e.attachments.forEachIndexed { i, path ->
-                        Row(
-                            Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.18f)).padding(horizontal = 8.dp, vertical = 4.dp)
-                                .semantics { contentDescription = "Attached: ${path.substringAfterLast('/')}" },
-                            verticalAlignment = Alignment.CenterVertically,
-                        ) {
-                            Icon(Icons.Filled.Image, null, Modifier.size(14.dp), tint = tc.onBubble)
-                            Text(" #${i + 1}", style = MaterialTheme.typography.labelSmall, color = tc.onBubble)
-                        }
-                    }
-                }
-            }
+            if (e.attachments.isNotEmpty()) files(e)
             Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                 if (voice) Icon(Icons.Filled.Mic, "spoken", Modifier.size(12.dp), tint = tc.onBubble.copy(alpha = 0.8f))
                 Text(" " + clock(e.at), style = MaterialTheme.typography.labelSmall, color = tc.onBubble.copy(alpha = 0.85f))
@@ -283,26 +331,22 @@ fun ReplyBubble(e: HistoryEntry, shots: @Composable (List<ChatModel.ShotRef>, Mo
     }
 }
 
-/** While the brain works: the panel's turning words and how long it's been. */
+/** While the brain works: its step ("Delegating to orb-rust") and how long the turn has taken, as the panel's working line. */
 @Composable
-private fun WorkingLine(since: Long) {
+private fun WorkingLine(work: dev.herdertower.phone.api.Work, now: Long) {
     val reduce = LocalReduceMotion.current
-    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(since) {
-        while (true) {
-            now = System.currentTimeMillis()
-            kotlinx.coroutines.delay(1000)
-        }
-    }
-    val elapsed = if (since > 0) now - since else 0L
+    val (word, detail) = ChatModel.workLine(work, now)
+    val elapsed = (now - work.sinceMs).coerceAtLeast(0)
     val a = if (reduce) 1f else rememberInfiniteTransition(label = "working").animateFloat(0.35f, 1f, infiniteRepeatable(tween(1100), RepeatMode.Reverse), label = "a").value
     Row(
-        Modifier.clip(RoundedCornerShape(18.dp)).background(tc.reply).border(1.dp, tc.edge, RoundedCornerShape(18.dp)).padding(horizontal = 14.dp, vertical = 10.dp),
+        Modifier.clip(RoundedCornerShape(18.dp)).background(tc.reply).border(1.dp, tc.edge, RoundedCornerShape(18.dp)).padding(horizontal = 14.dp, vertical = 10.dp)
+            .semantics { contentDescription = "The tower: ${if (detail.isEmpty()) word else "$word $detail"}, ${span(elapsed)}" },
         verticalAlignment = Alignment.CenterVertically,
     ) {
         OrbGlyph(Modifier.size(18.dp).alpha(a))
         Spacer(Modifier.width(10.dp))
-        Text("${ChatModel.thinkingWord(elapsed)}…", style = MaterialTheme.typography.bodyMedium, color = tc.text)
+        Text(if (detail.isEmpty()) "$word…" else word, style = MaterialTheme.typography.bodyMedium, color = tc.text, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
+        if (detail.isNotEmpty()) Text(" $detail…", Modifier.weight(1f, fill = false), style = MaterialTheme.typography.bodyMedium, color = tc.text, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
         if (elapsed >= 1000) Text("  · ${span(elapsed)}", style = MaterialTheme.typography.bodyMedium, color = tc.faint)
     }
 }

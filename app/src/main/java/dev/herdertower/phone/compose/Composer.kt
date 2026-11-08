@@ -9,21 +9,23 @@ import androidx.compose.foundation.text.input.clearText
 import androidx.compose.foundation.text.input.placeCursorAtEnd
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.text.TextRange
-import dev.herdertower.phone.api.ImagePart
+import dev.herdertower.phone.api.FilePart
 import dev.herdertower.phone.data.TowerSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
 import java.io.File
 import java.util.UUID
 
-/** A picture in the draft: its token number and the copy kept with the draft. */
-data class Attachment(val number: Int, val path: String, val mime: String) {
+/** A file in the draft: its token number, kind, the name it had, and the copy kept with the draft. */
+data class Attachment(val number: Int, val path: String, val mime: String, val kind: Kind = Kind.Image, val name: String = "") {
     val file: File get() = File(path)
+    val token: String get() = DraftTokens.token(number, kind, name)
 }
 
 /**
@@ -32,6 +34,7 @@ data class Attachment(val number: Int, val path: String, val mime: String) {
  * rotation, switching apps and the process being killed; going from typing
  * to talking and back never loses it.
  */
+@OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
 class Composer(context: Context, private val session: TowerSession) {
     private val app = context.applicationContext
     private val prefs = app.getSharedPreferences("draft", Context.MODE_PRIVATE)
@@ -45,18 +48,30 @@ class Composer(context: Context, private val session: TowerSession) {
     private val _sending = MutableStateFlow(false)
     val sending: StateFlow<Boolean> = _sending.asStateFlow()
 
-    val dictation = Dictation(app)
+    /** Dictation: the tower's Whisper while connected, the phone's recognizer otherwise. */
+    private val towerDictation = TowerDictation(session)
+    private val phoneDictation = Dictation(app)
+    private val _dictating = MutableStateFlow<DictationEngine>(towerDictation)
+    /** The engine dictating now (or last). */
+    val dictation: StateFlow<DictationEngine> = _dictating.asStateFlow()
     /** Where the text stood when dictation began: what it says goes after it. */
     private var dictationBase: String? = null
 
     init {
+        session.scope.launch {
+            // Done dictating: what's in the box is the user's to edit.
+            _dictating.flatMapLatest { it.active }.collect { if (!it) dictationBase = null }
+        }
         session.scope.launch {
             snapshotFlow { input.text.toString() }.collect { t ->
                 prefs.edit().putString("text", t).apply()
                 prune(t)
                 // You typed over the dictation: stop following it.
                 val base = dictationBase
-                if (base != null && !t.startsWith(base)) stopDictation()
+                if (base != null && !t.startsWith(base)) {
+                    dictationBase = null
+                    stopDictation()
+                }
             }
         }
     }
@@ -65,43 +80,70 @@ class Composer(context: Context, private val session: TowerSession) {
 
     // Pictures
 
-    /** Adds pictures (photo picker, camera, paste); returns a message when some couldn't be. */
+    /** Adds files (photo picker, file picker, camera, paste); returns a message when some couldn't be. */
     suspend fun add(uris: List<Uri>): String? {
-        val room = MAX_IMAGES - _attachments.value.size
-        if (room <= 0) return "Six pictures at most in one message."
+        val room = MAX_FILES - _attachments.value.size
+        if (room <= 0) return "Six files at most in one message."
         var failed = 0
+        var tooBig = 0
         for (uri in uris.take(room)) {
-            val made = withContext(Dispatchers.IO) {
-                runCatching {
-                    val bytes = app.contentResolver.openInputStream(uri)?.use { it.readBytes() } ?: error("unreadable")
-                    store(bytes)
-                }.getOrNull()
-            }
-            if (made == null) failed++ else attach(made.first, made.second)
+            val made = withContext(Dispatchers.IO) { runCatching { storeUri(uri) } }
+            made.onSuccess { attach(it) }.onFailure { if (it is TooBig) tooBig++ else failed++ }
         }
         return when {
-            uris.size > room -> "Six pictures at most in one message."
-            failed > 0 -> "Couldn't read ${if (failed == 1) "a picture" else "$failed pictures"}."
+            uris.size > room -> "Six files at most in one message."
+            tooBig > 0 -> "Too large: videos and files can be 50 MB, pictures 15 MB."
+            failed > 0 -> "Couldn't read ${if (failed == 1) "a file" else "$failed files"}."
             else -> null
         }
     }
 
+    private class TooBig : Exception()
+
+    /** Copies what [uri] points at into the draft folder: a picture as one the tower takes, anything else as it is. */
+    private fun storeUri(uri: Uri): Attachment {
+        val cr = app.contentResolver
+        var name = ""
+        var size = -1L
+        cr.query(uri, arrayOf(android.provider.OpenableColumns.DISPLAY_NAME, android.provider.OpenableColumns.SIZE), null, null, null)?.use { c ->
+            if (c.moveToFirst()) {
+                name = c.getString(0).orEmpty()
+                size = if (c.isNull(1)) -1 else c.getLong(1)
+            }
+        }
+        val type = cr.getType(uri).orEmpty()
+        val kind = Files.kind(type, name)
+        if (kind != Kind.Image) {
+            if (size > Files.MAX_OTHER) throw TooBig()
+            val f = File(dir, "${UUID.randomUUID()}-${Files.safeName(name.ifBlank { "file" })}")
+            cr.openInputStream(uri)?.use { input -> f.outputStream().use { input.copyTo(it) } } ?: error("unreadable")
+            if (f.length() > Files.MAX_OTHER) {
+                f.delete()
+                throw TooBig()
+            }
+            return Attachment(0, f.path, type.ifBlank { "application/octet-stream" }, kind, name.ifBlank { f.name })
+        }
+        val bytes = cr.openInputStream(uri)?.use { it.readBytes() } ?: error("unreadable")
+        val (file, mime) = store(bytes)
+        return Attachment(0, file.path, mime, Kind.Image, name.ifBlank { file.name })
+    }
+
     /** A file the camera wrote into the draft folder. */
     suspend fun addCameraFile(file: File): String? {
-        if (_attachments.value.size >= MAX_IMAGES) return "Six pictures at most in one message."
+        if (_attachments.value.size >= MAX_FILES) return "Six files at most in one message."
         val made = withContext(Dispatchers.IO) { runCatching { store(file.readBytes()).also { file.delete() } }.getOrNull() } ?: return "Couldn't read the photo."
-        attach(made.first, made.second)
+        attach(Attachment(0, made.first.path, made.second, Kind.Image, "photo.jpg"))
         return null
     }
 
     /** A fresh file for the camera to write to. */
     fun cameraFile(): File = File(dir, "camera-${UUID.randomUUID()}.jpg")
 
-    private fun attach(file: File, mime: String) {
+    private fun attach(a: Attachment) {
         val n = DraftTokens.next(input.text.toString(), _attachments.value.map { it.number })
         val text = input.text.toString()
-        val (out, cursor) = DraftTokens.insert(text, input.selection.end, n)
-        _attachments.value = _attachments.value + Attachment(n, file.path, mime)
+        val (out, cursor) = DraftTokens.insert(text, input.selection.end, n, a.kind, a.name)
+        _attachments.value = _attachments.value + a.copy(number = n)
         saveAttachments()
         input.edit {
             replace(0, length, out)
@@ -146,11 +188,13 @@ class Composer(context: Context, private val session: TowerSession) {
 
     /** Dictates into the draft: what you say appears live after what's there, to edit before sending. */
     fun toggleDictation() {
-        if (dictation.active.value) return stopDictation()
+        if (_dictating.value.active.value) return stopDictation()
         val t = input.text.toString()
         val base = if (t.isEmpty() || t.last().isWhitespace()) t else "$t "
         dictationBase = base
-        dictation.start { said ->
+        val engine = if (session.link.value is dev.herdertower.phone.data.Link.Live) towerDictation else phoneDictation
+        _dictating.value = engine
+        engine.start { said ->
             val b = dictationBase ?: return@start
             input.edit {
                 replace(0, length, b + said)
@@ -159,9 +203,9 @@ class Composer(context: Context, private val session: TowerSession) {
         }
     }
 
+    /** Stops listening; the last words still land (the base stays until the engine is done). */
     fun stopDictation() {
-        dictationBase = null
-        dictation.stop()
+        _dictating.value.stop()
     }
 
     // Sending
@@ -178,7 +222,8 @@ class Composer(context: Context, private val session: TowerSession) {
             val result = if (ordered.isEmpty()) {
                 session.act { it.ask(text) }.map { }
             } else {
-                val parts = withContext(Dispatchers.IO) { ordered.map { ImagePart(it.file.name, it.file.readBytes(), it.mime) } }
+                // Sent from disk, not memory: videos and files can be 50 MB.
+                val parts = ordered.map { FilePart(it.name.ifBlank { it.file.name }, it.mime, file = it.file) }
                 session.act { it.ask(text, parts) }.map { }
             }
             if (result.isSuccess) clear()
@@ -196,19 +241,39 @@ class Composer(context: Context, private val session: TowerSession) {
     }
 
     private fun saveAttachments() {
-        prefs.edit().putString("attachments", _attachments.value.joinToString("\n") { "${it.number}\t${it.mime}\t${it.path}" }).apply()
+        prefs.edit().putString("attachments", _attachments.value.joinToString("\n") { "${it.number}\t${it.mime}\t${it.path}\t${it.kind}\t${it.name}" }).apply()
     }
 
     private fun loadAttachments(): List<Attachment> =
         (prefs.getString("attachments", "") ?: "").lines().mapNotNull { line ->
             val p = line.split('\t')
-            if (p.size != 3) return@mapNotNull null
-            Attachment(p[0].toIntOrNull() ?: return@mapNotNull null, p[2], p[1]).takeIf { it.file.exists() }
+            if (p.size < 3) return@mapNotNull null
+            val kind = p.getOrNull(3)?.let { k -> Kind.entries.firstOrNull { it.name == k } } ?: Kind.Image
+            Attachment(p[0].toIntOrNull() ?: return@mapNotNull null, p[2], p[1], kind, p.getOrNull(4).orEmpty()).takeIf { it.file.exists() }
         }
 
     companion object {
-        /** The tower takes six pictures with one message. */
-        const val MAX_IMAGES = 6
+        /** The tower takes six files with one message. */
+        const val MAX_FILES = 6
+    }
+
+    /** Files that aren't pictures: their kind and a name safe to keep on disk. */
+    object Files {
+        /** Videos and other files: 50 MB each (pictures: 15 MB). */
+        const val MAX_OTHER = 50L * 1024 * 1024
+        private val VIDEO_EXT = setOf("mov", "mp4", "m4v", "webm", "mkv", "avi")
+        private val IMAGE_EXT = setOf("png", "jpg", "jpeg", "webp", "gif", "heic", "heif")
+
+        fun kind(mime: String, name: String): Kind {
+            val ext = name.substringAfterLast('.', "").lowercase()
+            return when {
+                mime.startsWith("image/") || ext in IMAGE_EXT -> Kind.Image
+                mime.startsWith("video/") || ext in VIDEO_EXT -> Kind.Video
+                else -> Kind.File
+            }
+        }
+
+        fun safeName(name: String): String = name.replace(Regex("""[/\\:\u0000]"""), "_").take(120)
     }
 
     /** Pictures as the tower takes them. */

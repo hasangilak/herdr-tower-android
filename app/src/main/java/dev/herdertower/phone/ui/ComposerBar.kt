@@ -35,6 +35,9 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.input.TextFieldLineLimits
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.AttachFile
+import androidx.compose.material.icons.filled.Description
+import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.KeyboardVoice
 import androidx.compose.material.icons.filled.PhotoCamera
@@ -79,6 +82,7 @@ import androidx.core.content.FileProvider
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.herdertower.phone.compose.Attachment
 import dev.herdertower.phone.compose.Composer
+import dev.herdertower.phone.compose.Kind
 import dev.herdertower.phone.data.Link
 import dev.herdertower.phone.data.TowerSession
 import kotlinx.coroutines.Dispatchers
@@ -138,8 +142,10 @@ fun DraftField(composer: Composer, placeholder: String, minLines: Int, onSend: (
 class ComposerActions(
     val send: () -> Unit,
     val talk: () -> Unit,
-    /** Opens the photo picker. */
+    /** Opens the photo picker (pictures and videos). */
     val pictures: () -> Unit,
+    /** Opens the file picker (anything: PDF, video, text, …). */
+    val files: () -> Unit,
     val camera: () -> Unit,
     val dictate: () -> Unit,
     /** Pictures pasted or inserted from the keyboard. */
@@ -155,13 +161,15 @@ fun rememberComposerActions(composer: Composer, onTalk: () -> Unit, onSent: () -
     val perms = rememberPermissions()
     var cameraFile by remember { mutableStateOf<java.io.File?>(null) }
     val add: (List<Uri>) -> Unit = { uris -> scope.launch { composer.add(uris)?.let(snack) } }
-    val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Composer.MAX_IMAGES)) { if (it.isNotEmpty()) add(it) }
+    val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Composer.MAX_FILES)) { if (it.isNotEmpty()) add(it) }
+    val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { if (it.isNotEmpty()) add(it) }
     val shoot = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
         val f = cameraFile
         cameraFile = null
         if (ok && f != null) scope.launch { composer.addCameraFile(f)?.let(snack) } else f?.delete()
     }
-    val error by composer.dictation.error.collectAsStateWithLifecycle()
+    val engine by composer.dictation.collectAsStateWithLifecycle()
+    val error by engine.error.collectAsStateWithLifecycle()
     LaunchedEffect(error) { error?.let(snack) }
     return remember(composer) {
         ComposerActions(
@@ -173,7 +181,8 @@ fun rememberComposerActions(composer: Composer, onTalk: () -> Unit, onSent: () -
                 }
             },
             talk = { perms.withMic(onTalk) },
-            pictures = { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)) },
+            pictures = { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
+            files = { pickFiles.launch(arrayOf("*/*")) },
             camera = {
                 val f = composer.cameraFile()
                 cameraFile = f
@@ -199,24 +208,52 @@ fun AttachmentStrip(composer: Composer, modifier: Modifier = Modifier) {
 @Composable
 private fun AttachmentThumb(a: Attachment, onRemove: () -> Unit) {
     val img by produceState<ImageBitmap?>(null, a.path) {
-        value = withContext(Dispatchers.IO) { dev.herdertower.phone.data.Images.decode(a.file.readBytes(), 240)?.asImageBitmap() }
+        value = withContext(Dispatchers.IO) {
+            runCatching {
+                when (a.kind) {
+                    Kind.Image -> dev.herdertower.phone.data.Images.decode(a.file.readBytes(), 240)?.asImageBitmap()
+                    Kind.Video -> android.media.MediaMetadataRetriever().run {
+                        try {
+                            setDataSource(a.path)
+                            getScaledFrameAtTime(0, android.media.MediaMetadataRetriever.OPTION_CLOSEST_SYNC, 240, 240)?.asImageBitmap()
+                        } finally {
+                            release()
+                        }
+                    }
+                    Kind.File -> null
+                }
+            }.getOrNull()
+        }
     }
-    Box(Modifier.size(68.dp)) {
+    val label = when (a.kind) {
+        Kind.Image -> "Picture"
+        Kind.Video -> "Video"
+        Kind.File -> "File ${a.name}"
+    }
+    Box(Modifier.size(width = if (a.kind == Kind.File) 132.dp else 68.dp, height = 68.dp)) {
         Box(
-            Modifier.padding(top = 6.dp, end = 6.dp).size(62.dp).clip(RoundedCornerShape(14.dp)).background(tc.card).border(1.dp, tc.edge, RoundedCornerShape(14.dp))
-                .semantics { contentDescription = "Picture #${a.number}" },
+            Modifier.padding(top = 6.dp, end = 6.dp).fillMaxSize().clip(RoundedCornerShape(14.dp)).background(tc.card).border(1.dp, tc.edge, RoundedCornerShape(14.dp))
+                .semantics { contentDescription = "$label #${a.number}" },
         ) {
             img?.let { Image(it, null, Modifier.fillMaxSize(), contentScale = ContentScale.Crop) }
-            Text(
+            if (a.kind == Kind.Video) Icon(Icons.Filled.PlayCircle, null, Modifier.align(Alignment.Center).size(24.dp), tint = androidx.compose.ui.graphics.Color.White)
+            if (a.kind == Kind.File) {
+                Row(Modifier.fillMaxSize().padding(8.dp), verticalAlignment = Alignment.CenterVertically) {
+                    Icon(Icons.Filled.Description, null, Modifier.size(22.dp), tint = tc.muted)
+                    Spacer(Modifier.width(6.dp))
+                    Text(a.name, style = MaterialTheme.typography.labelSmall, color = tc.text, maxLines = 3, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)
+                }
+            }
+            if (a.kind != Kind.File) Text(
                 "#${a.number}",
                 Modifier.align(Alignment.BottomStart).padding(4.dp).clip(CircleShape).background(androidx.compose.ui.graphics.Color.Black.copy(alpha = 0.6f)).padding(horizontal = 5.dp),
                 style = MaterialTheme.typography.labelSmall, color = androidx.compose.ui.graphics.Color.White,
             )
         }
         Box(
-            Modifier.align(Alignment.TopEnd).size(24.dp).clip(CircleShape).background(tc.text).clickable(role = Role.Button, onClickLabel = "Remove picture #${a.number}", onClick = onRemove),
+            Modifier.align(Alignment.TopEnd).size(24.dp).clip(CircleShape).background(tc.text).clickable(role = Role.Button, onClickLabel = "Remove $label #${a.number}", onClick = onRemove),
             contentAlignment = Alignment.Center,
-        ) { Icon(Icons.Filled.Close, "Remove picture #${a.number}", Modifier.size(14.dp), tint = tc.bgBottom) }
+        ) { Icon(Icons.Filled.Close, "Remove $label #${a.number}", Modifier.size(14.dp), tint = tc.bgBottom) }
     }
 }
 
@@ -225,9 +262,10 @@ private fun AttachmentThumb(a: Attachment, onRemove: () -> Unit) {
 fun AttachButton(actions: ComposerActions, size: Dp = 40.dp) {
     var open by remember { mutableStateOf(false) }
     Box {
-        RoundIcon(Icons.Filled.Add, "Attach pictures", size = size) { open = true }
+        RoundIcon(Icons.Filled.Add, "Attach files", size = size) { open = true }
         DropdownMenu(open, { open = false }) {
-            DropdownMenuItem(text = { Text("Photos") }, leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) }, onClick = { open = false; actions.pictures() })
+            DropdownMenuItem(text = { Text("Photos and videos") }, leadingIcon = { Icon(Icons.Filled.PhotoLibrary, null) }, onClick = { open = false; actions.pictures() })
+            DropdownMenuItem(text = { Text("Files") }, leadingIcon = { Icon(Icons.Filled.AttachFile, null) }, onClick = { open = false; actions.files() })
             DropdownMenuItem(text = { Text("Camera") }, leadingIcon = { Icon(Icons.Filled.PhotoCamera, null) }, onClick = { open = false; actions.camera() })
         }
     }
@@ -236,8 +274,9 @@ fun AttachButton(actions: ComposerActions, size: Dp = 40.dp) {
 /** Dictate into the draft (the words stay to edit); shows it listens. */
 @Composable
 fun DictateButton(composer: Composer, actions: ComposerActions, size: Dp = 40.dp) {
-    val active by composer.dictation.active.collectAsStateWithLifecycle()
-    val level by composer.dictation.level.collectAsStateWithLifecycle()
+    val engine by composer.dictation.collectAsStateWithLifecycle()
+    val active by engine.active.collectAsStateWithLifecycle()
+    val level by engine.level.collectAsStateWithLifecycle()
     Box(
         Modifier
             .size(size)
@@ -255,7 +294,8 @@ fun DictateButton(composer: Composer, actions: ComposerActions, size: Dp = 40.dp
 /** "Listening…" while dictating. */
 @Composable
 fun DictationHint(composer: Composer) {
-    val active by composer.dictation.active.collectAsStateWithLifecycle()
+    val engine by composer.dictation.collectAsStateWithLifecycle()
+    val active by engine.active.collectAsStateWithLifecycle()
     AnimatedVisibility(active) {
         Row(Modifier.padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
             Dot(tc.blocked, 7.dp)

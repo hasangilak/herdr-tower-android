@@ -88,6 +88,21 @@ data class TowerState(
     val phone: String? = null,
     /** The latest screenshots sessions sent (newest first). */
     val screenshots: List<Screenshot> = emptyList(),
+    /** What the brain is doing right now, or null between turns. */
+    val work: Work? = null,
+)
+
+/** The brain's current step, as the panel's working line shows it ("Delegating to orb-rust · 12s"). */
+@Serializable
+data class Work(
+    val word: String = "",
+    val detail: String = "",
+    /** When the turn began. */
+    @SerialName("since_ms") val sinceMs: Long = 0,
+    /** When this step began. */
+    @SerialName("at_ms") val atMs: Long = 0,
+    /** When the step finished; 0 while it runs. */
+    @SerialName("done_ms") val doneMs: Long = 0,
 )
 
 /** An agent as `GET /v1/agents` (`tower agents --json`) lists it. */
@@ -197,8 +212,10 @@ data class AskRequest(val text: String)
 @Serializable
 data class AskResponse(val sent: String = "", val attachments: List<String> = emptyList())
 
-/** A picture sent with an ask: a file name, its bytes and type. */
-class ImagePart(val name: String, val bytes: ByteArray, val mime: String)
+/** A file sent with an ask or a take: its name, type and content (bytes, or a file on disk for big ones). */
+class FilePart(val name: String, val mime: String, val bytes: ByteArray? = null, val file: java.io.File? = null) {
+    val isImage: Boolean get() = mime.startsWith("image/")
+}
 
 @Serializable
 data class AnswerRequest(val decision: String, val note: String? = null)

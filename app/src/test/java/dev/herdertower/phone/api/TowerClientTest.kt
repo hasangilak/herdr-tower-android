@@ -196,7 +196,7 @@ class TowerClientTest {
         server.enqueue(json("""{"sent": "[Image #1] what's wrong? [Image #2]", "attachments": ["/a/1-a.png", "/a/2-b.jpg"]}""", 202))
         val png = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 1)
         val jpg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 2)
-        val r = client().ask("[Image #1] what's wrong? [Image #2]", listOf(ImagePart("a.png", png, "image/png"), ImagePart("b.jpg", jpg, "image/jpeg")))
+        val r = client().ask("[Image #1] what's wrong? [Image #2]", listOf(FilePart("a.png", "image/png", png), FilePart("b.jpg", "image/jpeg", jpg)))
         assertEquals(2, r.attachments.size)
         val req = taken()
         assertEquals("/v1/ask", req.url.encodedPath)
@@ -212,10 +212,43 @@ class TowerClientTest {
         assertTrue(body.contains("Content-Type: image/jpeg"))
     }
 
+    @Test fun filesThatArentPicturesGoAsFilePartsFromDisk() = runBlocking {
+        server.enqueue(json("""{"sent": "[File #1: notes.pdf] read this", "attachments": ["/a/1-notes.pdf"]}""", 202))
+        val pdf = java.io.File.createTempFile("notes", ".pdf").apply { writeBytes("%PDF-1.7 hello".toByteArray()); deleteOnExit() }
+        client().ask("[File #1: notes.pdf] read this", listOf(FilePart("notes.pdf", "application/pdf", file = pdf)))
+        val req = taken()
+        val body = req.body!!.string(Charsets.ISO_8859_1)
+        assertTrue(body.contains("name=\"file\"; filename=\"notes.pdf\""))
+        assertTrue(body.contains("Content-Type: application/pdf"))
+        assertTrue(body.contains("%PDF-1.7 hello"))
+        assertEquals(req.body!!.size.toString(), req.headers["Content-Length"])
+    }
+
+    @Test fun transcribesWithoutSending() = runBlocking {
+        server.enqueue(json("""{"heard": "check the login page", "sent": false}"""))
+        val r = client().transcribe(dev.herdertower.phone.voice.Wav.encode(ByteArray(16000)))
+        assertEquals(VoiceResult("check the login page", false), r)
+        val req = taken()
+        assertEquals("/v1/transcribe", req.url.encodedPath)
+        assertEquals("audio/wav", req.headers["Content-Type"])
+    }
+
+    @Test fun fetchesASentPictureByTheEndOfItsPath() = runBlocking {
+        server.enqueue(MockResponse.Builder().code(200).addHeader("Content-Type", "image/png").body(okio.Buffer().write(byteArrayOf(1, 2))).build())
+        client().attachmentImage("/Users/x/.local/share/herder-tower/attachments/1794165000000-phone/1-my login.png")
+        assertEquals("/v1/attachments/1794165000000-phone/1-my%20login.png", taken().url.encodedPath)
+    }
+
+    @Test fun theStateCarriesTheBrainsWork() {
+        val st = TowerJson.decodeFromString(TowerState.serializer(), """{"work": {"word": "Reading", "detail": "eyzflow", "since_ms": 10, "at_ms": 14, "done_ms": 0}}""")
+        assertEquals(Work("Reading", "eyzflow", 10, 14, 0), st.work)
+        assertNull(TowerJson.decodeFromString(TowerState.serializer(), """{"work": null}""").work)
+    }
+
     @Test fun anOlderTowerSaysItCantTakePictures() = runBlocking {
         server.enqueue(json("""{"error": {"code": "empty", "message": "send {\"text\": \"...\"}"}}""", 400))
         try {
-            client().ask("look", listOf(ImagePart("a.png", byteArrayOf(1), "image/png")))
+            client().ask("look", listOf(FilePart("a.png", "image/png", byteArrayOf(1))))
             fail()
         } catch (e: TowerApiException) {
             assertEquals("no_images", e.code)

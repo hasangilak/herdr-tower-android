@@ -31,6 +31,20 @@ class ChatModelTest {
         assertEquals("plain" to emptyList<ChatModel.ShotRef>(), ChatModel.shots("plain"))
     }
 
+    @Test fun theWorkingLineShowsTheBrainsStep() {
+        val w = dev.herdertower.phone.api.Work("Delegating", "to orb-rust", sinceMs = 1_000, atMs = 5_000, doneMs = 0)
+        assertEquals("Delegating" to "to orb-rust", ChatModel.workLine(w, 13_000))
+        // A finished step stays a moment, then it's thinking again (turning words by the turn's age).
+        assertEquals("Delegating" to "to orb-rust", ChatModel.workLine(w.copy(doneMs = 11_000), 13_000))
+        // Step done at 6 s, now 9.5 s: over 3 s ago, so thinking; the turn is 8.5 s old.
+        assertEquals("Working it out" to "", ChatModel.workLine(w.copy(doneMs = 6_000), 9_500))
+        assertEquals("Thinking" to "", ChatModel.workLine(dev.herdertower.phone.api.Work("Thinking", "", 0, 0, 0), 1_000))
+        val answered = listOf(HistoryEntry(2_000, "answer", text = "done"))
+        assertEquals(false, ChatModel.showWork(w, answered, 13_000))
+        assertEquals(true, ChatModel.showWork(w, listOf(HistoryEntry(500, "answer", text = "old")), 13_000))
+        assertEquals(false, ChatModel.showWork(null, emptyList(), 0))
+    }
+
     @Test fun theWorkingWordsTurnOver() {
         assertEquals("Thinking", ChatModel.thinkingWord(0))
         assertEquals("Considering", ChatModel.thinkingWord(3500))
