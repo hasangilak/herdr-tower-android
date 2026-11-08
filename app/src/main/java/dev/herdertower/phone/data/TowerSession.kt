@@ -144,9 +144,12 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         // While the app is on screen: refresh what isn't pushed every 20 s.
         scope.launch {
             combine(_link, _foreground) { l, fg -> l is Link.Live && fg }.distinctUntilChanged().collectLatest { on ->
+                var n = 0
                 while (on) {
                     delay(20_000)
                     refreshLists()
+                    // The accounts change rarely: every minute (the panel re-reads them every 30 s).
+                    if (++n % 3 == 0) quietly { _accounts.value = it.accounts() }
                 }
             }
         }
@@ -390,6 +393,9 @@ class TowerSession(private val context: Context, private val store: CredentialSt
                 "wrong_code" -> "That isn't the code on the Mac." + (e.triesLeft?.let { " $it tries left." } ?: "")
                 "pairing_closed" -> "No pairing code is open on the Mac. Run `tower phone pair` there."
                 "too_many_failures" -> "Too many failed tries. Wait a minute."
+                "too_many_images" -> "Six pictures at most in one message."
+                "image_too_large" -> "A picture is too large (15 MB at most)."
+                "not_an_image" -> "The tower takes PNG, JPEG, WebP or GIF pictures."
                 else -> e.message
             }
             is SSLMismatch -> "The tower's certificate doesn't match. If the Mac's certificate was remade, pair again; otherwise something is in between."

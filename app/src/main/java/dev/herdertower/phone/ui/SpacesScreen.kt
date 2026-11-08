@@ -42,7 +42,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun SpacesScreen(session: TowerSession, onBack: () -> Unit, onOpen: (String) -> Unit) {
+fun SpacesScreen(session: TowerSession, onBack: () -> Unit, onOpen: (String) -> Unit, onSpace: (String) -> Unit) {
     val spaces by session.spaces.collectAsStateWithLifecycle()
     val agents by session.agents.collectAsStateWithLifecycle()
     val unreachable by session.unreachable.collectAsStateWithLifecycle()
@@ -96,7 +96,7 @@ fun SpacesScreen(session: TowerSession, onBack: () -> Unit, onOpen: (String) -> 
                 }
             }
             items(sorted, key = { "s:" + it.space }) { sp ->
-                SpaceCard(sp, acc, expanded = expanded == sp.space, onToggle = { expanded = if (expanded == sp.space) null else sp.space }, onFocus = { setFocus(if (sp.focus) null else sp.space) }, onOpen = onOpen)
+                SpaceCard(sp, acc, expanded = expanded == sp.space, onToggle = { onSpace(sp.space) }, onFocus = { setFocus(if (sp.focus) null else sp.space) }, onOpen = onOpen)
             }
             if (agents.isNotEmpty()) {
                 item { Text("ALL SESSIONS", Modifier.padding(top = 8.dp), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = tc.faint) }

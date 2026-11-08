@@ -16,6 +16,7 @@ import kotlinx.serialization.json.buildJsonObject
 import okhttp3.Call
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
+import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Protocol
 import okhttp3.Request
@@ -143,6 +144,26 @@ class TowerClient(
     // Acting
 
     suspend fun ask(text: String): AskResponse = post(AskResponse.serializer(), json(AskRequest.serializer(), AskRequest(text)), "ask")
+
+    /**
+     * `POST /v1/ask` with pictures: multipart, a `text` field and one `image`
+     * part per picture (in token order; the tower saves them on the Mac and
+     * passes their paths after the text, `[Image #N]` marking each).
+     */
+    suspend fun ask(text: String, images: List<ImagePart>): AskResponse {
+        if (images.isEmpty()) return ask(text)
+        val body = MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("text", text)
+            .apply { images.forEach { addFormDataPart("image", it.name, it.bytes.toRequestBody(it.mime.toMediaType())) } }
+            .build()
+        return try {
+            post(AskResponse.serializer(), body, "ask", client = slow)
+        } catch (e: TowerApiException) {
+            // A tower from before pictures reads the multipart body as empty JSON.
+            if (e.status == 400 && e.code in setOf("empty", "bad_json")) throw TowerApiException(400, "no_images", "This tower can't take pictures yet: it needs the update that adds images to POST /v1/ask.")
+            throw e
+        }
+    }
 
     suspend fun answer(address: String, approve: Boolean, note: String? = null) {
         val body = json(AnswerRequest.serializer(), AnswerRequest(if (approve) "approve" else "refuse", note?.trim()?.takeIf { it.isNotEmpty() }))

@@ -35,7 +35,7 @@ private val sampleChat = listOf(
 @Composable
 private fun HomePreview(mode: String) = TowerTheme(mode) {
     Backdrop("idle", needsYou = true) {
-        HomeContent(sampleHome, "", false, onDraft = {}, onSend = {}, onMic = {}, onSuggestion = {}, onFocus = {}, onVoiceToggle = {}, onAlerts = {}, onMenu = {}, onChat = {})
+        HomeContent(sampleHome, askBox = { AskBox(field = { androidx.compose.material3.Text("Ask the tower, or describe the work", color = tc.faint) }) }, onSuggestion = {}, onAlerts = {}, onMenu = {}, onChat = {})
     }
 }
 
@@ -43,8 +43,8 @@ private fun HomePreview(mode: String) = TowerTheme(mode) {
 private fun ChatPreview(mode: String) = TowerTheme(mode) {
     Backdrop("thinking", needsYou = false) {
         ChatContent(
-            sampleChat, working = true, connected = true, accounts = AccountLookup(mapOf("t3" to "eyz"), "main"),
-            draft = "", sending = false, voiceOn = true, onDraft = {}, onSend = {}, onMic = {}, onClose = {}, onLoadOlder = {}, onOpen = {}, onVoiceToggle = {},
+            sampleChat, working = true, workingSince = now - 15_000, accounts = AccountLookup(mapOf("t3" to "eyz"), "main"),
+            onClose = {}, onLoadOlder = {}, onOpen = {}, inputBar = { AskBox(field = { androidx.compose.material3.Text("Ask the tower", color = tc.faint) }) },
         )
     }
 }

@@ -155,7 +155,7 @@ fun ShotStrip(session: TowerSession, shots: List<Screenshot>, onOpen: (Screensho
         items(shots, key = { it.id }) { s ->
             Column(Modifier.width(120.dp).clip(RoundedCornerShape(16.dp)).clickable(role = Role.Button) { onOpen(s) }, verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 Thumb(session, s, Modifier.width(120.dp).aspectRatio(0.8f), maxSide = 360)
-                Text(s.caption, style = MaterialTheme.typography.labelMedium, color = tc.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                Text(s.caption, Modifier.padding(horizontal = 6.dp, vertical = 2.dp), style = MaterialTheme.typography.labelMedium, color = tc.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
         }
     }

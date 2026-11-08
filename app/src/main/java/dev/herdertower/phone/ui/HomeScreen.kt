@@ -68,6 +68,7 @@ import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.herdertower.phone.api.HistoryEntry
 import dev.herdertower.phone.data.Link
+import dev.herdertower.phone.tower
 import dev.herdertower.phone.data.TowerSession
 import dev.herdertower.phone.orb.OrbGlyph
 import dev.herdertower.phone.voice.VoiceController
@@ -112,8 +113,8 @@ fun HomeScreen(
     val history by session.history.collectAsStateWithLifecycle()
     val voiceOn by session.voiceOn.collectAsStateWithLifecycle()
     val name by session.towerName.collectAsStateWithLifecycle()
-    var draft by rememberSaveable { mutableStateOf("") }
-    var sending by remember { mutableStateOf(false) }
+    val composer = context.tower.composer
+    var asking by remember { mutableStateOf(false) }
 
     val connected = link is Link.Live
     val s = state
@@ -138,15 +139,18 @@ fun HomeScreen(
         voiceOn = voiceOn,
     )
 
+    /** A suggestion's question, sent as it is (the draft stays). */
     fun ask(text: String) {
-        sending = true
+        if (asking) return
+        asking = true
         scope.launch {
             session.act { it.ask(text) }
-                .onSuccess { draft = ""; onChat() }
+                .onSuccess { onChat() }
                 .onFailure { snack("Couldn't send: ${TowerSession.describe(it)}") }
-            sending = false
+            asking = false
         }
     }
+    val actions = rememberComposerActions(composer, onTalk = { onVoice(true) }, onSent = onChat)
     fun focus(space: String?) {
         scope.launch {
             session.act { it.focus(space) }.onSuccess { session.refreshLists() }.onFailure { snack(TowerSession.describe(it)) }
@@ -155,12 +159,32 @@ fun HomeScreen(
 
     HomeContent(
         ui = ui,
-        draft = draft,
-        sending = sending,
         notice = { ConnectionNotice(link, session, onRepair) },
-        onDraft = { draft = it },
-        onSend = { if (draft.isNotBlank()) ask(draft.trim()) },
-        onMic = { perms.withMic { onVoice(true) } },
+        askBox = {
+            AskBox(
+                field = { DraftField(composer, "Ask the tower, or describe the work", 2, actions.send, actions.add, Modifier.fillMaxWidth()) },
+                above = {
+                    DictationHint(composer)
+                    AttachmentStrip(composer, Modifier.padding(bottom = 10.dp))
+                },
+                leading = {
+                    AttachButton(actions)
+                    Spacer(Modifier.width(8.dp))
+                    RoundIcon(
+                        if (ui.voiceOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
+                        if (ui.voiceOn) "Phone is the voice: on" else "Phone is the voice: off",
+                        size = 40.dp,
+                    ) { setVoice(!ui.voiceOn, session, perms, context) }
+                    Spacer(Modifier.width(8.dp))
+                    FocusPill(ui.focus, ui.spaces, ::focus)
+                },
+                trailing = {
+                    DictateButton(composer, actions)
+                    Spacer(Modifier.width(10.dp))
+                    SendOrTalk(composer, session, actions, 52.dp)
+                },
+            )
+        },
         onSuggestion = { sg ->
             when (sg) {
                 is Suggestion.Answer -> onOpen(sg.address)
@@ -169,8 +193,6 @@ fun HomeScreen(
                 is Suggestion.ClearFocus -> focus(null)
             }
         },
-        onFocus = ::focus,
-        onVoiceToggle = { setVoice(it, session, perms, context) },
         onAlerts = onAlerts,
         onMenu = onMenu,
         onChat = onChat,
@@ -180,15 +202,9 @@ fun HomeScreen(
 @Composable
 fun HomeContent(
     ui: HomeUi,
-    draft: String,
-    sending: Boolean,
     notice: @Composable () -> Unit = {},
-    onDraft: (String) -> Unit,
-    onSend: () -> Unit,
-    onMic: () -> Unit,
+    askBox: @Composable () -> Unit,
     onSuggestion: (Suggestion) -> Unit,
-    onFocus: (String?) -> Unit,
-    onVoiceToggle: (Boolean) -> Unit,
     onAlerts: () -> Unit,
     onMenu: () -> Unit,
     onChat: () -> Unit,
@@ -254,7 +270,7 @@ fun HomeContent(
             }
             Spacer(Modifier.height(16.dp))
         }
-        AskBox(ui, draft, sending, onDraft, onSend, onMic, onFocus, onVoiceToggle)
+        askBox()
     }
 }
 
@@ -288,17 +304,13 @@ private fun SuggestionCard(s: Suggestion, onClick: () -> Unit) {
 
 private data class Quad(val icon: androidx.compose.ui.graphics.vector.ImageVector, val tint: Color, val title: String, val detail: String?)
 
-/** The roomy rounded input: text, the voice toggle, the space focus, and mic (or send). */
+/** The roomy rounded input: the draft, its pictures, and a row of controls. */
 @Composable
-private fun AskBox(
-    ui: HomeUi,
-    draft: String,
-    sending: Boolean,
-    onDraft: (String) -> Unit,
-    onSend: () -> Unit,
-    onMic: () -> Unit,
-    onFocus: (String?) -> Unit,
-    onVoiceToggle: (Boolean) -> Unit,
+fun AskBox(
+    field: @Composable () -> Unit,
+    above: @Composable () -> Unit = {},
+    leading: @Composable () -> Unit = {},
+    trailing: @Composable () -> Unit = {},
 ) {
     val shape = RoundedCornerShape(30.dp)
     Column(
@@ -308,38 +320,22 @@ private fun AskBox(
             .clip(shape)
             .background(if (tc.dark) Color(0xFF120B08).copy(alpha = 0.72f) else Color.White.copy(alpha = 0.78f))
             .border(1.dp, tc.edge, shape)
-            .padding(start = 20.dp, end = 12.dp, top = 18.dp, bottom = 12.dp),
+            .padding(start = 20.dp, end = 12.dp, top = 16.dp, bottom = 12.dp),
     ) {
-        BasicTextField(
-            draft, onDraft,
-            Modifier.fillMaxWidth().heightIn(min = 52.dp).semantics { contentDescription = "Ask the tower" },
-            textStyle = MaterialTheme.typography.bodyLarge.copy(color = tc.text),
-            cursorBrush = SolidColor(tc.accentHi),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { onSend() }),
-            maxLines = 5,
-            decorationBox = { inner ->
-                if (draft.isEmpty()) Text("Ask the tower, or describe the work", style = MaterialTheme.typography.bodyLarge, color = tc.faint)
-                inner()
-            },
-        )
+        above()
+        Box(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(end = 8.dp)) { field() }
+        Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            RoundIcon(
-                if (ui.voiceOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                if (ui.voiceOn) "Phone is the voice: on" else "Phone is the voice: off",
-                size = 40.dp,
-            ) { onVoiceToggle(!ui.voiceOn) }
-            Spacer(Modifier.width(8.dp))
-            FocusPill(ui.focus, ui.spaces, onFocus)
+            leading()
             Spacer(Modifier.weight(1f))
-            MicOrSend(draft.isNotBlank(), sending, enabled = ui.connected, size = 52.dp, onMic = onMic, onSend = onSend)
+            trailing()
         }
     }
 }
 
 /** Picks the space focus: its news is spoken, the others' held. */
 @Composable
-private fun FocusPill(focus: String?, spaces: List<String>, onFocus: (String?) -> Unit) {
+fun FocusPill(focus: String?, spaces: List<String>, onFocus: (String?) -> Unit) {
     var open by remember { mutableStateOf(false) }
     Box {
         Row(

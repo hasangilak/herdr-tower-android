@@ -192,6 +192,36 @@ class TowerClientTest {
         assertEquals("Login", e.caption)
     }
 
+    @Test fun asksWithPicturesAsMultipart() = runBlocking {
+        server.enqueue(json("""{"sent": "[Image #1] what's wrong? [Image #2]", "attachments": ["/a/1-a.png", "/a/2-b.jpg"]}""", 202))
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 1)
+        val jpg = byteArrayOf(0xFF.toByte(), 0xD8.toByte(), 0xFF.toByte(), 2)
+        val r = client().ask("[Image #1] what's wrong? [Image #2]", listOf(ImagePart("a.png", png, "image/png"), ImagePart("b.jpg", jpg, "image/jpeg")))
+        assertEquals(2, r.attachments.size)
+        val req = taken()
+        assertEquals("/v1/ask", req.url.encodedPath)
+        val type = req.headers["Content-Type"]!!
+        assertTrue(type.startsWith("multipart/form-data; boundary="))
+        assertEquals(req.body!!.size.toString(), req.headers["Content-Length"]) // no chunked uploads
+        val body = req.body!!.string(Charsets.ISO_8859_1)
+        val text = body.indexOf("Content-Disposition: form-data; name=\"text\"")
+        assertTrue(text >= 0 && body.indexOf("[Image #1] what's wrong? [Image #2]") > text)
+        val first = body.indexOf("name=\"image\"; filename=\"a.png\"")
+        val second = body.indexOf("name=\"image\"; filename=\"b.jpg\"")
+        assertTrue(first in 0 until second)
+        assertTrue(body.contains("Content-Type: image/jpeg"))
+    }
+
+    @Test fun anOlderTowerSaysItCantTakePictures() = runBlocking {
+        server.enqueue(json("""{"error": {"code": "empty", "message": "send {\"text\": \"...\"}"}}""", 400))
+        try {
+            client().ask("look", listOf(ImagePart("a.png", byteArrayOf(1), "image/png")))
+            fail()
+        } catch (e: TowerApiException) {
+            assertEquals("no_images", e.code)
+        }
+    }
+
     @Test fun hushPostsAnEmptyBody() = runBlocking {
         server.enqueue(json("""{"ok": true}"""))
         client().hush()

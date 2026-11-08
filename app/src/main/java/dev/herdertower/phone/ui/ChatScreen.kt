@@ -53,6 +53,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.saveable.rememberSaveable
@@ -75,6 +76,7 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.herdertower.phone.api.HistoryEntry
 import dev.herdertower.phone.data.Link
 import dev.herdertower.phone.data.TowerSession
+import dev.herdertower.phone.tower
 import dev.herdertower.phone.orb.OrbGlyph
 import kotlinx.coroutines.launch
 
@@ -88,44 +90,60 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
     val history by session.history.collectAsStateWithLifecycle()
     val state by session.state.collectAsStateWithLifecycle()
     val link by session.link.collectAsStateWithLifecycle()
-    val voiceOn by session.voiceOn.collectAsStateWithLifecycle()
+    val shots by session.screenshots.collectAsStateWithLifecycle()
     val acc = rememberAccounts(session)
     val scope = rememberCoroutineScope()
     val snack = LocalSnack.current
-    val perms = rememberPermissions()
     val context = LocalContext.current
-    var draft by rememberSaveable { mutableStateOf("") }
-    var sending by remember { mutableStateOf(false) }
-
-    fun send() {
-        val t = draft.trim()
-        if (t.isEmpty() || sending) return
-        sending = true
-        scope.launch {
-            session.act { it.ask(t) }
-                .onSuccess { draft = "" }
-                .onFailure { snack("Couldn't send: ${TowerSession.describe(it)}") }
-            sending = false
-        }
-    }
+    val composer = context.tower.composer
+    val actions = rememberComposerActions(composer, onTalk = onVoice)
+    val thinking = link is Link.Live && (state?.phase == "thinking" || state?.phase == "transcribing")
+    // When the brain began this turn (the API doesn't say: from when the phone saw it start).
+    var since by remember { mutableLongStateOf(0L) }
+    LaunchedEffect(thinking) { since = if (thinking) System.currentTimeMillis() else 0L }
 
     ChatContent(
         entries = history,
-        working = link is Link.Live && (state?.phase == "thinking" || state?.phase == "transcribing"),
-        connected = link is Link.Live,
+        working = thinking,
+        workingSince = since,
         accounts = acc,
-        draft = draft,
-        sending = sending,
-        voiceOn = voiceOn,
-        onDraft = { draft = it },
-        onSend = ::send,
-        onMic = { perms.withMic(onVoice) },
         onClose = onClose,
         onLoadOlder = { scope.launch { if (session.loadOlder() == 0) snack("That's everything.") } },
         onOpen = onOpen,
-        onVoiceToggle = { setVoice(it, session, perms, context) },
         onShot = onShot,
         thumb = { e, m -> Thumb(session, shotOf(e), m, maxSide = 600) },
+        replyShots = { refs, m ->
+            val found = refs.flatMap { r ->
+                when (r) {
+                    is ChatModel.ShotRef.One -> listOfNotNull(shots.firstOrNull { it.id == r.id } ?: dev.herdertower.phone.api.Screenshot(id = r.id, url = "/v1/screenshots/${r.id}"))
+                    is ChatModel.ShotRef.OfSession -> shots.filter { it.session == r.session }.take(4)
+                }
+            }.distinctBy { it.id }
+            if (found.isNotEmpty()) ShotStrip(session, found) { onShot(it.id) }
+        },
+        inputBar = {
+            Column(
+                Modifier
+                    .padding(horizontal = 12.dp, vertical = 10.dp)
+                    .fillMaxWidth()
+                    .clip(RoundedCornerShape(28.dp))
+                    .background(if (tc.dark) Color(0xFF120B08).copy(alpha = 0.88f) else Color.White.copy(alpha = 0.92f))
+                    .border(1.dp, tc.edge, RoundedCornerShape(28.dp))
+                    .padding(start = 8.dp, end = 6.dp, top = 6.dp, bottom = 6.dp),
+            ) {
+                Column(Modifier.padding(start = 8.dp, top = 6.dp)) {
+                    DictationHint(composer)
+                    AttachmentStrip(composer, Modifier.padding(bottom = 6.dp))
+                }
+                Row(verticalAlignment = Alignment.Bottom) {
+                    AttachButton(actions, size = 44.dp)
+                    DraftField(composer, "Ask the tower", 1, actions.send, actions.add, Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 11.dp))
+                    DictateButton(composer, actions, size = 44.dp)
+                    Spacer(Modifier.width(6.dp))
+                    SendOrTalk(composer, session, actions, 48.dp)
+                }
+            }
+        },
     )
 }
 
@@ -139,26 +157,21 @@ fun shotOf(e: HistoryEntry) = dev.herdertower.phone.api.Screenshot(
 fun ChatContent(
     entries: List<HistoryEntry>,
     working: Boolean,
-    connected: Boolean,
+    workingSince: Long,
     accounts: AccountLookup,
-    draft: String,
-    sending: Boolean,
-    voiceOn: Boolean,
-    onDraft: (String) -> Unit,
-    onSend: () -> Unit,
-    onMic: () -> Unit,
     onClose: () -> Unit,
     onLoadOlder: () -> Unit,
     onOpen: (String) -> Unit,
-    onVoiceToggle: (Boolean) -> Unit,
     onShot: (String) -> Unit = {},
     thumb: @Composable (HistoryEntry, Modifier) -> Unit = { _, _ -> },
+    replyShots: @Composable (List<ChatModel.ShotRef>, Modifier) -> Unit = { _, _ -> },
+    inputBar: @Composable () -> Unit,
 ) {
     val list = rememberLazyListState()
     val rows = remember(entries) {
         buildList<ChatRow> {
             var day = ""
-            entries.filter { it.kind != "summary" }.forEach { e ->
+            ChatModel.items(entries).forEach { e ->
                 val d = dayLabel(e.at)
                 if (d != day) {
                     add(ChatRow.Day(d))
@@ -200,15 +213,15 @@ fun ChatContent(
                     }
                     is ChatRow.Item -> when (r.e.kind) {
                         "request" -> UserBubble(r.e)
-                        "answer" -> ReplyBubble(r.e)
+                        "answer" -> ReplyBubble(r.e, replyShots)
                         "screenshot" -> if (r.e.id != null) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
                         else -> EventLine(r.e, accounts, onOpen)
                     }
                 }
             }
-            if (working) item { WorkingLine() }
+            if (working) item { WorkingLine(workingSince) }
         }
-        InputBar(draft, sending, connected, voiceOn, onDraft, onSend, onMic, onVoiceToggle)
+        inputBar()
     }
 }
 
@@ -226,6 +239,20 @@ fun UserBubble(e: HistoryEntry) {
                 .padding(horizontal = 18.dp, vertical = 12.dp),
         ) {
             Text(e.text.removePrefix("[voice] "), style = MaterialTheme.typography.bodyLarge, color = tc.onBubble)
+            if (e.attachments.isNotEmpty()) {
+                Row(Modifier.padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    e.attachments.forEachIndexed { i, path ->
+                        Row(
+                            Modifier.clip(RoundedCornerShape(10.dp)).background(Color.Black.copy(alpha = 0.18f)).padding(horizontal = 8.dp, vertical = 4.dp)
+                                .semantics { contentDescription = "Attached: ${path.substringAfterLast('/')}" },
+                            verticalAlignment = Alignment.CenterVertically,
+                        ) {
+                            Icon(Icons.Filled.Image, null, Modifier.size(14.dp), tint = tc.onBubble)
+                            Text(" #${i + 1}", style = MaterialTheme.typography.labelSmall, color = tc.onBubble)
+                        }
+                    }
+                }
+            }
             Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
                 if (voice) Icon(Icons.Filled.Mic, "spoken", Modifier.size(12.dp), tint = tc.onBubble.copy(alpha = 0.8f))
                 Text(" " + clock(e.at), style = MaterialTheme.typography.labelSmall, color = tc.onBubble.copy(alpha = 0.85f))
@@ -236,7 +263,8 @@ fun UserBubble(e: HistoryEntry) {
 
 /** The tower's answer: a dark soft bubble with the orb beside it; its markdown rendered. */
 @Composable
-fun ReplyBubble(e: HistoryEntry) {
+fun ReplyBubble(e: HistoryEntry, shots: @Composable (List<ChatModel.ShotRef>, Modifier) -> Unit = { _, _ -> }) {
+    val (text, refs) = remember(e.text) { ChatModel.shots(e.text) }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         OrbGlyph(Modifier.padding(top = 6.dp).size(28.dp).semantics { contentDescription = "Tower" })
         Spacer(Modifier.width(10.dp))
@@ -248,59 +276,34 @@ fun ReplyBubble(e: HistoryEntry) {
                 .border(1.dp, tc.edge, RoundedCornerShape(topStart = 8.dp, topEnd = 24.dp, bottomStart = 24.dp, bottomEnd = 24.dp))
                 .padding(horizontal = 18.dp, vertical = 12.dp),
         ) {
-            MarkdownText(e.text, tc.text)
+            if (text.isNotBlank()) MarkdownText(text, tc.text)
+            if (refs.isNotEmpty()) shots(refs, Modifier.padding(top = 8.dp))
             Text(clock(e.at), Modifier.align(Alignment.End), style = MaterialTheme.typography.labelSmall, color = tc.faint)
         }
     }
 }
 
+/** While the brain works: the panel's turning words and how long it's been. */
 @Composable
-private fun WorkingLine() {
+private fun WorkingLine(since: Long) {
     val reduce = LocalReduceMotion.current
-    val a = if (reduce) 1f else rememberInfiniteTransition(label = "working").animateFloat(0.35f, 1f, infiniteRepeatable(tween(1100), RepeatMode.Reverse), label = "a").value
-    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 2.dp)) {
-        OrbGlyph(Modifier.size(20.dp).alpha(a))
-        Spacer(Modifier.width(10.dp))
-        Text("The tower is working…", style = MaterialTheme.typography.bodyMedium, color = tc.faint, fontStyle = FontStyle.Italic)
+    var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
+    LaunchedEffect(since) {
+        while (true) {
+            now = System.currentTimeMillis()
+            kotlinx.coroutines.delay(1000)
+        }
     }
-}
-
-/** The floating input: voice toggle, text (Send on the keyboard sends), and mic or send in one fixed place. */
-@Composable
-private fun InputBar(
-    draft: String, sending: Boolean, connected: Boolean, voiceOn: Boolean,
-    onDraft: (String) -> Unit, onSend: () -> Unit, onMic: () -> Unit, onVoiceToggle: (Boolean) -> Unit,
-) {
-    val shape = RoundedCornerShape(30.dp)
+    val elapsed = if (since > 0) now - since else 0L
+    val a = if (reduce) 1f else rememberInfiniteTransition(label = "working").animateFloat(0.35f, 1f, infiniteRepeatable(tween(1100), RepeatMode.Reverse), label = "a").value
     Row(
-        Modifier
-            .padding(horizontal = 12.dp, vertical = 10.dp)
-            .fillMaxWidth()
-            .clip(shape)
-            .background(if (tc.dark) Color(0xFF120B08).copy(alpha = 0.85f) else Color.White.copy(alpha = 0.9f))
-            .border(1.dp, tc.edge, shape)
-            .padding(6.dp),
+        Modifier.clip(RoundedCornerShape(18.dp)).background(tc.reply).border(1.dp, tc.edge, RoundedCornerShape(18.dp)).padding(horizontal = 14.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        Box(
-            Modifier.size(44.dp).clip(RoundedCornerShape(22.dp)).clickable(role = Role.Button) { onVoiceToggle(!voiceOn) }
-                .semantics { contentDescription = if (voiceOn) "Phone is the voice: on" else "Phone is the voice: off" },
-            contentAlignment = Alignment.Center,
-        ) { Icon(if (voiceOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff, null, tint = tc.muted) }
-        BasicTextField(
-            draft, onDraft,
-            Modifier.weight(1f).heightIn(min = 44.dp).padding(horizontal = 6.dp, vertical = 11.dp).semantics { contentDescription = "Ask the tower" },
-            textStyle = MaterialTheme.typography.bodyLarge.copy(color = tc.text),
-            cursorBrush = SolidColor(tc.accentHi),
-            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
-            keyboardActions = KeyboardActions(onSend = { onSend() }),
-            maxLines = 5,
-            decorationBox = { inner ->
-                if (draft.isEmpty()) Text("Ask the tower", style = MaterialTheme.typography.bodyLarge, color = tc.faint)
-                inner()
-            },
-        )
-        MicOrSend(draft.isNotBlank(), sending, enabled = connected, size = 48.dp, onMic = onMic, onSend = onSend)
+        OrbGlyph(Modifier.size(18.dp).alpha(a))
+        Spacer(Modifier.width(10.dp))
+        Text("${ChatModel.thinkingWord(elapsed)}…", style = MaterialTheme.typography.bodyMedium, color = tc.text)
+        if (elapsed >= 1000) Text("  · ${span(elapsed)}", style = MaterialTheme.typography.bodyMedium, color = tc.faint)
     }
 }
 
@@ -314,7 +317,7 @@ fun eventLook(e: HistoryEntry): Triple<ImageVector, Color, String> {
         "job" to "blocked" -> Triple(Icons.Filled.Warning, tc.blocked, "$who needs you" + if (e.text.isEmpty()) "" else ": ${e.text}")
         else -> when (e.kind) {
             "job" -> Triple(Icons.Filled.Error, tc.failed, "$who ${statusWord(e.status ?: "")}" + if (e.text.isEmpty()) "" else ": ${e.text}")
-            "watch" -> Triple(Icons.Filled.Terminal, tc.muted, e.text)
+            "watch" -> Triple(Icons.Filled.Terminal, tc.muted, ChatModel.report(e.text))
             "alert" -> Triple(Icons.Filled.Notifications, tc.accentHi.takeIf { tc.dark } ?: tc.accent, e.text)
             "summary" -> Triple(Icons.AutoMirrored.Filled.Article, tc.muted, "$who: ${e.text}")
             else -> Triple(Icons.Filled.Info, tc.idle, e.text)

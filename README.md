@@ -48,6 +48,14 @@ python3 tools/fake_tower.py          # prints a pairing link for the emulator (1
 adb shell am start -a android.intent.action.VIEW -d '"<the link>"' dev.herdertower.phone
 ```
 
+## Typing
+
+Writing is as good as talking. Home and Chat share one draft. It is saved on every change, so it survives rotation, switching apps, the process being killed, and going to the voice screen and back.
+- On a hardware keyboard, Enter sends and Shift+Enter starts a new line. The keyboard's Send action sends too.
+- Pictures come from ＋ (the photo picker, several at once, or the camera), or are pasted or inserted from the keyboard. Each becomes an `[Image #N]` token where you were typing, with a thumbnail above. Remove a thumbnail and its token goes; delete a token and the picture goes. They go with the text as multipart `POST /v1/ask` (six at most; HEIC or very large photos are re-encoded as JPEG).
+- Dictate (the small mic) puts what you say into the draft as you say it, after what's there, to edit before sending. It uses the phone's own speech recognizer, because `POST /v1/voice` sends what it hears at once.
+- The round button sends when there's a draft and talks to the tower when there isn't.
+
 ## The look
 
 Home, Voice and Chat are the main flow. Home has a greeting, suggestions from live data (a blocked session, status, catch up, news in a space, focus), and a roomy ask box with the voice toggle, the space focus and a mic. Spaces, Activity, Screenshots and settings open from the menu sheet. The colours are warm copper falling into black (light: peach into cream); every text pair was checked for at least 4.5:1 contrast. Motion is slow and switches off when the system asks for no animation.

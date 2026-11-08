@@ -84,6 +84,7 @@ sealed interface Route {
     data object Spaces : Route
     data object Activity : Route
     data class Session(val address: String) : Route
+    data class Space(val name: String) : Route
     /** Screenshots: all, or one [session]'s; [open] shows that one in the viewer. */
     data class Screenshots(val session: String? = null, val open: String? = null) : Route
 
@@ -95,6 +96,7 @@ sealed interface Route {
             Spaces -> "spaces"
             Activity -> "activity"
             is Session -> "session:${r.address}"
+            is Space -> "space:${r.name}"
             is Screenshots -> "shots:${r.session.orEmpty()}:${r.open.orEmpty()}"
         }
 
@@ -104,6 +106,7 @@ sealed interface Route {
             s == "spaces" -> Spaces
             s == "activity" -> Activity
             s.startsWith("session:") -> Session(s.removePrefix("session:"))
+            s.startsWith("space:") -> Space(s.removePrefix("space:"))
             s.startsWith("shots:") -> s.removePrefix("shots:").split(":", limit = 2).let { Screenshots(it[0].ifEmpty { null }, it.getOrNull(1)?.ifEmpty { null }) }
             else -> Home
         }
@@ -199,8 +202,9 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
                     Route.Home -> HomeScreen(session, voice, onVoice = { go(Route.Voice(it)) }, onChat = { go(Route.Chat) }, onOpen = { go(Route.Session(it)) }, onAlerts = { go(Route.Activity) }, onMenu = { menu = true }, onRepair = onRepair)
                     is Route.Voice -> VoiceScreen(session, voice, startListening = route.listen, onClose = { back() }, onChat = { go(Route.Chat) })
                     Route.Chat -> ChatScreen(session, onClose = { back() }, onVoice = { go(Route.Voice(true)) }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
-                    Route.Spaces -> SpacesScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) })
-                    Route.Activity -> ActivityScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) })
+                    Route.Spaces -> SpacesScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onSpace = { go(Route.Space(it)) })
+                    Route.Activity -> ActivityScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
+                    is Route.Space -> SpaceScreen(session, route.name, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
                     is Route.Session -> SessionScreen(session, route.address, onBack = { back() }, onShot = { go(Route.Screenshots(route.address, it)) })
                     is Route.Screenshots -> ScreenshotsScreen(session, route.session, route.open, onBack = { back() })
                 }

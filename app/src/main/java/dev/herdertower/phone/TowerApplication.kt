@@ -15,11 +15,15 @@ class TowerApplication : Application() {
         private set
     lateinit var voice: VoiceController
         private set
+    /** The one draft Home and Chat share. */
+    lateinit var composer: dev.herdertower.phone.compose.Composer
+        private set
 
     override fun onCreate() {
         super.onCreate()
         session = TowerSession(this, KeystoreCredentialStore(this), Settings(this))
         voice = VoiceController(session)
+        composer = dev.herdertower.phone.compose.Composer(this, session)
         ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, e ->
             when (e) {
                 Lifecycle.Event.ON_START -> session.setForeground(true)

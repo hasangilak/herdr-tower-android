@@ -28,6 +28,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.ArrowUpward
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.GraphicEq
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Pause
 import androidx.compose.material3.CircularProgressIndicator
@@ -260,13 +261,13 @@ fun MicOrSend(hasText: Boolean, sending: Boolean, enabled: Boolean, size: Dp, on
             .clip(CircleShape)
             .background(if (enabled) tc.accentBrush else androidx.compose.ui.graphics.SolidColor(tc.idle))
             .clickable(enabled = enabled && !sending, role = Role.Button, onClick = { if (hasText) onSend() else onMic() })
-            .semantics { contentDescription = if (hasText) "Send" else "Talk" },
+            .semantics { contentDescription = if (hasText) "Send" else "Talk to the tower" },
         contentAlignment = Alignment.Center,
     ) {
         when {
             sending -> CircularProgressIndicator(Modifier.size(20.dp), color = tc.onAccent, strokeWidth = 2.dp)
             hasText -> Icon(Icons.AutoMirrored.Filled.Send, null, Modifier.size(22.dp), tint = tc.onAccent)
-            else -> Icon(Icons.Filled.Mic, null, Modifier.size(24.dp), tint = tc.onAccent)
+            else -> Icon(Icons.Filled.GraphicEq, null, Modifier.size(24.dp), tint = tc.onAccent)
         }
     }
 }

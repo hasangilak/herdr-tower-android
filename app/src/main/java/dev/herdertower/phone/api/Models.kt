@@ -195,7 +195,10 @@ data class Screen(val address: String = "", val screen: String = "")
 data class AskRequest(val text: String)
 
 @Serializable
-data class AskResponse(val sent: String = "")
+data class AskResponse(val sent: String = "", val attachments: List<String> = emptyList())
+
+/** A picture sent with an ask: a file name, its bytes and type. */
+class ImagePart(val name: String, val bytes: ByteArray, val mime: String)
 
 @Serializable
 data class AnswerRequest(val decision: String, val note: String? = null)
