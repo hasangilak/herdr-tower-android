@@ -184,9 +184,11 @@ fun rememberComposerActions(composer: Composer, onTalk: () -> Unit, onSent: () -
             pictures = { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
             files = { pickFiles.launch(arrayOf("*/*")) },
             camera = {
-                val f = composer.cameraFile()
-                cameraFile = f
-                shoot.launch(FileProvider.getUriForFile(context, context.packageName + ".files", f))
+                perms.withCamera {
+                    val f = composer.cameraFile()
+                    cameraFile = f
+                    shoot.launch(FileProvider.getUriForFile(context, context.packageName + ".files", f))
+                }
             },
             dictate = { perms.withMic { composer.toggleDictation() } },
             add = add,

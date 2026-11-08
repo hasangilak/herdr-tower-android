@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.requiredSize
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.material.icons.Icons
@@ -253,7 +254,7 @@ private fun SmallRound(icon: androidx.compose.ui.graphics.vector.ImageVector, la
 fun MicOrSend(hasText: Boolean, sending: Boolean, enabled: Boolean, size: Dp, onMic: () -> Unit, onSend: () -> Unit) {
     Box(
         Modifier
-            .size(size)
+            .requiredSize(size)
             .clip(CircleShape)
             .background(if (enabled) tc.accentBrush else androidx.compose.ui.graphics.SolidColor(tc.idle))
             .clickable(enabled = enabled && !sending, role = Role.Button, onClick = { if (hasText) onSend() else onMic() })

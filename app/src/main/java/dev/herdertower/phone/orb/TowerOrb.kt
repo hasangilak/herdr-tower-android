@@ -249,7 +249,7 @@ fun TowerOrb(
 private fun compile(mode: OrbShader.Mode, steps: Int): Any? {
     if (Build.VERSION.SDK_INT < Build.VERSION_CODES.TIRAMISU) return null
     for (n in OrbShader.STEP_LADDER.filter { it <= steps }.ifEmpty { listOf(OrbShader.STEP_LADDER.last()) }) {
-        runCatching { return RuntimeShader(OrbShader.source(n, mode)) }
+        runCatching { return RuntimeShader(OrbShader.source(n, mode)).also { OrbProbe.drawn(n) } }
             .onFailure { android.util.Log.w("TowerOrb", "${mode.name} shader, $n steps: ${it.message?.lineSequence()?.take(3)?.joinToString(" | ")}") }
     }
     return null

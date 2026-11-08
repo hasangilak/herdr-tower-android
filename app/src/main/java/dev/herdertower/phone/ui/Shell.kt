@@ -127,6 +127,9 @@ class Permissions(private val context: Context, private val ask: (Array<String>,
 
     fun withMic(then: () -> Unit) = if (mic) then() else ask(arrayOf(Manifest.permission.RECORD_AUDIO)) { if (mic) then() }
 
+    /** The app declares CAMERA (for the QR), so the system camera may only be used once it's granted. */
+    fun withCamera(then: () -> Unit) = if (has(Manifest.permission.CAMERA)) then() else ask(arrayOf(Manifest.permission.CAMERA)) { if (has(Manifest.permission.CAMERA)) then() }
+
     fun forVoice(then: () -> Unit) {
         val want = buildList {
             add(Manifest.permission.RECORD_AUDIO)
@@ -299,6 +302,18 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
                 }
                 Switch(voiceOn, { setVoice(it, session, perms, context) }, colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent))
             }
+            // Phones (Samsung especially) stop background services to save battery: offer the exemption.
+            val power = context.getSystemService(android.os.PowerManager::class.java)
+            if (voiceOn && power != null && !power.isIgnoringBatteryOptimizations(context.packageName)) {
+                TextButton(onClick = {
+                    runCatching {
+                        context.startActivity(
+                            android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
+                                .setData(android.net.Uri.parse("package:" + context.packageName)),
+                        )
+                    }
+                }) { Text("Keep the voice running in the background (battery setting)", color = tc.text) }
+            }
             Spacer(Modifier.height(10.dp))
             Text("Mac microphone", style = MaterialTheme.typography.labelLarge, color = tc.faint)
             Segments(Modifier.fillMaxWidth()) {
@@ -332,9 +347,10 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
             // What's under the hood on this phone (read it out when something looks wrong).
             val orb by dev.herdertower.phone.orb.OrbProbe.report.collectAsStateWithLifecycle()
             val frameMs by dev.herdertower.phone.orb.OrbProbe.frameMs.collectAsStateWithLifecycle()
+            val drawnSteps by dev.herdertower.phone.orb.OrbProbe.drawnSteps.collectAsStateWithLifecycle()
             androidx.compose.foundation.text.selection.SelectionContainer {
                 Text(
-                    "Diagnostics: " + (orb?.line(frameMs) ?: "probing the orb…"),
+                    "Diagnostics: " + (orb?.line(frameMs, drawnSteps) ?: "probing the orb…"),
                     Modifier.padding(top = 6.dp), style = MaterialTheme.typography.labelSmall, color = tc.faint,
                 )
             }

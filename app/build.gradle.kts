@@ -8,12 +8,29 @@ android {
     namespace = "dev.herdertower.phone"
     compileSdk = 36
 
+    // Every build a higher version (the commit count), so a new APK always installs over the last one.
+    val commits = providers.exec { commandLine("git", "rev-list", "--count", "HEAD") }.standardOutput.asText.map { it.trim().toIntOrNull() ?: 1 }.getOrElse(1)
+
     defaultConfig {
         applicationId = "dev.herdertower.phone"
         minSdk = 29
         targetSdk = 36
-        versionCode = 1
-        versionName = "0.1.0"
+        versionCode = commits
+        versionName = "0.$commits"
+    }
+
+    signingConfigs {
+        // The same key for every build on this machine (the SDK's debug key, ~/.android/debug.keystore,
+        // or one named in ~/.gradle/gradle.properties as towerKeystore/towerKeystorePassword/towerKeyAlias),
+        // so an update installs in place over the last APK instead of asking to uninstall.
+        getByName("debug") {
+            providers.gradleProperty("towerKeystore").orNull?.let { path ->
+                storeFile = file(path)
+                storePassword = providers.gradleProperty("towerKeystorePassword").get()
+                keyAlias = providers.gradleProperty("towerKeyAlias").get()
+                keyPassword = providers.gradleProperty("towerKeystorePassword").get()
+            }
+        }
     }
 
     buildTypes {
@@ -22,6 +39,9 @@ android {
             if (providers.gradleProperty("demo").isPresent) applicationIdSuffix = ".demo"
         }
         release {
+            // Signed with the debug key unless a real one is configured: installable for local use.
+            signingConfig = signingConfigs.getByName("debug")
+            if (providers.gradleProperty("demo").isPresent) applicationIdSuffix = ".demo"
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }

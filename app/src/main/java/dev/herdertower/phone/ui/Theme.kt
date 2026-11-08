@@ -8,6 +8,9 @@ import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.only
+import androidx.compose.foundation.layout.windowInsetsPadding
+import androidx.compose.foundation.layout.displayCutout
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Typography
 import androidx.compose.material3.darkColorScheme
@@ -228,6 +231,13 @@ fun Backdrop(phase: String, needsYou: Boolean, modifier: Modifier = Modifier, co
             .drawBehind {
                 drawRect(Brush.radialGradient(listOf(glow, Color.Transparent), center = Offset(size.width / 2, size.height * 0.08f), radius = size.height * 0.6f))
             },
-        content = content,
-    )
+    ) {
+        // The background fills the whole screen; content keeps clear of a cutout at the side (landscape).
+        Box(
+            Modifier.fillMaxSize().windowInsetsPadding(
+                androidx.compose.foundation.layout.WindowInsets.displayCutout.only(androidx.compose.foundation.layout.WindowInsetsSides.Horizontal),
+            ),
+            content = content,
+        )
+    }
 }

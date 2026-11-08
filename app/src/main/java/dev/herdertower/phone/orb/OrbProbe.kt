@@ -39,10 +39,11 @@ data class OrbReport(
 ) {
     val device: String get() = "Android ${Build.VERSION.RELEASE} (${Build.VERSION.SDK_INT}) · ${Build.MANUFACTURER} ${Build.MODEL}"
 
-    fun line(frameMs: Float): String = buildList {
+    fun line(frameMs: Float, drawnSteps: Int = 0): String = buildList {
         add(device)
         if (gpu.isNotBlank()) add("GPU $gpu")
-        add("orb: ${tier.label}" + if (steps > 0) ", $steps steps" else "")
+        val n = if (tier != OrbTier.Gradient && drawnSteps > 0) drawnSteps else steps
+        add("orb: ${tier.label}" + if (n > 0 && tier != OrbTier.Gradient) ", $n steps" else "")
         if (tier != OrbTier.Gradient || coverage > 0f) add("coverage ${(coverage * 100).toInt()}%")
         if (lookup.isNotBlank()) add("maps $lookup")
         if (error.isNotBlank()) add(error)
@@ -71,6 +72,7 @@ object OrbProbe {
         }
 
     private fun apply() {
+        _drawnSteps.value = 0 // until the newly chosen shader draws
         val p = probed.value ?: return
         val o = override
         _report.value = if (o == null || o == p.tier) p else p.copy(tier = o, steps = if (o == OrbTier.Gradient) 0 else p.steps.takeIf { it > 0 } ?: 64, error = "chosen in the menu")
@@ -78,6 +80,14 @@ object OrbProbe {
 
     private val _frameMs = MutableStateFlow(0f)
     val frameMs: StateFlow<Float> = _frameMs.asStateFlow()
+
+    private val _drawnSteps = MutableStateFlow(0)
+    /** The march steps of the shader actually drawing (it may compile below what the probe tried). */
+    val drawnSteps: StateFlow<Int> = _drawnSteps.asStateFlow()
+
+    fun drawn(steps: Int) {
+        _drawnSteps.value = steps
+    }
 
     fun frame(ms: Float) {
         _frameMs.value = if (_frameMs.value == 0f) ms else _frameMs.value * 0.95f + ms * 0.05f

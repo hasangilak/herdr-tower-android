@@ -173,7 +173,7 @@ fun HomeScreen(
                     Spacer(Modifier.width(8.dp))
                     RouteToggle(session)
                     Spacer(Modifier.width(8.dp))
-                    FocusPill(ui.focus, ui.spaces, ::focus)
+                    FocusPill(ui.focus, ui.spaces, ::focus, Modifier.weight(1f, fill = false))
                 },
                 trailing = {
                     DictateButton(composer, actions)
@@ -219,7 +219,7 @@ fun HomeContent(
                     Text("${ui.greeting} · ${ui.towerName}", style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
                         ui.needsLine.replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodyLarge, color = tc.text,
-                        fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
+                        fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis,
                     )
                 }
                 RoundIcon(Icons.Filled.Notifications, "Activity", badge = ui.alerts, onClick = onAlerts)
@@ -309,7 +309,7 @@ private data class Quad(val icon: androidx.compose.ui.graphics.vector.ImageVecto
 fun AskBox(
     field: @Composable () -> Unit,
     above: @Composable () -> Unit = {},
-    leading: @Composable () -> Unit = {},
+    leading: @Composable androidx.compose.foundation.layout.RowScope.() -> Unit = {},
     trailing: @Composable () -> Unit = {},
 ) {
     val shape = RoundedCornerShape(30.dp)
@@ -326,8 +326,9 @@ fun AskBox(
         Box(Modifier.fillMaxWidth().heightIn(min = 52.dp).padding(end = 8.dp)) { field() }
         Spacer(Modifier.height(8.dp))
         Row(verticalAlignment = Alignment.CenterVertically) {
-            leading()
-            Spacer(Modifier.weight(1f))
+            // The left controls give way (the focus pill shortens) so the round button keeps its size.
+            Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) { leading() }
+            Spacer(Modifier.width(8.dp))
             trailing()
         }
     }
@@ -335,9 +336,9 @@ fun AskBox(
 
 /** Picks the space focus: its news is spoken, the others' held. */
 @Composable
-fun FocusPill(focus: String?, spaces: List<String>, onFocus: (String?) -> Unit) {
+fun FocusPill(focus: String?, spaces: List<String>, onFocus: (String?) -> Unit, modifier: Modifier = Modifier) {
     var open by remember { mutableStateOf(false) }
-    Box {
+    Box(modifier) {
         Row(
             Modifier
                 .clip(CircleShape)
@@ -347,7 +348,7 @@ fun FocusPill(focus: String?, spaces: List<String>, onFocus: (String?) -> Unit) 
                 .padding(start = 14.dp, end = 10.dp, top = 9.dp, bottom = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Text(focus ?: "All spaces", style = MaterialTheme.typography.labelLarge, color = tc.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.widthIn(max = 150.dp))
+            Text(focus ?: "All spaces", style = MaterialTheme.typography.labelLarge, color = tc.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false).widthIn(max = 150.dp))
             Icon(Icons.Filled.KeyboardArrowDown, null, Modifier.size(18.dp), tint = tc.muted)
         }
         DropdownMenu(open, { open = false }) {
