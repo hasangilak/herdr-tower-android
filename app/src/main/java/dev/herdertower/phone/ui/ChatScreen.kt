@@ -43,6 +43,7 @@ import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Description
 import androidx.compose.runtime.produceState
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NorthEast
 import androidx.compose.material.icons.filled.Notifications
@@ -55,6 +56,7 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
+import androidx.compose.foundation.gestures.scrollBy
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.remember
@@ -267,14 +269,28 @@ fun ChatContent(
         }
     }
     val working = work != null
-    // New at the end (a message, the working line, something sent): follow it. Older ones loaded at the top don't move the view.
-    val lastKey = (rows.lastOrNull() as? ChatRow.Item)?.e?.let { "${it.at}${it.text.length}" }
-    LaunchedEffect(lastKey, working, pending.size, saying?.length) {
-        if (rows.isNotEmpty()) list.animateScrollToItem(rows.size + pending.size + (if (working) 1 else 0) + (if (saying != null) 1 else 0))
+    // The view sticks to the newest message (also while pictures load and grow), until you scroll up;
+    // back at the end, or something new at the end (a message, the working line, something sent), it follows again.
+    var follow by remember { mutableStateOf(true) }
+    LaunchedEffect(list) {
+        list.interactionSource.interactions.collect { if (it is androidx.compose.foundation.interaction.DragInteraction.Start) follow = false }
     }
-    // Scrolled to the top: load the older messages.
+    LaunchedEffect(list) {
+        androidx.compose.runtime.snapshotFlow { list.canScrollForward }.collect { if (!it && list.layoutInfo.totalItemsCount > 0) follow = true }
+    }
+    val lastKey = (rows.lastOrNull() as? ChatRow.Item)?.e?.let { "${it.id}${it.at}${it.text.length}" }
+    LaunchedEffect(lastKey, working, pending.size, saying?.length) { follow = true }
+    LaunchedEffect(list) {
+        androidx.compose.runtime.snapshotFlow { Triple(list.layoutInfo.totalItemsCount, list.canScrollForward, follow) }.collect { (n, more, f) ->
+            if (f && more && n > 0) {
+                list.scrollToItem(n - 1)
+                list.scrollBy(1_000_000f) // to the very end of the last item
+            }
+        }
+    }
+    // Scrolled up to the top: load the older messages.
     val atTop by remember { androidx.compose.runtime.derivedStateOf { list.firstVisibleItemIndex == 0 && list.layoutInfo.totalItemsCount > 1 } }
-    LaunchedEffect(atTop, canLoadMore) { if (atTop && canLoadMore && rows.isNotEmpty()) onLoadOlder() }
+    LaunchedEffect(atTop, canLoadMore, follow) { if (atTop && !follow && canLoadMore && rows.isNotEmpty()) onLoadOlder() }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
         Box(Modifier.fillMaxWidth().padding(top = 12.dp, start = 16.dp, end = 16.dp, bottom = 4.dp)) {
@@ -401,6 +417,8 @@ fun eventLook(e: HistoryEntry): Triple<ImageVector, Color, String> {
             "watch" -> Triple(Icons.Filled.Terminal, tc.muted, ChatModel.report(e.text))
             "alert" -> Triple(Icons.Filled.Notifications, tc.accentHi.takeIf { tc.dark } ?: tc.accent, e.text)
             "summary" -> Triple(Icons.AutoMirrored.Filled.Article, tc.muted, "$who: ${e.text}")
+            // A card of screenshots a session sent (the pictures follow).
+            "screenshot" -> Triple(Icons.Filled.PhotoLibrary, tc.muted, e.text.ifBlank { if (who.isEmpty()) "Screenshots" else "Screenshots from $who" })
             else -> Triple(Icons.Filled.Info, tc.idle, e.text)
         }
     }
