@@ -1,27 +1,41 @@
 package dev.herdertower.phone.voice
 
+import android.annotation.SuppressLint
+import android.media.AudioFormat
+import android.media.AudioRecord
+import android.media.MediaRecorder
+import android.util.Log
 import dev.herdertower.phone.api.AudioClip
 import dev.herdertower.phone.data.TowerSession
-import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
+import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withTimeoutOrNull
+import kotlin.math.sqrt
 
 /**
- * Say "stop" to hush the tower while it talks on the phone. Only while a
- * reply plays, the microphone listens through the echo canceller (the call
- * source), and each short burst of speech goes to the tower's own
- * transcriber (`POST /v1/transcribe`, the same Whisper as the Mac's, English
- * and German); a hush word stops it. Words the tower itself just said don't
- * count, so its own voice coming back through the microphone can't stop it.
+ * Say "stop" to hush the tower while it talks on the phone.
+ *
+ * While it talks, one plain recording runs (the recognition source: no call
+ * mode, no echo-cancelling path that would change how the phone plays its
+ * own voice), the same one from the first sentence to the last. [Bursts]
+ * cuts short bursts of speech out of it, a word or two; those go to the
+ * tower's transcriber (`POST /v1/transcribe`, Whisper, English and German),
+ * one at a time, and a hush word stops it. The tower's own sentences heard
+ * back are too long to be sent, and words it just said don't count.
  */
 class HushListener(private val session: TowerSession, private val onHush: () -> Unit) {
     private var job: Job? = null
+    private var stopping: Job? = null
     /** What it said lately (this sentence and the one before). */
     private val recent = ArrayDeque<String>()
 
-    /** Follows the player: listen while [playing] is a clip and [enabled], stop otherwise. Call on the main thread. */
+    @Volatile var listening = false
+        private set
+
+    /** Follows the player: listen while [playing] is a clip and [enabled]; a moment after it ends, stop. Main thread. */
     fun follow(playing: AudioClip?, enabled: Boolean) {
         playing?.text?.let {
             synchronized(recent) {
@@ -29,32 +43,64 @@ class HushListener(private val session: TowerSession, private val onHush: () -> 
                 while (recent.size > 2) recent.removeFirst()
             }
         }
-        if (playing != null && enabled) start() else stop()
+        if (!enabled) return stop()
+        if (playing != null) {
+            stopping?.cancel()
+            stopping = null
+            start()
+        } else if (job != null && stopping == null) {
+            stopping = session.scope.launch {
+                delay(2000)
+                stop()
+            }
+        }
     }
 
+    @SuppressLint("MissingPermission")
     private fun start() {
         if (job?.isActive == true) return
-        android.util.Log.i(TAG, "listening while it talks")
+        val rate = 16_000
+        val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+        val rec = runCatching {
+            AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, rate))
+        }.getOrNull()?.takeIf { it.state == AudioRecord.STATE_INITIALIZED }
+        if (rec == null) {
+            Log.w(TAG, "no microphone")
+            return // the Stop button still works
+        }
+        val bursts = Channel<ByteArray>(Channel.CONFLATED)
+        listening = true
+        Log.i(TAG, "listening while it talks")
         job = session.scope.launch {
-            while (isActive) {
-                val take = try {
-                    Take.start(session.scope, endOnSilence = true, pauseMs = 400, cancelEcho = true)
-                } catch (e: Exception) {
-                    android.util.Log.w(TAG, "no microphone: ${e.message}")
-                    return@launch // no microphone now: the Stop button still works
-                }
+            val checker = launch { for (pcm in bursts) check(Wav.encode(pcm, rate, 1)) }
+            launch(Dispatchers.IO) {
+                val cut = Bursts(rate)
+                val frame = ShortArray(rate / 50)
+                rec.startRecording()
                 try {
-                    // A burst of speech ends at a short pause; never longer than a few seconds.
-                    withTimeoutOrNull(BURST_MS) { take.ended.await() }
-                    val heard = take.heardSpeech
-                    val wav = take.stop()
-                    android.util.Log.i(TAG, "burst ${take.durationMs} ms, speech=$heard")
-                    if (heard && take.durationMs >= 300) check(wav)
-                } catch (e: CancellationException) {
-                    runCatching { take.stop() }
-                    throw e
+                    while (isActive) {
+                        val n = rec.read(frame, 0, frame.size)
+                        if (n <= 0) break
+                        val bytes = ByteArray(n * 2)
+                        var sum = 0.0
+                        for (i in 0 until n) {
+                            val v = frame[i].toInt()
+                            bytes[2 * i] = (v and 0xff).toByte()
+                            bytes[2 * i + 1] = (v shr 8).toByte()
+                            sum += v.toDouble() * v
+                        }
+                        cut.feed(bytes, sqrt(sum / n))?.let {
+                            Log.i(TAG, "burst ${it.size / 32} ms")
+                            bursts.trySend(it)
+                        }
+                    }
+                } finally {
+                    runCatching { rec.stop() }
+                    rec.release()
+                    bursts.close()
                 }
-            }
+            }.join()
+            checker.join()
         }
     }
 
@@ -62,7 +108,7 @@ class HushListener(private val session: TowerSession, private val onHush: () -> 
         val said = synchronized(recent) { recent.joinToString(" ") }
         session.act { it.transcribe(wav) }.onSuccess { r ->
             val hush = isHush(r.heard, said)
-            android.util.Log.i(TAG, if (hush) "heard a hush word" else "heard ${words(r.heard).size} words, no hush")
+            Log.i(TAG, if (hush) "heard a hush word" else "heard ${words(r.heard).size} words, no hush")
             if (hush) {
                 onHush()
                 stop()
@@ -71,13 +117,16 @@ class HushListener(private val session: TowerSession, private val onHush: () -> 
     }
 
     fun stop() {
+        stopping?.cancel()
+        stopping = null
         job?.cancel()
         job = null
+        if (listening) Log.i(TAG, "stopped listening")
+        listening = false
     }
 
     companion object {
         private const val TAG = "HushListener"
-        private const val BURST_MS = 2000L
 
         /** English and German words for "be quiet". */
         val WORDS = setOf("hush", "stop", "quiet", "shush", "silence", "enough", "ruhe", "stopp", "halt", "still", "schweig", "aufhören")

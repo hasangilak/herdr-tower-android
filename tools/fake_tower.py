@@ -138,6 +138,28 @@ def tone(ms, hz):
     return b"RIFF" + struct.pack("<I", 36 + len(pcm)) + b"WAVEfmt " + struct.pack("<IHHIIHH", 16, 1, 1, rate, rate * 2, 2, 16) + b"data" + struct.pack("<I", len(pcm)) + pcm
 
 
+def speech(text, fallback_hz):
+    """A sentence as 24 kHz mono WAV: spoken with macOS `say` when FAKE_SAY is set (real speech, like Kokoro's), else a tone.
+    Returns (wav, ms)."""
+    if os.environ.get("FAKE_SAY") and shutil.which("say"):
+        with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+            subprocess.run(["say", "-o", f.name, "--data-format=LEI16@24000", text], check=True)
+            wav = open(f.name, "rb").read()
+        # `say` writes extra chunks (FLLR); the phone walks chunks, so it is passed on as is.
+        data = wav.find(b"data")
+        n = struct.unpack("<I", wav[data + 4:data + 8])[0] if data > 0 else 0
+        return wav, n * 1000 // 48000
+    ms = 400 + 40 * len(text)
+    return tone(min(ms, 2500), fallback_hz), min(ms, 2500)
+
+
+# Throttling, to reproduce a slow tower or Wi-Fi: FAKE_LATE_MS makes every other sentence arrive that long
+# after the previous one has finished playing (the tower still synthesizing); FAKE_AUDIO_DELAY_MS delays
+# serving each clip.
+LATE_MS = int(os.environ.get("FAKE_LATE_MS", "0"))
+AUDIO_DELAY_MS = int(os.environ.get("FAKE_AUDIO_DELAY_MS", "0"))
+
+
 def publish(event, data, voice_only=False):
     with LOCK:
         for q, voice in list(SUBS):
@@ -206,13 +228,15 @@ def speak(sentences):
     HUSHED[0] = False
     set_state(phase="speaking", speaking=True)
     for i, s in enumerate(sentences):
+        ms = 1200
         if voice:
             cid = f"a{secrets.token_hex(3)}"
-            ms = 400 + 40 * len(s)
-            CLIPS[cid] = tone(min(ms, 2500), 440 + 60 * i)
-            publish("audio", {"id": cid, "kind": "reply", "text": s, "ms": ms, "url": f"/v1/audio/{cid}"}, voice_only=True)
+            CLIPS[cid], ms = speech(s, 440 + 60 * i)
+            publish("audio", {"id": cid, "kind": "reply", "text": s, "ms": ms, "url": f"/v1/audio/{cid}", "at_ms": now()}, voice_only=True)
+            print(f"clip {cid}: {ms} ms", flush=True)
         set_state(said=" ".join(sentences[: i + 1]), said_ms=now())
-        time.sleep(1.2)
+        # Like the real tower, the next sentence is usually ready before this one ends; throttled, every other one is late.
+        time.sleep((ms + LATE_MS) / 1000 if LATE_MS and i % 2 == 0 else min(1.2, ms / 1000 * 0.7))
     set_state(phase="idle", speaking=False, said=" ".join(sentences), said_ms=now())
     HUSHED[0] = False
 
@@ -342,6 +366,7 @@ class H(BaseHTTPRequestHandler):
             if len(seg) == 3 and seg[0] == "sessions" and seg[2] == "screen":
                 return self.send(200, {"address": seg[1], "screen": SCREEN if seg[1] == "t3" else f"$ # {seg[1]} at {time.strftime('%H:%M:%S')}\n"})
             if len(seg) == 2 and seg[0] == "audio":
+                time.sleep(AUDIO_DELAY_MS / 1000)
                 wav = CLIPS.get(seg[1])
                 return self.send(200, ctype="audio/wav", body=wav) if wav else self.err(404, "no_clip", "gone")
             if seg == ["events"]:

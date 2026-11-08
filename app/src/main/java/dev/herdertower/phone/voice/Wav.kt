@@ -67,5 +67,43 @@ object Wav {
         else -> throw IllegalArgumentException("unsupported WAV: format ${info.format}, ${info.bitsPerSample} bits")
     }
 
+    /**
+     * Fades the first and last [ms] of 16-bit PCM in and out, in place, so
+     * clips joined end to end don't click where a sentence starts or stops
+     * off zero.
+     */
+    fun fadeEdges(pcm: ByteArray, sampleRate: Int, channels: Int, ms: Int = 3) {
+        val frames = pcm.size / (2 * channels)
+        val n = minOf(sampleRate * ms / 1000, frames / 2)
+        if (n <= 0) return
+        fun scale(frame: Int, g: Float) {
+            for (c in 0 until channels) {
+                val i = (frame * channels + c) * 2
+                val v = ((pcm[i].toInt() and 0xff) or (pcm[i + 1].toInt() shl 8)).toShort()
+                val out = (v * g).toInt()
+                pcm[i] = (out and 0xff).toByte()
+                pcm[i + 1] = (out shr 8).toByte()
+            }
+        }
+        for (k in 0 until n) {
+            val g = k.toFloat() / n
+            scale(k, g)
+            scale(frames - 1 - k, g)
+        }
+    }
+
+    /** The level of 16-bit PCM in dBFS (RMS), for the clip log: -90 for silence. */
+    fun rmsDb(pcm: ByteArray): Double {
+        var sum = 0.0
+        val n = pcm.size / 2
+        if (n == 0) return -90.0
+        for (i in 0 until n) {
+            val v = ((pcm[2 * i].toInt() and 0xff) or (pcm[2 * i + 1].toInt() shl 8)).toShort().toDouble()
+            sum += v * v
+        }
+        val rms = kotlin.math.sqrt(sum / n) / 32768.0
+        return if (rms <= 0) -90.0 else maxOf(-90.0, 20 * kotlin.math.log10(rms))
+    }
+
     private fun tag(bytes: ByteArray, at: Int) = String(bytes, at, 4, Charsets.US_ASCII)
 }

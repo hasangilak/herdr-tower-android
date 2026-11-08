@@ -376,9 +376,12 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
             val orb by dev.herdertower.phone.orb.OrbProbe.report.collectAsStateWithLifecycle()
             val frameMs by dev.herdertower.phone.orb.OrbProbe.frameMs.collectAsStateWithLifecycle()
             val drawnSteps by dev.herdertower.phone.orb.OrbProbe.drawnSteps.collectAsStateWithLifecycle()
+            val playback by session.player.stats.collectAsStateWithLifecycle()
+            val hushOn by session.hushWord.collectAsStateWithLifecycle()
             androidx.compose.foundation.text.selection.SelectionContainer {
                 Text(
-                    "Diagnostics: " + (orb?.line(frameMs, drawnSteps) ?: "probing the orb…"),
+                    "Diagnostics: " + (orb?.line(frameMs, drawnSteps) ?: "probing the orb…") +
+                        "\n" + playback.line() + " · say-stop ${if (hushOn && voiceOn) "on" else "off"}",
                     Modifier.padding(top = 6.dp), style = MaterialTheme.typography.labelSmall, color = tc.faint,
                 )
             }
