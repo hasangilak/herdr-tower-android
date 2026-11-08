@@ -8,3 +8,4 @@ build/
 captures/
 *.apk
 *.aab
+tools/.fake_tower/
