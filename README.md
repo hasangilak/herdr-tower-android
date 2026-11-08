@@ -1,6 +1,6 @@
 # Tower for Android
 
-A phone remote for the herder tower: it mirrors the orb's panel (state, spaces and sessions, jobs, history, chat), lets you act on every agent (ask, approve or refuse what a blocked agent asks, focus a space, hush, the Mac microphone's mode) and can be the tower's voice (you talk into the phone; the tower's replies play on the phone and the Mac stays silent).
+A phone remote for the herder tower: it mirrors the orb's panel (state, spaces and sessions, jobs, history, chat, screenshots), lets you act on every agent (ask, approve or refuse what a blocked agent asks, focus a space, hush, the Mac microphone's mode) and can be the tower's voice (you talk into the phone; the tower's replies play on the phone and the Mac stays silent).
 
 It speaks the tower's phone API v1, `docs/mobile-api.md` in herder-tower (branch `mobile-api`).
 
@@ -10,7 +10,7 @@ Needs JDK 17+ (here Homebrew's `openjdk@21`) and the Android SDK with platform 3
 
 ```sh
 export JAVA_HOME=/opt/homebrew/opt/openjdk@21
-./gradlew testDebugUnitTest      # unit tests (API client against a pinned HTTPS fake, SSE, pairing links, WAV)
+./gradlew testDebugUnitTest      # 68 unit tests: API client against a pinned HTTPS fake, SSE, pairing links and QR, WAV, orb port, suggestions, markdown
 ./gradlew assembleDebug          # app/build/outputs/apk/debug/app-debug.apk
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
@@ -48,9 +48,20 @@ python3 tools/fake_tower.py          # prints a pairing link for the emulator (1
 adb shell am start -a android.intent.action.VIEW -d '"<the link>"' dev.herdertower.phone
 ```
 
+## The look
+
+Home, Voice and Chat are the main flow. Home has a greeting, suggestions from live data (a blocked session, status, catch up, news in a space, focus), and a roomy ask box with the voice toggle, the space focus and a mic. Spaces, Activity, Screenshots and settings open from the menu sheet. The colours are warm copper falling into black (light: peach into cream); every text pair was checked for at least 4.5:1 contrast. Motion is slow and switches off when the system asks for no animation.
+
+The orb is the Mac's own, ported from herder-tower's `src/orb`:
+- the liquid physics (`liquid.rs`), the sim (`sim.rs`) and the phase choreography with its cues (`render.rs`'s `Drive`: calm, listening cyan, replying periwinkle, alerts amber, blocked swells and the red dot), line for line in `orb/`;
+- the raymarched glass cup of `orb.metal` as an AGSL shader (Android 13+; a gradient stand-in before).
+
+AGSL limits a program's size, and the 45-mode surface plus the boiling noise in every march step exceed it. So `liquid()` and `boil()` are evaluated on the CPU each frame into two direction maps the shader samples. The march (160 steps), colour ramps, tint, halo and transparency are the Mac's. The Mac's motion trail (a feedback texture) is left out.
+
 ## Layout
 
 - `api/`: `PairLink`, `Fingerprint`, `PinnedTrustManager`, `CertificateProbe`, `TowerClient` (every call), `SseParser`, `TowerEvent`, models
 - `data/`: `KeystoreCredentialStore`, `TowerSession` (the one stream, backoff, live state and lists, actions)
 - `voice/`: `Take` (recorder), `Wav`, `ClipPlayer`, `VoiceController` (hold, tap, barge-in), `VoiceService`
-- `ui/`: Pairing, Talk, Chat, Spaces, Activity and Session screens. Colours are the orb panel's, including the per-account badge hue (FNV-1a of the name, the same as on the Mac; the default account is outlined).
+- `orb/`: `Liquid`, `Sim`, `Drive`/`Cue`, `OrbShader` (AGSL), `OrbMaps`, `TowerOrb`
+- `ui/`: `Shell` (routes, menu sheet), Home, Voice, Chat (markdown replies), Spaces, Activity, Session, Screenshots (gallery and viewer), Pairing; `HomeModel` and `Markdown` hold the logic, tested on the JVM; `Previews.kt` has Home and Chat in both themes. Account badges use the Mac's per-name hue (FNV-1a; the default account is outlined).
