@@ -1,59 +1,117 @@
 #!/usr/bin/env python3
-"""A fake tower for trying the app without the Mac's daemon.
+"""A fake tower for trying the app (and taking its screenshots) without the Mac.
 
 Speaks the phone API (v1) from herder-tower's docs/mobile-api.md closely
-enough to pair, browse, ask, answer and hear audio: HTTPS with a
-self-signed ECDSA P-256 certificate, a pairing code, bearer tokens, SSE
-with pings, and 24 kHz WAV clips (a short tone per sentence).
+enough for every screen: HTTPS with a self-signed ECDSA P-256 certificate,
+a pairing code, bearer tokens, SSE with pings, made-up sessions, spaces,
+jobs, history (markdown answers, a message with a picture), screenshots,
+the brain's `work`, transcription, multipart asks with files, and 24 kHz
+WAV clips (a short tone per sentence). All data is invented.
 
     python3 tools/fake_tower.py [--host 127.0.0.1] [--port 7899]
 
 It prints the pairing link. From the emulator, the Mac is 10.0.2.2:
 
-    adb shell am start -d "herdertower://pair?h=10.0.2.2&p=7899&c=...&fp=..."
+    adb shell am start -a android.intent.action.VIEW -d '"herdertower://pair?h=10.0.2.2&p=7899&c=...&fp=..."' dev.herdertower.phone
 """
-import argparse, hashlib, io, json, math, os, queue, secrets, ssl, struct, subprocess, sys, threading, time
+import argparse, hashlib, json, math, os, queue, secrets, ssl, struct, subprocess, sys, threading, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 CERT_DIR = os.path.join(HERE, ".fake_tower")
 now = lambda: int(time.time() * 1000)
+T0 = now()
+MIN = 60_000
 
 CODE = f"{secrets.randbelow(10**8):08d}"
 TOKENS = {}  # token -> device
 SUBS = []  # (queue, voice)
 CLIPS = {}
 LOCK = threading.Lock()
-SEQ = [0]
+
+# --- Pictures: simple page mock-ups drawn as PNGs (no image files in the repo) ---
+
+def png(w, h, rects, bg):
+    """A PNG of size w x h: background bg, then (x, y, w, h, rgb) rectangles."""
+    px = [bytearray(bg * w) for _ in range(h)]
+    for (x, y, rw, rh, c) in rects:
+        for yy in range(max(0, y), min(h, y + rh)):
+            row = px[yy]
+            for xx in range(max(0, x), min(w, x + rw)):
+                row[xx * 3:xx * 3 + 3] = bytes(c)
+    raw = b"".join(b"\x00" + bytes(r) for r in px)
+    def chunk(t, d):
+        return struct.pack(">I", len(d)) + t + d + struct.pack(">I", zlib.crc32(t + d) & 0xffffffff)
+    return b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", w, h, 8, 2, 0, 0, 0)) + chunk(b"IDAT", zlib.compress(raw, 9)) + chunk(b"IEND", b"")
+
+def page(accent, dark=False):
+    """A web page mock-up: header, a hero, three cards, lines of text."""
+    bg = (18, 20, 28) if dark else (246, 244, 240)
+    fg = (40, 44, 60) if dark else (225, 222, 216)
+    w, h = 360, 460
+    r = [(0, 0, w, 44, accent), (16, 14, 80, 16, (255, 255, 255)), (250, 14, 94, 16, (255, 255, 255)),
+         (16, 64, 328, 120, fg), (32, 92, 180, 18, accent), (32, 120, 240, 10, (150, 150, 160)), (32, 138, 200, 10, (150, 150, 160)),
+         (32, 160, 90, 14, accent)]
+    for i in range(3):
+        r += [(16 + i * 112, 200, 104, 120, fg), (26 + i * 112, 212, 84, 52, accent), (26 + i * 112, 274, 70, 8, (150, 150, 160)), (26 + i * 112, 290, 50, 8, (150, 150, 160))]
+    for i in range(6):
+        r += [(16, 340 + i * 18, 300 - (i % 3) * 40, 8, (160, 160, 170))]
+    return png(w, h, r, bg)
+
+SHOT_PICS = {
+    "1794160000001-checkout.png": page((88, 120, 220)),
+    "1794160000002-dashboard.png": page((40, 160, 140), dark=True),
+    "1794160000003-onboarding.png": page((210, 110, 60)),
+}
+ATTACHMENT = page((200, 80, 120))
+
+# --- Made-up tower data ---
 
 STATE = {
     "version": 1, "updated_ms": now(), "pid": os.getpid(), "running": True, "phase": "idle",
     "mode": "ptt", "mic": "closed", "armed": False, "transcribing": False, "speaking": False, "announcing": False,
     "brain": "done", "brain_app": "claude-code", "hearing": "", "heard": "", "heard_ms": 0,
-    "said": "", "said_ms": 0, "alerts": [],
+    "said": "Web finished the checkout page. Api is waiting for your answer.", "said_ms": now() - 2 * MIN, "alerts": [],
     "agents": [
-        {"address": "t3", "name": "api", "status": "blocked", "app": "claude-code", "account": "eyz"},
+        {"address": "t3", "name": "api", "status": "blocked", "app": "claude-code", "account": "studio"},
         {"address": "t5", "name": "web", "status": "working", "app": "claude-code", "account": "main"},
+        {"address": "t7", "name": "docs", "status": "working", "app": "claude-code", "account": "main"},
         {"address": "vps/t2", "name": "deploy", "status": "idle", "app": "codex"},
     ],
     "error": "", "talk_key": "ctrl", "voice": "af_bella", "stt_model": "fake", "lan": "", "phone": None,
+    "screenshots": [], "work": None,
 }
+SHOTS = [
+    {"id": "1794160000003-onboarding.png", "at": T0 - 4 * MIN, "session": "t5", "name": "web", "space": "Storefront", "account": "main", "job": "j1", "caption": "The new onboarding page, three steps"},
+    {"id": "1794160000002-dashboard.png", "at": T0 - 25 * MIN, "session": "t7", "name": "docs", "space": "Storefront", "account": "main", "job": None, "caption": "Dashboard in dark mode"},
+    {"id": "1794160000001-checkout.png", "at": T0 - 70 * MIN, "session": "t5", "name": "web", "space": "Storefront", "account": "main", "job": "j1", "caption": "Checkout with the new payment step"},
+]
+for s in SHOTS:
+    s["path"] = "/tower/attachments/screenshots/" + s["id"]
+    s["url"] = "/v1/screenshots/" + s["id"]
+STATE["screenshots"] = SHOTS
 HISTORY = [
-    {"at": now() - 3_600_000, "kind": "request", "text": "[voice] what's everyone doing?"},
-    {"at": now() - 3_590_000, "kind": "answer", "text": "api needs you, web is building the landing page, deploy is idle."},
-    {"at": now() - 3_000_000, "kind": "job", "session": "t5", "name": "web", "space": "B2C support", "status": "working", "text": "build the landing page", "account": "main"},
-    {"at": now() - 600_000, "kind": "job", "session": "t3", "name": "api", "space": "B2C support", "status": "blocked", "text": "wants to run the migration", "account": "eyz"},
-    {"at": now() - 300_000, "kind": "summary", "session": "vps/t2", "name": "deploy", "space": "Infra", "text": "Deployed v2.3 to staging."},
-    {"at": now() - 60_000, "kind": "alert", "text": "api is blocked: it asks to run the migration"},
+    {"at": T0 - 95 * MIN, "kind": "request", "text": "[voice] what's everyone doing?"},
+    {"at": T0 - 94 * MIN, "kind": "answer", "text": "Three sessions are busy:\n- **web** builds the checkout page\n- **api** is migrating the orders table\n- **docs** updates the guides\n\nDeploy is idle."},
+    {"at": T0 - 80 * MIN, "kind": "job", "session": "t5", "name": "web", "space": "Storefront", "status": "working", "text": "build the checkout page", "account": "main"},
+    {"at": T0 - 70 * MIN, "kind": "screenshot", "session": "t5", "name": "web", "space": "Storefront", "account": "main", "id": SHOTS[2]["id"], "caption": SHOTS[2]["caption"], "path": SHOTS[2]["path"], "text": SHOTS[2]["caption"]},
+    {"at": T0 - 40 * MIN, "kind": "summary", "session": "vps/t2", "name": "deploy", "space": "Infra", "text": "Deployed v2.3 to staging; health checks green."},
+    {"at": T0 - 12 * MIN, "kind": "request", "text": "[Image #1] the spacing on this page looks off, can web fix it?", "attachments": ["/tower/attachments/1794160000000-phone/1-page.png"]},
+    {"at": T0 - 11 * MIN, "kind": "answer", "text": "Yes: the cards sit too close to the hero. I've asked **web** to add `24px` above them and to send a screenshot when it's done."},
+    {"at": T0 - 4 * MIN, "kind": "screenshot", "session": "t5", "name": "web", "space": "Storefront", "account": "main", "id": SHOTS[0]["id"], "caption": SHOTS[0]["caption"], "path": SHOTS[0]["path"], "text": SHOTS[0]["caption"]},
+    {"at": T0 - 3 * MIN, "kind": "job", "session": "t3", "name": "api", "space": "Storefront", "status": "blocked", "text": "wants to run the migration on staging", "account": "studio"},
+    {"at": T0 - 2 * MIN, "kind": "answer", "text": "Web finished the onboarding page [shot:1794160000003-onboarding.png]\n\n**api** is waiting for you: it wants to run the migration on staging."},
 ]
 JOBS = [
-    {"job": "j2", "session": "t3", "name": "api", "space": "B2C support", "account": "eyz", "status": "blocked", "asked": "Fix the failing migration", "summary": "", "started_ms": now() - 900_000, "updated_ms": now() - 600_000},
-    {"job": "j1", "session": "t5", "name": "web", "space": "B2C support", "account": "main", "status": "working", "asked": "Build the landing page", "summary": "", "started_ms": now() - 3_000_000, "updated_ms": now() - 100_000},
-    {"job": "j0", "session": "vps/t2", "name": "deploy", "space": "Infra", "account": None, "status": "done", "asked": "Deploy v2.3 to staging", "summary": "Deployed; health checks green.", "started_ms": now() - 7_200_000, "updated_ms": now() - 6_000_000},
+    {"job": "j2", "session": "t3", "name": "api", "space": "Storefront", "account": "studio", "status": "blocked", "asked": "Migrate the orders table", "summary": "", "started_ms": T0 - 30 * MIN, "updated_ms": T0 - 3 * MIN},
+    {"job": "j1", "session": "t5", "name": "web", "space": "Storefront", "account": "main", "status": "working", "asked": "Build the checkout and onboarding pages", "summary": "", "started_ms": T0 - 80 * MIN, "updated_ms": T0 - 4 * MIN},
+    {"job": "j3", "session": "t7", "name": "docs", "space": "Storefront", "account": "main", "status": "working", "asked": "Update the setup guide", "summary": "", "started_ms": T0 - 20 * MIN, "updated_ms": T0 - 5 * MIN},
+    {"job": "j0", "session": "vps/t2", "name": "deploy", "space": "Infra", "account": None, "status": "done", "asked": "Deploy v2.3 to staging", "summary": "Deployed; health checks green.", "started_ms": T0 - 60 * MIN, "updated_ms": T0 - 40 * MIN},
 ]
 FOCUS = [None]
-SCREEN = """╭─ Claude Code ─────────────────────────╮
+SPACES = [("Storefront", ["t3", "t5", "t7"], "The shop: checkout, onboarding and the orders API."), ("Infra", ["vps/t2"], None)]
+SCREEN = """╭─ Claude Code ────────────────────────╮
 │ Bash command                                   │
 │   npm run migrate -- --env staging             │
 │ Do you want to proceed?                        │
@@ -64,11 +122,11 @@ SCREEN = """╭─ Claude Code ────────────────�
 
 def spaces():
     rows = []
-    for name, sess in [("B2C support", ["t3", "t5"]), ("Infra", ["vps/t2"])]:
+    for name, sess, agenda in SPACES:
         ss = [{"address": a["address"], "name": a["name"], "status": a["status"], "account": a.get("account")} for a in STATE["agents"] if a["address"] in sess]
-        rows.append({"space": name, "focus": FOCUS[0] == name, "agenda": "Keep the support site and API healthy." if name == "B2C support" else None,
-                     "unread": 2 if name == "Infra" else 0, "running_jobs": sum(1 for j in JOBS if j["space"] == name and j["status"] in ("working", "blocked")),
-                     "sessions": ss, "last_activity_ms": now() - (60_000 if name == "B2C support" else 300_000)})
+        rows.append({"space": name, "focus": FOCUS[0] == name, "agenda": agenda, "unread": 2 if name == "Infra" else 0,
+                     "running_jobs": sum(1 for j in JOBS if j["space"] == name and j["status"] in ("working", "blocked")),
+                     "sessions": ss, "last_activity_ms": now() - (2 * MIN if name == "Storefront" else 40 * MIN)})
     return {"focus": FOCUS[0], "spaces": rows}
 
 
@@ -98,7 +156,7 @@ def add_history(e):
     publish("history", e)
 
 
-def speak(sentences, kind="reply"):
+def speak(sentences):
     voice = any(v for _, v in SUBS)
     set_state(phase="speaking", speaking=True)
     for i, s in enumerate(sentences):
@@ -106,22 +164,44 @@ def speak(sentences, kind="reply"):
             cid = f"a{secrets.token_hex(3)}"
             ms = 400 + 40 * len(s)
             CLIPS[cid] = tone(min(ms, 2500), 440 + 60 * i)
-            publish("audio", {"id": cid, "kind": kind, "text": s, "ms": ms, "url": f"/v1/audio/{cid}"}, voice_only=True)
+            publish("audio", {"id": cid, "kind": "reply", "text": s, "ms": ms, "url": f"/v1/audio/{cid}"}, voice_only=True)
         time.sleep(0.3)
     set_state(phase="idle", speaking=False, said=" ".join(sentences), said_ms=now())
 
 
-def reply_to(text):
-    add_history({"at": now(), "kind": "request", "text": "[voice] " + text})
+def reply_to(text, attachments=()):
+    e = {"at": now(), "kind": "request", "text": "[voice] " + text}
+    if attachments:
+        e["attachments"] = list(attachments)
+    add_history(e)
     if any(v for _, v in SUBS):
         cid = f"a{secrets.token_hex(3)}"
         CLIPS[cid] = tone(300, 660)
         publish("audio", {"id": cid, "kind": "ack", "text": "Okay.", "ms": 300, "url": f"/v1/audio/{cid}"}, voice_only=True)
-    set_state(phase="thinking")
+    t = now()
+    set_state(phase="thinking", work={"word": "Thinking", "detail": "", "since_ms": t, "at_ms": t, "done_ms": 0})
     time.sleep(1.5)
+    set_state(work={"word": "Reading", "detail": "web", "since_ms": t, "at_ms": now(), "done_ms": 0})
+    time.sleep(2.5)
     answer = ["You said: " + text + ".", "This is the fake tower, so nothing really happened."]
     add_history({"at": now(), "kind": "answer", "text": " ".join(answer)})
+    set_state(work=None)
     speak(answer)
+
+
+def multipart(body, ctype):
+    """The text field and file parts of a multipart body: (text, [(filename, bytes)])."""
+    boundary = ctype.split("boundary=")[-1].strip('"').encode()
+    text, files = "", []
+    for part in body.split(b"--" + boundary):
+        head, _, data = part.partition(b"\r\n\r\n")
+        data = data.rsplit(b"\r\n", 1)[0]
+        h = head.decode("utf-8", "replace")
+        if 'name="text"' in h and "filename=" not in h:
+            text = data.decode("utf-8", "replace")
+        elif "filename=" in h:
+            files.append((h.split('filename="')[1].split('"')[0], data))
+    return text, files
 
 
 class H(BaseHTTPRequestHandler):
@@ -189,7 +269,15 @@ class H(BaseHTTPRequestHandler):
                 lim = int(q.get("limit", 100))
                 return self.send(200, {"entries": [e for e in HISTORY if e["at"] < before][-lim:]})
             if seg == ["accounts"]:
-                return self.send(200, {"default": "main", "accounts": [{"name": "main", "email": "me@example.com"}, {"name": "eyz", "email": "work@example.com"}]})
+                return self.send(200, {"default": "main", "accounts": [{"name": "main", "email": "main@example.com"}, {"name": "studio", "email": "studio@example.com"}]})
+            if seg == ["screenshots"]:
+                s = q.get("session")
+                return self.send(200, {"screenshots": [x for x in SHOTS if not s or x["session"] == s]})
+            if len(seg) == 2 and seg[0] == "screenshots":
+                pic = SHOT_PICS.get(seg[1])
+                return self.send(200, ctype="image/png", body=pic) if pic else self.err(404, "no_screenshot", "gone")
+            if len(seg) == 3 and seg[0] == "attachments":
+                return self.send(200, ctype="image/png", body=ATTACHMENT) if seg[2].endswith(".png") else self.err(415, "not_an_image", "not a picture")
             if len(seg) == 3 and seg[0] == "sessions" and seg[2] == "screen":
                 return self.send(200, {"address": seg[1], "screen": SCREEN if seg[1] == "t3" else f"$ # {seg[1]} at {time.strftime('%H:%M:%S')}\n"})
             if len(seg) == 2 and seg[0] == "audio":
@@ -200,9 +288,14 @@ class H(BaseHTTPRequestHandler):
         if method == "POST":
             b = self.body()
             if seg == ["ask"]:
-                t = json.loads(b)["text"]
-                threading.Thread(target=reply_to, args=(t,), daemon=True).start()
-                return self.send(202, {"sent": t})
+                ctype = self.headers.get("Content-Type", "")
+                if ctype.startswith("multipart/"):
+                    t, files = multipart(b, ctype)
+                    paths = [f"/tower/attachments/{now()}-phone/{i + 1}-{n}" for i, (n, _) in enumerate(files)]
+                else:
+                    t, paths = json.loads(b)["text"], []
+                threading.Thread(target=reply_to, args=(t, paths), daemon=True).start()
+                return self.send(202, {"sent": t, "attachments": paths})
             if len(seg) == 3 and seg[0] == "agents" and seg[2] == "answer":
                 d = json.loads(b)
                 for a in STATE["agents"]:
@@ -220,11 +313,13 @@ class H(BaseHTTPRequestHandler):
             if seg == ["mode"]:
                 set_state(mode=json.loads(b)["mode"])
                 return self.send(200, {"mode": STATE["mode"]})
-            if seg == ["voice"]:
-                if b[:4] != b"RIFF":
+            if seg in (["voice"], ["transcribe"]):
+                if b[:4] != b"RIFF" and not self.headers.get("Content-Type", "").startswith("multipart/"):
                     return self.err(415, "bad_audio", "send audio/wav")
-                secs = (len(b) - 44) / 32000
+                secs = max(0.0, (len(b) - 44) / 32000)
                 heard = f"a {secs:.1f} second take"
+                if seg == ["transcribe"] or q.get("send") == "0":
+                    return self.send(200, {"heard": heard, "sent": False})
                 set_state(heard=heard, heard_ms=now())
                 threading.Thread(target=reply_to, args=(heard,), daemon=True).start()
                 return self.send(200, {"heard": heard, "sent": True})
@@ -295,15 +390,6 @@ def cert():
     return crt, key, hashlib.sha256(der).hexdigest()
 
 
-def ticker():
-    """Something happening now and then: web finishes a step, an alert."""
-    i = 0
-    while True:
-        time.sleep(25)
-        i += 1
-        add_history({"at": now(), "kind": "watch", "session": "t5", "name": "web", "space": "B2C support", "account": "main", "text": f"web: built section {i} of the landing page"})
-
-
 if __name__ == "__main__":
     ap = argparse.ArgumentParser()
     ap.add_argument("--host", default="127.0.0.1")
@@ -315,7 +401,6 @@ if __name__ == "__main__":
     ctx.load_cert_chain(crt, key)
     srv = ThreadingHTTPServer((a.host, a.port), H)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
-    threading.Thread(target=ticker, daemon=True).start()
     link = f"herdertower://pair?h={a.link_host}&p={a.port}&c={CODE}&fp={FP}"
     print(f"fake tower on https://{a.host}:{a.port}\ncode {CODE}\nfingerprint {' '.join(FP[i:i+4] for i in range(0, 64, 4))}\nLINK {link}", flush=True)
     srv.serve_forever()

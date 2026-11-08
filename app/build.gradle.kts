@@ -17,6 +17,10 @@ android {
     }
 
     buildTypes {
+        debug {
+            // `-Pdemo`: a second copy (dev.herdertower.phone.demo) beside the real one, e.g. paired with tools/fake_tower.py for screenshots.
+            if (providers.gradleProperty("demo").isPresent) applicationIdSuffix = ".demo"
+        }
         release {
             isMinifyEnabled = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
