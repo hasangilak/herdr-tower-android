@@ -9,6 +9,7 @@ import dev.herdertower.phone.data.KeystoreCredentialStore
 import dev.herdertower.phone.data.Settings
 import dev.herdertower.phone.data.TowerSession
 import dev.herdertower.phone.voice.VoiceController
+import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 
 class TowerApplication : Application() {
@@ -20,11 +21,14 @@ class TowerApplication : Application() {
     lateinit var composer: dev.herdertower.phone.compose.Composer
         private set
 
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class)
     override fun onCreate() {
         super.onCreate()
         session = TowerSession(this, KeystoreCredentialStore(this), Settings(this))
         voice = VoiceController(session)
         composer = dev.herdertower.phone.compose.Composer(this, session)
+        // One microphone at a time: a voice take stops dictation into the draft.
+        voice.beforeTake = { if (composer.dictation.value.active.value) composer.stopDictation() }
         // How this device can draw the orb: found once, off the main thread, by drawing it.
         dev.herdertower.phone.orb.OrbProbe.override = dev.herdertower.phone.orb.OrbTier.entries.firstOrNull { it.name == session.settings.orbTier }
         Thread({ dev.herdertower.phone.orb.OrbProbe.run() }, "orb-probe").start()
@@ -48,9 +52,11 @@ class TowerApplication : Application() {
         // Say "stop" while it talks on the phone: listen only while a reply plays, the phone is the voice and no take runs.
         val hush = dev.herdertower.phone.voice.HushListener(session) { session.hush() }
         kotlinx.coroutines.MainScope().launch {
-            kotlinx.coroutines.flow.combine(session.player.nowPlaying, session.voiceOn, session.hushWord, voice.phase) { clip, on, word, phase ->
+            val dictating = composer.dictation.flatMapLatest { it.active }
+            kotlinx.coroutines.flow.combine(session.player.nowPlaying, session.voiceOn, session.hushWord, voice.phase, dictating) { clip, on, word, phase, dict ->
                 val mic = androidx.core.content.ContextCompat.checkSelfPermission(this@TowerApplication, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
-                clip to (on && word && mic && phase == VoiceController.Phase.Idle)
+                // Not while the user is talking (a take, or dictation): one recording at a time.
+                clip to (on && word && mic && phase == VoiceController.Phase.Idle && !dict)
             }.collect { (clip, enabled) -> hush.follow(clip, enabled) }
         }
         ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, e ->

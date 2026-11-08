@@ -15,6 +15,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.flow.flatMapLatest
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -65,6 +66,8 @@ class Composer(context: Context, private val session: TowerSession) {
     }
     /** Where the text stood when dictation began: what it says goes after it. */
     private var dictationBase: String? = null
+    /** Bumped by each dictation and by clearing: words from an older one (a late transcript) are dropped. */
+    @Volatile private var dictationGen = 0
 
     init {
         session.scope.launch {
@@ -201,9 +204,11 @@ class Composer(context: Context, private val session: TowerSession) {
         val t = input.text.toString()
         val base = if (t.isEmpty() || t.last().isWhitespace()) t else "$t "
         dictationBase = base
+        val gen = ++dictationGen
         val engine = if (session.link.value is dev.herdertower.phone.data.Link.Live) towerDictation else phoneDictation
         _dictating.value = engine
         engine.start { said ->
+            if (gen != dictationGen) return@start // sent or cleared since: never refill the box
             val b = dictationBase ?: return@start
             input.edit {
                 replace(0, length, b + said)
@@ -221,10 +226,16 @@ class Composer(context: Context, private val session: TowerSession) {
 
     /** Sends the draft (text and pictures together) and clears it when the tower took it. */
     suspend fun send(): Result<Unit> {
-        if (isEmpty || _sending.value) return Result.success(Unit)
-        stopDictation()
+        if (_sending.value) return Result.success(Unit)
         _sending.value = true
         try {
+            // Still dictating: the box shows words a second or two behind the voice. Stop, and wait for the
+            // final transcript of the whole take, so what's sent is everything said (not cut at the last partial).
+            if (_dictating.value.active.value) {
+                stopDictation()
+                kotlinx.coroutines.withTimeoutOrNull(FINAL_WORDS_MS) { _dictating.value.active.first { !it } }
+            }
+            if (isEmpty) return Result.success(Unit)
             // The tower's markers count files in order: number the tokens 1..n as they stand.
             val (text, renumber) = DraftTokens.renumber(input.text.toString().trim())
             val ordered = _attachments.value.mapNotNull { a -> renumber[a.number]?.let { it to a } }.sortedBy { it.first }.map { it.second }
@@ -247,6 +258,9 @@ class Composer(context: Context, private val session: TowerSession) {
     }
 
     fun clear() {
+        // Whatever dictation was running is over: a transcript that lands later goes nowhere.
+        dictationGen++
+        dictationBase = null
         input.clearText()
         _attachments.value.forEach { it.file.delete() }
         _attachments.value = emptyList()
@@ -268,6 +282,8 @@ class Composer(context: Context, private val session: TowerSession) {
     companion object {
         /** The tower takes six files with one message. */
         const val MAX_FILES = 6
+        /** How long Send waits for dictation's final transcript at most. */
+        const val FINAL_WORDS_MS = 8000L
     }
 
     /** Files that aren't pictures: their kind and a name safe to keep on disk. */

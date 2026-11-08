@@ -16,6 +16,7 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -98,7 +99,10 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
     val orbPhase = HomeModel.orbPhase(connected, s?.phase, recording, phase == Phase.Sending, playing)
     val needsYou = HomeModel.needsYou(connected, s?.phase, blocked)
 
+    val pause by voice.pause.collectAsStateWithLifecycle()
+    val waiting by voice.waiting.collectAsStateWithLifecycle()
     val statusLine = when {
+        recording && waiting -> "listening… tap send when you're done"
         recording -> if ((phase as Phase.Recording).handsFree) "listening… pause or tap send" else "listening… let go to send"
         phase == Phase.Sending -> "understanding…"
         playing != null && paused -> "holding: someone is talking at the Mac"
@@ -154,6 +158,8 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
             )
         }
         Text(statusLine, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodyMedium, color = tc.faint)
+        // About to send after a pause: show it, so a thought mid-sentence isn't cut off. Talking again resets it.
+        if (recording && pause > 0f && !waiting) SendingSoon(pause) { voice.keepListening() }
         Spacer(Modifier.height(18.dp))
         Transcript(lastWords(transcript.first), transcript.second, Modifier.padding(horizontal = 28.dp).heightIn(min = 108.dp, max = 220.dp))
         error?.let {
@@ -167,6 +173,24 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
             Spacer(Modifier.weight(1f))
             SmallRound(Icons.Filled.ArrowUpward, "Send what you said", enabled = recording) { voice.toggle() }
         }
+    }
+}
+
+/** "Sending…" with a bar running out through the pause, and Wait (keep listening until a tap). */
+@Composable
+private fun SendingSoon(progress: Float, onWait: () -> Unit) {
+    Row(
+        Modifier.padding(top = 10.dp).clip(CircleShape).background(tc.card).border(1.dp, tc.edge, CircleShape).padding(start = 16.dp, end = 6.dp, top = 4.dp, bottom = 4.dp)
+            .semantics { liveRegion = LiveRegionMode.Polite; contentDescription = "Sending soon. Keep talking, or wait." },
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Text("Sending", style = MaterialTheme.typography.labelLarge, color = tc.text)
+        Spacer(Modifier.width(10.dp))
+        Box(Modifier.width(72.dp).height(4.dp).clip(CircleShape).background(tc.edge)) {
+            Box(Modifier.fillMaxHeight().fillMaxWidth(1f - progress).clip(CircleShape).background(tc.accent))
+        }
+        Spacer(Modifier.width(6.dp))
+        androidx.compose.material3.TextButton(onClick = onWait) { Text("Wait, I'm not done", color = tc.accentHi.takeIf { tc.dark } ?: tc.accent) }
     }
 }
 

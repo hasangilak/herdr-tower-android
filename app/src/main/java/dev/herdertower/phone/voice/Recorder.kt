@@ -37,18 +37,36 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
 
     private var job: Job? = null
 
+    /** 0..1 through the pause that will end a tap take (a countdown to sending); 0 while talking. */
+    private val _pause = MutableStateFlow(0f)
+    val pauseProgress: StateFlow<Float> = _pause
+
+    @Volatile private var detector: SpeechEnd? = null
+    @Volatile var endedBy: String = ""
+        private set
+    /** What the take is for, in the diagnostics: "voice", "dictation", "answer". */
+    var what: String = ""
+
+    /** What this take did, for the diagnostics: length, why it ended, the input, the room. */
+    fun info(): TakeInfo {
+        val d = detector
+        val route = runCatching { record.routedDevice?.let { inputName(it.type) + (it.productName?.toString()?.takeIf { n -> n.isNotBlank() }?.let { n -> " ($n)" } ?: "") } }.getOrNull() ?: "?"
+        return TakeInfo(durationMs, endedBy.ifEmpty { "still listening" }, RATE, route, d?.floor ?: 0.0, d?.threshold ?: 0.0, pauseFrames * 20, d?.voicedMs ?: 0, what)
+    }
+
     private fun start(scope: CoroutineScope) {
         record.startRecording()
+        val vad = SpeechEnd(pauseFrames * 20).also { detector = it }
         job = scope.launch(Dispatchers.IO) {
             val frame = ShortArray(RATE / 50) // 20 ms
             val bytes = ByteArray(frame.size * 2)
-            var noise = 0.0
             var frames = 0
-            var spoke = false
-            var quiet = 0
             while (isActive) {
                 val n = record.read(frame, 0, frame.size)
-                if (n <= 0) break
+                if (n <= 0) {
+                    if (endedBy.isEmpty()) endedBy = "the microphone stopped ($n)"
+                    break
+                }
                 for (i in 0 until n) {
                     bytes[2 * i] = (frame[i].toInt() and 0xff).toByte()
                     bytes[2 * i + 1] = (frame[i].toInt() shr 8).toByte()
@@ -59,37 +77,35 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
                 val rms = sqrt(sum / n)
                 _level.value = (rms / 6000.0).toFloat().coerceIn(0f, 1f)
                 frames++
-                // The room's noise from the first 300 ms, then speech is clearly above it.
-                if (frames <= 15) noise = maxOf(noise, rms)
-                val threshold = maxOf(500.0, noise * 2.5)
-                if (rms > threshold) {
-                    spoke = true
-                    heardSpeech = true
-                    quiet = 0
-                } else {
-                    quiet++
-                }
+                val paused = vad.feed(rms)
+                if (vad.spoke) heardSpeech = true
+                _pause.value = if (endOnSilence) vad.pauseProgress else 0f
                 if (frames >= MAX_FRAMES) {
+                    endedBy = "too long (${MAX_FRAMES / 50} s)"
                     ended.complete(Reason.TooLong)
                     break
                 }
                 if (endOnSilence) {
-                    if (spoke && quiet >= pauseFrames) {
+                    if (paused) {
+                        endedBy = "a pause of ${vad.silentMs / 1000.0} s"
                         ended.complete(Reason.Silence)
                         break
                     }
-                    if (!spoke && frames >= NOTHING_FRAMES) {
+                    if (!vad.spoke && frames >= NOTHING_FRAMES) {
+                        endedBy = "nothing said"
                         ended.complete(Reason.NothingSaid)
                         break
                     }
                 }
             }
+            _pause.value = 0f
         }
     }
 
-    /** Hold to talk: only [stop] ends it (still capped at the tower's limit). */
+    /** Hold to talk, or "keep listening": only [stop] ends it (still capped at the tower's limit). */
     fun holdUntilStopped() {
         endOnSilence = false
+        _pause.value = 0f
     }
 
     /** A tap after all: from now on a pause after speech ends it. */
@@ -104,6 +120,7 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
 
     /** Stops the microphone and returns the take as a WAV (16 kHz mono 16-bit). */
     suspend fun stop(): ByteArray {
+        if (endedBy.isEmpty()) endedBy = "stopped (sent or released)"
         job?.let {
             if (it.isActive) {
                 // Let the read loop finish its frame, then end it.
@@ -112,6 +129,8 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
             }
             it.join()
         }
+        Takes.last.value = info()
+        android.util.Log.i("Take", info().line())
         runCatching { record.stop() }
         record.release()
         _level.value = 0f
@@ -120,8 +139,19 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
 
     companion object {
         const val RATE = 16_000
+
+        fun inputName(type: Int): String = when (type) {
+            android.media.AudioDeviceInfo.TYPE_BUILTIN_MIC -> "built-in mic"
+            android.media.AudioDeviceInfo.TYPE_WIRED_HEADSET -> "wired headset"
+            android.media.AudioDeviceInfo.TYPE_BLUETOOTH_SCO -> "Bluetooth (SCO)"
+            android.media.AudioDeviceInfo.TYPE_USB_HEADSET, android.media.AudioDeviceInfo.TYPE_USB_DEVICE -> "USB"
+            android.media.AudioDeviceInfo.TYPE_BLE_HEADSET -> "Bluetooth LE"
+            android.media.AudioDeviceInfo.TYPE_TELEPHONY -> "telephony"
+            else -> "input $type"
+        }
         private const val MAX_FRAMES = 115 * 50 // the tower takes up to 120 s
-        private const val END_PAUSE_FRAMES = 60 // 1.2 s of quiet after speech
+        /** Quiet after speech that ends a tap take: long enough for a breath or a thought mid-sentence. */
+        private const val END_PAUSE_FRAMES = 100 // 2 s
         private const val NOTHING_FRAMES = 8 * 50
 
         /** Starts recording; the caller must hold RECORD_AUDIO. Throws if the microphone can't be opened. */

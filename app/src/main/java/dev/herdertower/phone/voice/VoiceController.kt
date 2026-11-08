@@ -36,6 +36,25 @@ class VoiceController(private val session: TowerSession) {
     private var watcher: Job? = null
     private var pressedAt = 0L
 
+    /** Runs before a take starts (dictation into the draft stops: one microphone at a time). */
+    var beforeTake: () -> Unit = {}
+
+    private val _pause = MutableStateFlow(0f)
+    /** 0..1 through the pause that sends a tap take: a countdown; talking again resets it. */
+    val pause: StateFlow<Float> = _pause.asStateFlow()
+
+    private val _waiting = MutableStateFlow(false)
+    /** The user asked to keep listening: a pause doesn't send, a tap does. */
+    val waiting: StateFlow<Boolean> = _waiting.asStateFlow()
+
+    /** Keep listening through pauses; tap the button to send. */
+    fun keepListening() {
+        val t = take ?: return
+        t.holdUntilStopped()
+        _pause.value = 0f
+        _waiting.value = true
+    }
+
     private val _level = MutableStateFlow(0f)
     /** The microphone level of the take in progress, 0..1. */
     val level: StateFlow<Float> = _level.asStateFlow()
@@ -82,6 +101,8 @@ class VoiceController(private val session: TowerSession) {
         watcher?.cancel()
         levels?.cancel()
         _level.value = 0f
+        _pause.value = 0f
+        _waiting.value = false
         session.scope.launch { t.stop() }
         _phase.value = Phase.Idle
     }
@@ -92,10 +113,12 @@ class VoiceController(private val session: TowerSession) {
 
     private fun begin(handsFree: Boolean) {
         _error.value = null
+        beforeTake()
         // Barge in: the tower stops talking over you.
         session.hush()
+        _waiting.value = false
         val t = try {
-            Take.start(session.scope, endOnSilence = true).also { if (!handsFree) it.holdUntilStopped() }
+            Take.start(session.scope, endOnSilence = true).also { it.what = "voice"; if (!handsFree) it.holdUntilStopped() }
         } catch (e: Exception) {
             _error.value = e.message ?: "The microphone isn't available."
             return
@@ -103,7 +126,10 @@ class VoiceController(private val session: TowerSession) {
         take = t
         _phase.value = Phase.Recording(handsFree)
         levels?.cancel()
-        levels = session.scope.launch { t.level.collect { _level.value = it } }
+        levels = session.scope.launch {
+            launch { t.pauseProgress.collect { _pause.value = it } }
+            t.level.collect { _level.value = it }
+        }
         watcher = session.scope.launch {
             when (t.ended.await()) {
                 Take.Reason.NothingSaid -> {
@@ -121,6 +147,8 @@ class VoiceController(private val session: TowerSession) {
         watcher?.cancel()
         levels?.cancel()
         _level.value = 0f
+        _pause.value = 0f
+        _waiting.value = false
         _phase.value = Phase.Sending
         session.scope.launch {
             val wav = t.stop()

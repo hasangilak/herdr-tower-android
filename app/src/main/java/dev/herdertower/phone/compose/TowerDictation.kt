@@ -44,7 +44,7 @@ class TowerDictation(private val session: TowerSession) : DictationEngine {
         _error.value = null
         this.onText = onText
         val t = try {
-            Take.start(session.scope, endOnSilence = true, pauseMs = PAUSE_MS)
+            Take.start(session.scope, endOnSilence = true, pauseMs = PAUSE_MS).also { it.what = "dictation" }
         } catch (e: Exception) {
             _error.value = e.message ?: "The microphone isn't available."
             return
