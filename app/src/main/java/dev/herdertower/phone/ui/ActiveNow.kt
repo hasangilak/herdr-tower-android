@@ -40,11 +40,14 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.drawWithContent
+import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.herdertower.phone.api.Job
 import dev.herdertower.phone.api.SpacesResponse
@@ -115,14 +118,18 @@ fun activeSessions(session: TowerSession): List<Pair<Active, Boolean>> {
     return ActiveModel.focusFirst(ActiveModel.active(state?.agents.orEmpty(), jobs, spaces), spaces.focus)
 }
 
-/** How tall the strip is: a row of chips, or the quiet line. */
-fun activeNowHeight(count: Int) = if (count > 0) 84.dp else 50.dp
-
+/**
+ * The sessions at work right now, inline in the header: one slim pill each
+ * (a dot that pulses, amber when it needs you; the name; the account as a
+ * letter; how long it has run), scrolling sideways with faded edges. Tap:
+ * the session. Long press: open it, or show it in Herdr on the Mac. Nothing
+ * when nothing runs.
+ */
 @OptIn(ExperimentalFoundationApi::class)
 @Composable
-fun ActiveNow(session: TowerSession, onOpen: (String) -> Unit, modifier: Modifier = Modifier, contentPadding: PaddingValues = PaddingValues(horizontal = 20.dp)) {
-    val spaces by session.spaces.collectAsStateWithLifecycle()
-    val accounts by session.accounts.collectAsStateWithLifecycle()
+fun ActivePills(session: TowerSession, onOpen: (String) -> Unit, modifier: Modifier = Modifier) {
+    val list = activeSessions(session)
+    if (list.isEmpty()) return
     val snack = LocalSnack.current
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
     LaunchedEffect(Unit) {
@@ -131,61 +138,74 @@ fun ActiveNow(session: TowerSession, onOpen: (String) -> Unit, modifier: Modifie
             now = System.currentTimeMillis()
         }
     }
-    val list = activeSessions(session)
     val reduce = LocalReduceMotion.current
-    val pulse = if (reduce) 1f else rememberInfiniteTransition(label = "active").animateFloat(0.45f, 1f, infiniteRepeatable(tween(1400), RepeatMode.Reverse), label = "pulse").value
-
-    Column(modifier.fillMaxWidth()) {
-        Row(Modifier.padding(contentPadding).padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Text("Active now", style = MaterialTheme.typography.labelLarge, color = tc.faint)
-            if (list.isNotEmpty()) Text("  ${list.size}", style = MaterialTheme.typography.labelLarge, color = tc.faint)
-            spaces.focus?.let { Text("  ·  ${it} first", style = MaterialTheme.typography.labelMedium, color = tc.faint) }
-        }
-        if (list.isEmpty()) {
-            Text("Nothing running", Modifier.padding(contentPadding), style = MaterialTheme.typography.bodyMedium, color = tc.faint)
-            return@Column
-        }
-        // A new first chip (a focus, someone now blocked) is shown, not left scrolled out of view.
-        val row = androidx.compose.foundation.lazy.rememberLazyListState()
-        LaunchedEffect(list.first().first.address) { row.animateScrollToItem(0) }
-        LazyRow(state = row, contentPadding = contentPadding, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-            items(list, key = { it.first.address }) { (a, dim) ->
-                var menu by remember { mutableStateOf(false) }
-                Box {
-                    Row(
-                        Modifier.alpha(if (dim) 0.5f else 1f).heightIn(min = 48.dp).widthIn(max = 240.dp).clip(RoundedCornerShape(16.dp))
-                            .background(tc.card).border(1.dp, if (a.blocked) tc.blocked.copy(alpha = 0.7f) else tc.edge, RoundedCornerShape(16.dp))
-                            .combinedClickable(onClickLabel = "Open ${a.name}", onLongClickLabel = "More for ${a.name}", onLongClick = { menu = true }) { onOpen(a.address) }
-                            .semantics { contentDescription = ActiveModel.describe(a, now) }
-                            .padding(horizontal = 12.dp, vertical = 8.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                    ) {
-                        Box(Modifier.size(9.dp).alpha(if (a.blocked) 1f else pulse).clip(CircleShape).background(if (a.blocked) tc.blocked else tc.working))
-                        Spacer(Modifier.width(8.dp))
-                        Column {
-                            Row(verticalAlignment = Alignment.CenterVertically) {
-                                Text(a.name, style = MaterialTheme.typography.bodyMedium, color = tc.text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false))
-                                a.account?.let {
-                                    Spacer(Modifier.width(6.dp))
-                                    AccountBadge(it, it == accounts.default)
-                                }
-                            }
-                            val sub = listOfNotNull(if (a.blocked) "needs you" else null, a.space.ifBlank { null }, a.sinceMs?.let { span(now - it) }).joinToString(" · ")
-                            if (sub.isNotEmpty()) Text(sub, style = MaterialTheme.typography.labelMedium, color = if (a.blocked) tc.blocked else tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+    val pulse = if (reduce) 1f else rememberInfiniteTransition(label = "active").animateFloat(0.4f, 1f, infiniteRepeatable(tween(1300), RepeatMode.Reverse), label = "pulse").value
+    // A new first pill (a focus, someone now blocked) is shown, not left scrolled out of view.
+    val row = androidx.compose.foundation.lazy.rememberLazyListState()
+    LaunchedEffect(list.first().first.address) { row.animateScrollToItem(0) }
+    val fadeStart = row.canScrollBackward
+    val fadeEnd = row.canScrollForward
+    LazyRow(
+        modifier
+            .semantics { contentDescription = "Active now: ${list.size} ${if (list.size == 1) "session" else "sessions"}" }
+            .edgeFade(fadeStart, fadeEnd),
+        state = row,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        items(list, key = { it.first.address }) { (a, dim) ->
+            var menu by remember { mutableStateOf(false) }
+            Box {
+                Row(
+                    Modifier.alpha(if (dim) 0.5f else 1f).heightIn(min = 34.dp).clip(CircleShape)
+                        .background(tc.card).border(1.dp, if (a.blocked) tc.blocked.copy(alpha = 0.75f) else tc.edge, CircleShape)
+                        .combinedClickable(onClickLabel = "Open ${a.name}", onLongClickLabel = "More for ${a.name}", onLongClick = { menu = true }) { onOpen(a.address) }
+                        .semantics { contentDescription = ActiveModel.describe(a, now) }
+                        .padding(start = 10.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
+                    verticalAlignment = Alignment.CenterVertically,
+                ) {
+                    Box(Modifier.size(8.dp).alpha(pulse).clip(CircleShape).background(if (a.blocked) tc.blocked else tc.working))
+                    Spacer(Modifier.width(6.dp))
+                    Text(a.name, Modifier.widthIn(max = 120.dp), style = MaterialTheme.typography.labelLarge, color = tc.text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    a.account?.takeIf { it.isNotBlank() }?.let { acc ->
+                        Spacer(Modifier.width(5.dp))
+                        Box(Modifier.size(16.dp).clip(CircleShape).background(androidx.compose.ui.graphics.Color(0xFF000000 or AccountHue.of(acc))), contentAlignment = Alignment.Center) {
+                            Text(acc.take(1).uppercase(), style = MaterialTheme.typography.labelSmall.copy(fontSize = with(androidx.compose.ui.platform.LocalDensity.current) { (9f / fontScale).sp }, lineHeight = with(androidx.compose.ui.platform.LocalDensity.current) { (10f / fontScale).sp }), color = androidx.compose.ui.graphics.Color.Black, fontWeight = FontWeight.Bold, maxLines = 1)
                         }
                     }
-                    DropdownMenu(menu, { menu = false }) {
-                        DropdownMenuItem(text = { Text("Open ${a.name}") }, onClick = { menu = false; onOpen(a.address) })
-                        DropdownMenuItem(text = { Text("Show it in Herdr") }, onClick = {
-                            menu = false
-                            showInHerdr(session, a.address, a.name, snack)
-                        })
+                    a.sinceMs?.let {
+                        Spacer(Modifier.width(6.dp))
+                        Text(span(now - it), style = MaterialTheme.typography.labelMedium, color = if (a.blocked) tc.blocked else tc.muted, maxLines = 1)
                     }
+                }
+                DropdownMenu(menu, { menu = false }) {
+                    DropdownMenuItem(text = { Text("Open ${a.name}") }, onClick = { menu = false; onOpen(a.address) })
+                    DropdownMenuItem(text = { Text("Show it in Herdr") }, onClick = {
+                        menu = false
+                        showInHerdr(session, a.address, a.name, snack)
+                    })
                 }
             }
         }
     }
 }
+
+/** Fades the content out at the start and/or end (where more scrolls in). */
+fun Modifier.edgeFade(start: Boolean, end: Boolean, width: androidx.compose.ui.unit.Dp = 18.dp): Modifier =
+    if (!start && !end) this else this
+        .graphicsLayer { compositingStrategy = androidx.compose.ui.graphics.CompositingStrategy.Offscreen }
+        .drawWithContent {
+            drawContent()
+            val w = width.toPx()
+            val clear = androidx.compose.ui.graphics.Color.Transparent
+            val solid = androidx.compose.ui.graphics.Color.Black
+            if (start) drawRect(androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(clear, solid), 0f, w), size = androidx.compose.ui.geometry.Size(w, size.height), blendMode = androidx.compose.ui.graphics.BlendMode.DstIn)
+            if (end) drawRect(
+                androidx.compose.ui.graphics.Brush.horizontalGradient(listOf(solid, clear), size.width - w, size.width),
+                topLeft = androidx.compose.ui.geometry.Offset(size.width - w, 0f), size = androidx.compose.ui.geometry.Size(w, size.height),
+                blendMode = androidx.compose.ui.graphics.BlendMode.DstIn,
+            )
+        }
 
 /** Brings a session to the front in Herdr on the Mac (`tower show`). */
 fun showInHerdr(session: TowerSession, address: String, name: String, snack: (String) -> Unit) {

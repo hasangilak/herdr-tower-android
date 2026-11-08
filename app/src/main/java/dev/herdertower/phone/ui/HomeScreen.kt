@@ -167,7 +167,8 @@ fun HomeScreen(
     HomeContent(
         ui = ui,
         notice = { ConnectionNotice(link, session, onRepair) },
-        activeNow = { ActiveNow(session, onOpen) },
+        activePills = { m -> ActivePills(session, onOpen, m) },
+        anyActive = activeSessions(session).isNotEmpty(),
         questions = {
             QuestionCards(QuestionModel.forUser(questions), onQuestion, Modifier.padding(horizontal = 20.dp))
         },
@@ -212,8 +213,9 @@ fun HomeContent(
     notice: @Composable () -> Unit = {},
     /** The questions sessions leave to the user, as cards. */
     questions: @Composable () -> Unit = {},
-    /** The sessions at work right now. */
-    activeNow: @Composable () -> Unit = {},
+    /** The sessions at work right now, inline in the header (the greeting shows when there are none). */
+    activePills: @Composable (Modifier) -> Unit = {},
+    anyActive: Boolean = false,
     askBox: @Composable () -> Unit,
     onSuggestion: (Suggestion) -> Unit,
     onAlerts: () -> Unit,
@@ -226,7 +228,8 @@ fun HomeContent(
             OrbGlyph(Modifier.size(34.dp).semantics { contentDescription = if (ui.connected) "Tower, connected" else "Tower, not connected" })
             Dot(if (ui.connected) tc.working else tc.idle, 10.dp, Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp).border(2.dp, tc.bgTop, CircleShape))
         }
-        androidx.compose.foundation.layout.BoxWithConstraints(Modifier.weight(1f).padding(horizontal = 6.dp)) {
+        if (anyActive) Box(Modifier.weight(1f).padding(start = 4.dp, end = 4.dp)) { activePills(Modifier.fillMaxWidth()) }
+        else androidx.compose.foundation.layout.BoxWithConstraints(Modifier.weight(1f).padding(horizontal = 6.dp)) {
             // Narrow (a small phone, large text, Stop showing): what matters only, on two lines.
             val roomy = maxWidth >= 120.dp
             Column {
@@ -244,7 +247,6 @@ fun HomeContent(
     Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             Spacer(Modifier.height(headerTop() + 10.dp))
-            activeNow()
             Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) { notice() }
             Spacer(Modifier.height(28.dp))
             Text(

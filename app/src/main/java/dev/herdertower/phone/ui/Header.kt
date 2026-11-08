@@ -61,7 +61,7 @@ data class StopState(val talking: Boolean = false, val onStop: () -> Unit = {})
 val LocalStop = compositionLocalOf { StopState() }
 
 /** The header's own height, below the status bar. */
-val HEADER_HEIGHT = 60.dp
+val HEADER_HEIGHT = 56.dp
 
 /** Where content starts so it isn't hidden under the header at first (it scrolls under it after). */
 @Composable

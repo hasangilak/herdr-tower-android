@@ -72,7 +72,7 @@ import dev.herdertower.phone.voice.VoiceController
 import dev.herdertower.phone.voice.VoiceController.Phase
 
 @Composable
-fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: Boolean, onClose: () -> Unit, onChat: () -> Unit) {
+fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: Boolean, onClose: () -> Unit, onChat: () -> Unit, onSession: (String) -> Unit = {}) {
     val context = LocalContext.current
     val perms = rememberPermissions()
     val state by session.state.collectAsStateWithLifecycle()
@@ -143,7 +143,7 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
             if (recording) voice.cancel()
             onClose()
         }
-        Spacer(Modifier.weight(1f))
+        Box(Modifier.weight(1f).padding(horizontal = 4.dp)) { ActivePills(session, onOpen = onSession, modifier = Modifier.fillMaxWidth()) }
         HeaderButton(Icons.Filled.Forum, "Conversation", onClick = onChat)
         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) { RouteToggle(session, size = 40.dp) }
         StopSlot()

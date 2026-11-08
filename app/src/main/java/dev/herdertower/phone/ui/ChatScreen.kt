@@ -13,6 +13,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
@@ -148,8 +149,7 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
         rowShots = { e -> shotsById[e.id].orEmpty().takeIf { it.isNotEmpty() }?.let { shots -> ShotStrip(session, shots) { onShot(it.id) } } },
         onOpen = onOpen,
         onBehavior = onBehavior,
-        activeNow = { ActiveNow(session, onOpen, contentPadding = PaddingValues(horizontal = 16.dp)) },
-        activeHeight = activeNowHeight(activeSessions(session).size),
+        activePills = { m -> ActivePills(session, onOpen, m) },
         onShot = onShot,
         thumb = { e, m -> Thumb(session, shotOf(e), m, maxSide = 600) },
         replyShots = { refs, m ->
@@ -265,9 +265,8 @@ fun ChatContent(
     rowShots: @Composable (HistoryEntry) -> Unit = {},
     /** A behavior change card was tapped (its line, to find the behavior). */
     onBehavior: (String) -> Unit = {},
-    /** "Active now", pinned under the header. */
-    activeNow: (@Composable () -> Unit)? = null,
-    activeHeight: androidx.compose.ui.unit.Dp = 0.dp,
+    /** The sessions at work now, inline in the header. */
+    activePills: @Composable (Modifier) -> Unit = {},
     inputBar: @Composable () -> Unit,
 ) {
     val list = rememberLazyListState()
@@ -310,15 +309,16 @@ fun ChatContent(
 
     GlassScaffold(header = {
         HeaderClose(onClose)
-        HeaderTitle("Conversation")
+        Text("Chat", Modifier.padding(start = 4.dp, end = 10.dp), style = MaterialTheme.typography.titleMedium, color = tc.text, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, maxLines = 1)
+        Box(Modifier.weight(1f)) { activePills(Modifier.fillMaxWidth()) }
         StopSlot()
-    }, below = activeNow, belowHeight = if (activeNow != null) activeHeight else 0.dp) {
+    }) {
     Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth(),
             state = list,
             // Under the header at first, scrolling under its glass after.
-            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = headerTop() + (if (activeNow != null) activeHeight else 0.dp) + 8.dp, bottom = 12.dp),
+            contentPadding = PaddingValues(start = 16.dp, end = 16.dp, top = headerTop() + 8.dp, bottom = 12.dp),
             verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
             item {

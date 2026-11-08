@@ -264,7 +264,7 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
             ) { route ->
                 when (route) {
                     Route.Home -> HomeScreen(session, voice, onVoice = { go(Route.Voice(it)) }, onChat = { go(Route.Chat) }, onOpen = { go(Route.Session(it)) }, onAlerts = { go(Route.Activity) }, onMenu = { menu = true }, onRepair = onRepair, onQuestion = { go(Route.Question(it)) })
-                    is Route.Voice -> VoiceScreen(session, voice, startListening = route.listen, onClose = { back() }, onChat = { go(Route.Chat) })
+                    is Route.Voice -> VoiceScreen(session, voice, startListening = route.listen, onClose = { back() }, onChat = { go(Route.Chat) }, onSession = { go(Route.Session(it)) })
                     Route.Chat -> ChatScreen(session, onClose = { back() }, onVoice = { go(Route.Voice(true)) }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) }, onQuestion = { go(Route.Question(it)) }, onBehavior = { title ->
                         val b = session.behaviors.value?.behaviors?.let { all -> dev.herdertower.phone.api.BehaviorsApi.fromChatLine(title, all) }
                         go(Route.Behaviors)
