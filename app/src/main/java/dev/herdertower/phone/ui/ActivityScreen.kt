@@ -8,6 +8,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.LazyColumn
@@ -43,7 +44,7 @@ import kotlinx.coroutines.launch
 private enum class Filter { Working, Done, History }
 
 @Composable
-fun ActivityScreen(session: TowerSession, onOpen: (String) -> Unit) {
+fun ActivityScreen(session: TowerSession, onBack: () -> Unit, onOpen: (String) -> Unit) {
     val jobs by session.jobs.collectAsStateWithLifecycle()
     val history by session.history.collectAsStateWithLifecycle()
     val acc = rememberAccounts(session)
@@ -60,13 +61,14 @@ fun ActivityScreen(session: TowerSession, onOpen: (String) -> Unit) {
     val working = jobs.filter { it.open }
     val done = jobs.filterNot { it.open }
 
-    Column(Modifier.fillMaxSize()) {
-        Segments(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp)) {
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+        SubHeader("Activity", if (working.isEmpty()) "Nothing running" else "${working.size} running", onBack)
+        Segments(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 8.dp)) {
             Segment("Working · ${working.size}", filter == Filter.Working) { filter = Filter.Working }
             Segment("Done", filter == Filter.Done) { filter = Filter.Done }
             Segment("History", filter == Filter.History) { filter = Filter.History }
         }
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp, 4.dp, 16.dp, 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(20.dp, 8.dp, 20.dp, 40.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
             when (filter) {
                 Filter.Working, Filter.Done -> {
                     val list = if (filter == Filter.Working) working else done

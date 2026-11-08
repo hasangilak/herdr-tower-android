@@ -11,6 +11,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.shape.CircleShape
@@ -41,7 +42,7 @@ import kotlinx.coroutines.launch
 
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun SpacesScreen(session: TowerSession, onOpen: (String) -> Unit) {
+fun SpacesScreen(session: TowerSession, onBack: () -> Unit, onOpen: (String) -> Unit) {
     val spaces by session.spaces.collectAsStateWithLifecycle()
     val agents by session.agents.collectAsStateWithLifecycle()
     val unreachable by session.unreachable.collectAsStateWithLifecycle()
@@ -72,8 +73,10 @@ fun SpacesScreen(session: TowerSession, onOpen: (String) -> Unit) {
     // Focused first, then those with news, then the most recent.
     val sorted = spaces.spaces.sortedWith(compareBy<Space>({ !it.focus }, { -it.unread }, { -it.lastActivityMs }))
 
+    Column(Modifier.fillMaxSize().statusBarsPadding()) {
+    SubHeader("Spaces", spaces.focus?.let { "Focused on $it" } ?: plural(spaces.spaces.size, "space"), onBack)
     PullToRefreshBox(refreshing, ::refresh, Modifier.fillMaxSize()) {
-        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
+        LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 40.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             item {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
                     Text(
@@ -100,9 +103,10 @@ fun SpacesScreen(session: TowerSession, onOpen: (String) -> Unit) {
                 items(agents.sortedBy { order(it.status) }, key = { "a:" + it.address }) { a -> AgentRow(a, acc) { onOpen(a.address) } }
             }
             items(unreachable, key = { "u:" + it.machine }) { u ->
-                Text("${u.machine ?: "A machine"} didn't answer: ${u.error}", style = MaterialTheme.typography.bodySmall, color = tc.rose)
+                Text("${u.machine ?: "A machine"} didn't answer: ${u.error}", style = MaterialTheme.typography.bodySmall, color = tc.failed)
             }
         }
+    }
     }
 }
 
@@ -119,9 +123,9 @@ private fun SpaceCard(sp: Space, acc: AccountLookup, expanded: Boolean, onToggle
     val urgent = sp.sessions.any { it.status == "blocked" }
     val busy = sp.sessions.count { it.status == "working" }
     val (dot, mood) = when {
-        urgent -> tc.amber to "needs you"
-        busy > 0 -> tc.cyan to "$busy working"
-        else -> tc.grey to "quiet"
+        urgent -> tc.blocked to "needs you"
+        busy > 0 -> tc.working to "$busy working"
+        else -> tc.idle to "quiet"
     }
     val meta = buildList {
         add(mood)
@@ -138,8 +142,8 @@ private fun SpaceCard(sp: Space, acc: AccountLookup, expanded: Boolean, onToggle
                 if (sp.unread > 0) {
                     Text(
                         "${sp.unread} new",
-                        Modifier.clip(CircleShape).background(if (urgent) tc.amber else tc.cyan).padding(horizontal = 8.dp, vertical = 1.dp),
-                        style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = NAVY,
+                        Modifier.clip(CircleShape).background(if (urgent) tc.blocked else tc.accent).padding(horizontal = 8.dp, vertical = 1.dp),
+                        style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = tc.onAccent,
                     )
                 }
                 Pill(if (sp.focus) "Focused" else "Focus", sp.focus, onClick = onFocus)
@@ -163,7 +167,7 @@ private fun SpaceCard(sp: Space, acc: AccountLookup, expanded: Boolean, onToggle
 @Composable
 private fun SessionChip(s: SpaceSession, acc: AccountLookup, onClick: () -> Unit) {
     Row(
-        Modifier.clip(CircleShape).background(tc.bubbleMe.copy(alpha = 0.6f)).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 5.dp),
+        Modifier.clip(CircleShape).background(tc.card).clickable(onClick = onClick).padding(horizontal = 10.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(6.dp),
     ) {

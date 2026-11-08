@@ -69,6 +69,7 @@ import dev.herdertower.phone.api.Fingerprint
 import dev.herdertower.phone.api.PairLink
 import dev.herdertower.phone.api.PairLinkException
 import dev.herdertower.phone.data.TowerSession
+import dev.herdertower.phone.orb.TowerOrb
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -82,16 +83,17 @@ fun PairingScreen(session: TowerSession, initial: PairLink?, onCancel: (() -> Un
     var candidate by remember(initial) { mutableStateOf(initial?.let { Candidate(it.host, it.port, it.code, it.fingerprint, true) }) }
     var tab by rememberSaveable { mutableStateOf(0) }
 
-    Box(Modifier.fillMaxSize().background(tc.glass).safeDrawingPadding().imePadding()) {
+    Backdrop("idle", false) {
+    Box(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
         Column(
             Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(20.dp),
             verticalArrangement = Arrangement.spacedBy(16.dp),
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Orb(OrbMood.Calm, 0f, Modifier.size(56.dp))
+                TowerOrb("idle", Modifier.size(72.dp), renderScale = 1f, interactive = false)
                 Spacer(Modifier.size(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("Pair with your tower", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium, color = tc.text)
+                    Text("Pair with your tower", style = MaterialTheme.typography.headlineMedium, fontWeight = FontWeight.Medium, color = tc.text)
                     Text("On the Mac: tower phone pair", style = MaterialTheme.typography.bodyMedium, color = tc.muted, fontFamily = FontFamily.Monospace)
                 }
                 if (onCancel != null) TextButton(onClick = onCancel) { Text("Cancel") }
@@ -111,6 +113,7 @@ fun PairingScreen(session: TowerSession, initial: PairLink?, onCancel: (() -> Un
                 }
             }
         }
+    }
     }
 }
 
@@ -150,7 +153,7 @@ private fun Scan(onLink: (PairLink) -> Unit) {
             })
         }
     }
-    error?.let { Text(it, color = tc.rose, style = MaterialTheme.typography.bodyMedium) }
+    error?.let { Text(it, color = tc.failed, style = MaterialTheme.typography.bodyMedium) }
 }
 
 /** A camera preview that decodes QR codes; [onText] returns true to stop scanning. */
@@ -236,7 +239,7 @@ private fun Manual(onProbed: (Candidate) -> Unit) {
         singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.NumberPassword, imeAction = ImeAction.Done),
         textStyle = MaterialTheme.typography.titleMedium.copy(fontFamily = FontFamily.Monospace),
     )
-    error?.let { Text(it, color = tc.rose, style = MaterialTheme.typography.bodyMedium) }
+    error?.let { Text(it, color = tc.failed, style = MaterialTheme.typography.bodyMedium) }
     Button(
         onClick = {
             val h = PairLink.validHost(host)
@@ -305,7 +308,7 @@ private fun Confirm(session: TowerSession, c: Candidate, onBack: () -> Unit) {
         return
     }
     OutlinedTextField(name, { name = it.take(40) }, Modifier.fillMaxWidth(), label = { Text("This phone's name") }, singleLine = true)
-    error?.let { Text(it, color = tc.rose, style = MaterialTheme.typography.bodyMedium) }
+    error?.let { Text(it, color = tc.failed, style = MaterialTheme.typography.bodyMedium) }
     Button(
         onClick = {
             busy = true

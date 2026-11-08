@@ -14,7 +14,7 @@ import androidx.compose.runtime.setValue
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.herdertower.phone.api.PairLink
 import dev.herdertower.phone.voice.VoiceService
-import dev.herdertower.phone.ui.MainScreen
+import dev.herdertower.phone.ui.Shell
 import dev.herdertower.phone.ui.PairingScreen
 import dev.herdertower.phone.ui.TowerTheme
 
@@ -52,7 +52,7 @@ class MainActivity : ComponentActivity() {
                         onCancel = if (creds != null) ({ repairing = false; link = null }) else null,
                     )
                 } else {
-                    MainScreen(
+                    Shell(
                         app.session, app.voice, theme,
                         onTheme = { theme = it; app.session.settings.theme = it },
                         onRepair = { repairing = true },

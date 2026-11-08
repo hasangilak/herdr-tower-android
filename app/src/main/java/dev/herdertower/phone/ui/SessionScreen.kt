@@ -10,6 +10,11 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
+import androidx.compose.foundation.layout.navigationBarsPadding
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.height
+import androidx.compose.ui.graphics.Color
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -98,11 +103,9 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit) {
         }
     }
 
-    Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(horizontal = 16.dp), verticalArrangement = Arrangement.spacedBy(12.dp)) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Filled.ArrowBack, "Back", tint = tc.text) }
-            Column(Modifier.weight(1f)) {
-                Text(name, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Medium, color = tc.text)
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding().verticalScroll(rememberScrollState()), verticalArrangement = Arrangement.spacedBy(14.dp)) {
+        SubHeader(name, null, onBack)
+        Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                     Dot(tc.status(status), 7.dp)
                     Text(
@@ -111,35 +114,33 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit) {
                     )
                     account?.let { AccountBadge(it, it == acc.default) }
                 }
-            }
-        }
         agent?.doing?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.text) }
 
         if (blocked) {
             GlassCard(Modifier.fillMaxWidth(), highlighted = true) {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
                     Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Icon(Icons.Filled.Warning, null, tint = tc.amber)
+                        Icon(Icons.Filled.Warning, null, tint = tc.blocked)
                         Text("Needs you", style = MaterialTheme.typography.titleMedium, color = tc.text)
                     }
                     Text("Read what it's asking below. The tower answers it in the session, as if you'd said so.", style = MaterialTheme.typography.bodySmall, color = tc.muted)
                     OutlinedTextField(note, { note = it }, Modifier.fillMaxWidth(), label = { Text("Note (optional)") }, placeholder = { Text("only the read") }, maxLines = 3)
                     Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
                         Button(
-                            onClick = { answer(true) }, enabled = !answering, modifier = Modifier.weight(1f),
-                            colors = ButtonDefaults.buttonColors(containerColor = tc.cyan, contentColor = NAVY),
+                            onClick = { answer(true) }, enabled = !answering, modifier = Modifier.weight(1f).height(52.dp),
+                            colors = ButtonDefaults.buttonColors(containerColor = tc.accent, contentColor = Color.White),
                         ) {
                             Icon(Icons.Filled.Check, null, Modifier.size(18.dp))
                             Spacer(Modifier.size(6.dp))
                             Text("Approve")
                         }
-                        OutlinedButton(onClick = { answer(false) }, enabled = !answering, modifier = Modifier.weight(1f)) {
-                            Icon(Icons.Filled.Close, null, Modifier.size(18.dp), tint = tc.rose)
+                        OutlinedButton(onClick = { answer(false) }, enabled = !answering, modifier = Modifier.weight(1f).height(52.dp)) {
+                            Icon(Icons.Filled.Close, null, Modifier.size(18.dp), tint = tc.failed)
                             Spacer(Modifier.size(6.dp))
-                            Text("Refuse", color = tc.rose)
+                            Text("Refuse", color = tc.failed)
                         }
                     }
-                    answered?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = tc.cyan) }
+                    answered?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = tc.working) }
                 }
             }
         }
@@ -147,10 +148,10 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit) {
         Text("SCREEN", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = tc.faint)
         Text(
             screen?.trimEnd()?.ifEmpty { "(empty)" } ?: screenError ?: "Reading…",
-            Modifier.fillMaxWidth().heightIn(min = 120.dp).clip(RoundedCornerShape(14.dp)).background(tc.screen)
+            Modifier.fillMaxWidth().heightIn(min = 120.dp).clip(RoundedCornerShape(18.dp)).background(tc.screen)
                 .horizontalScroll(rememberScrollState()).padding(12.dp),
             fontFamily = FontFamily.Monospace, fontSize = 11.sp, lineHeight = 14.sp,
-            color = if (screen == null && screenError != null) tc.rose else tc.screenText,
+            color = if (screen == null && screenError != null) tc.failed else tc.screenText,
             softWrap = false,
         )
 
@@ -166,5 +167,6 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit) {
             lines.forEach { EventLine(it, acc) }
         }
         Spacer(Modifier.size(24.dp))
+        }
     }
 }

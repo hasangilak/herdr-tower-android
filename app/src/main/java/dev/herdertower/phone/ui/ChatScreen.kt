@@ -1,42 +1,52 @@
 package dev.herdertower.phone.ui
 
+import androidx.compose.animation.core.RepeatMode
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.Send
-import androidx.compose.material.icons.filled.Article
+import androidx.compose.material.icons.automirrored.filled.Article
+import androidx.compose.material.icons.automirrored.filled.VolumeOff
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Info
+import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NorthEast
 import androidx.compose.material.icons.filled.Notifications
 import androidx.compose.material.icons.filled.Terminal
 import androidx.compose.material.icons.filled.Warning
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.FilledIconButton
 import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButtonDefaults
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.TextField
-import androidx.compose.material3.TextFieldDefaults
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
@@ -47,15 +57,23 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontStyle
+import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.herdertower.phone.api.HistoryEntry
 import dev.herdertower.phone.data.Link
 import dev.herdertower.phone.data.TowerSession
+import dev.herdertower.phone.orb.OrbGlyph
 import kotlinx.coroutines.launch
 
 private sealed interface ChatRow {
@@ -64,21 +82,71 @@ private sealed interface ChatRow {
 }
 
 @Composable
-fun ChatScreen(session: TowerSession) {
+fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit) {
     val history by session.history.collectAsStateWithLifecycle()
     val state by session.state.collectAsStateWithLifecycle()
     val link by session.link.collectAsStateWithLifecycle()
-    val list = rememberLazyListState()
+    val voiceOn by session.voiceOn.collectAsStateWithLifecycle()
+    val acc = rememberAccounts(session)
     val scope = rememberCoroutineScope()
     val snack = LocalSnack.current
-    var text by rememberSaveable { mutableStateOf("") }
+    val perms = rememberPermissions()
+    val context = LocalContext.current
+    var draft by rememberSaveable { mutableStateOf("") }
     var sending by remember { mutableStateOf(false) }
-    var loadingOlder by remember { mutableStateOf(false) }
 
-    val rows = remember(history) {
+    fun send() {
+        val t = draft.trim()
+        if (t.isEmpty() || sending) return
+        sending = true
+        scope.launch {
+            session.act { it.ask(t) }
+                .onSuccess { draft = "" }
+                .onFailure { snack("Couldn't send: ${TowerSession.describe(it)}") }
+            sending = false
+        }
+    }
+
+    ChatContent(
+        entries = history,
+        working = link is Link.Live && (state?.phase == "thinking" || state?.phase == "transcribing"),
+        connected = link is Link.Live,
+        accounts = acc,
+        draft = draft,
+        sending = sending,
+        voiceOn = voiceOn,
+        onDraft = { draft = it },
+        onSend = ::send,
+        onMic = { perms.withMic(onVoice) },
+        onClose = onClose,
+        onLoadOlder = { scope.launch { if (session.loadOlder() == 0) snack("That's everything.") } },
+        onOpen = onOpen,
+        onVoiceToggle = { setVoice(it, session, perms, context) },
+    )
+}
+
+@Composable
+fun ChatContent(
+    entries: List<HistoryEntry>,
+    working: Boolean,
+    connected: Boolean,
+    accounts: AccountLookup,
+    draft: String,
+    sending: Boolean,
+    voiceOn: Boolean,
+    onDraft: (String) -> Unit,
+    onSend: () -> Unit,
+    onMic: () -> Unit,
+    onClose: () -> Unit,
+    onLoadOlder: () -> Unit,
+    onOpen: (String) -> Unit,
+    onVoiceToggle: (Boolean) -> Unit,
+) {
+    val list = rememberLazyListState()
+    val rows = remember(entries) {
         buildList<ChatRow> {
             var day = ""
-            history.filter { it.kind != "summary" }.forEach { e ->
+            entries.filter { it.kind != "summary" }.forEach { e ->
                 val d = dayLabel(e.at)
                 if (d != day) {
                     add(ChatRow.Day(d))
@@ -88,34 +156,28 @@ fun ChatScreen(session: TowerSession) {
             }
         }
     }
-    val thinking = state?.phase == "thinking" && link is Link.Live
-    LaunchedEffect(rows.size, thinking) { if (rows.isNotEmpty()) list.animateScrollToItem(rows.size - 1 + (if (thinking) 1 else 0)) }
+    LaunchedEffect(rows.size, working) { if (rows.isNotEmpty()) list.animateScrollToItem(rows.size + (if (working) 1 else 0)) }
 
-    Column(Modifier.fillMaxSize().imePadding()) {
+    Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
+        Box(Modifier.fillMaxWidth().padding(top = 12.dp, start = 16.dp, end = 16.dp, bottom = 4.dp)) {
+            ClosePill(modifier = Modifier.align(Alignment.Center), onClick = onClose)
+        }
         LazyColumn(
             Modifier.weight(1f).fillMaxWidth(),
             state = list,
-            contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 16.dp, vertical = 8.dp),
-            verticalArrangement = Arrangement.spacedBy(10.dp),
+            contentPadding = PaddingValues(horizontal = 16.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(14.dp),
         ) {
-            if (history.isNotEmpty()) {
-                item {
-                    Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                        TextButton(enabled = !loadingOlder, onClick = {
-                            loadingOlder = true
-                            scope.launch {
-                                if (session.loadOlder() == 0) snack("That's everything.")
-                                loadingOlder = false
-                            }
-                        }) { Text(if (loadingOlder) "Loading…" else "Earlier messages", color = tc.faint) }
-                    }
+            item {
+                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                    if (entries.isNotEmpty()) TextButton(onClick = onLoadOlder) { Text("Earlier messages", color = tc.faint) }
                 }
             }
             if (rows.isEmpty()) {
                 item {
                     Column(Modifier.fillMaxWidth().padding(top = 120.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Say hi to the tower", style = MaterialTheme.typography.titleMedium, color = tc.text)
-                        Text("Type below, or talk on the Talk tab.", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
+                        Text("Say hi to the tower", style = MaterialTheme.typography.headlineSmall, color = tc.text)
+                        Text("Type below, or tap the mic and talk.", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
                     }
                 }
             }
@@ -124,90 +186,125 @@ fun ChatScreen(session: TowerSession) {
                     is ChatRow.Day -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Text(r.label, style = MaterialTheme.typography.labelSmall, color = tc.faint)
                     }
-                    is ChatRow.Item -> if (r.e.kind == "request" || r.e.kind == "answer") Bubble(r.e) else EventLine(r.e)
-                }
-            }
-            if (thinking) {
-                item {
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                        CircularProgressIndicator(Modifier.size(14.dp), color = tc.cyan, strokeWidth = 2.dp)
-                        Text("Thinking…", style = MaterialTheme.typography.bodyMedium, color = tc.muted, fontStyle = FontStyle.Italic)
+                    is ChatRow.Item -> when (r.e.kind) {
+                        "request" -> UserBubble(r.e)
+                        "answer" -> ReplyBubble(r.e)
+                        else -> EventLine(r.e, accounts, onOpen)
                     }
                 }
             }
+            if (working) item { WorkingLine() }
         }
+        InputBar(draft, sending, connected, voiceOn, onDraft, onSend, onMic, onVoiceToggle)
+    }
+}
 
-        // The pill
-        Row(
-            Modifier.fillMaxWidth().padding(12.dp).clip(RoundedCornerShape(26.dp)).background(if (tc.dark) Color.White.copy(alpha = 0.94f) else Color.White)
-                .border(1.dp, tc.edge, RoundedCornerShape(26.dp)).padding(start = 4.dp, end = 6.dp),
-            verticalAlignment = Alignment.CenterVertically,
+/** What you said: warm copper, on the right. */
+@Composable
+fun UserBubble(e: HistoryEntry) {
+    val voice = e.text.startsWith("[voice] ")
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Column(
+            Modifier
+                .padding(start = 56.dp)
+                .widthIn(max = 320.dp)
+                .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 24.dp, bottomEnd = 8.dp))
+                .background(tc.userBubble)
+                .padding(horizontal = 18.dp, vertical = 12.dp),
         ) {
-            TextField(
-                text, { text = it },
-                Modifier.weight(1f),
-                placeholder = { Text("Ask the tower", color = Color(0xFF8A93A3)) },
-                maxLines = 5,
-                colors = TextFieldDefaults.colors(
-                    focusedContainerColor = Color.Transparent, unfocusedContainerColor = Color.Transparent, disabledContainerColor = Color.Transparent,
-                    focusedIndicatorColor = Color.Transparent, unfocusedIndicatorColor = Color.Transparent,
-                    focusedTextColor = Color(0xFF1D2330), unfocusedTextColor = Color(0xFF1D2330), cursorColor = Color(0xFF1D2330),
-                ),
-            )
-            val can = text.isNotBlank() && !sending && link is Link.Live
-            FilledIconButton(
-                onClick = {
-                    val t = text.trim()
-                    sending = true
-                    scope.launch {
-                        session.act { it.ask(t) }
-                            .onSuccess { text = "" }
-                            .onFailure { snack("Couldn't send: ${TowerSession.describe(it)}") }
-                        sending = false
-                    }
-                },
-                enabled = can,
-                colors = IconButtonDefaults.filledIconButtonColors(containerColor = Color(0xFF1D2330), contentColor = Color.White, disabledContainerColor = Color(0xFFD5DAE2), disabledContentColor = Color.White),
-            ) {
-                if (sending) CircularProgressIndicator(Modifier.size(16.dp), color = Color.White, strokeWidth = 2.dp)
-                else Icon(Icons.AutoMirrored.Filled.Send, "Send")
+            Text(e.text.removePrefix("[voice] "), style = MaterialTheme.typography.bodyLarge, color = tc.onBubble)
+            Row(Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
+                if (voice) Icon(Icons.Filled.Mic, "spoken", Modifier.size(12.dp), tint = tc.onBubble.copy(alpha = 0.8f))
+                Text(" " + clock(e.at), style = MaterialTheme.typography.labelSmall, color = tc.onBubble.copy(alpha = 0.85f))
             }
         }
     }
 }
 
-/** What you said (right) or the tower's answer (left). */
+/** The tower's answer: a dark soft bubble with the orb beside it; its markdown rendered. */
 @Composable
-fun Bubble(e: HistoryEntry) {
-    val mine = e.kind == "request"
-    Row(Modifier.fillMaxWidth(), horizontalArrangement = if (mine) Arrangement.End else Arrangement.Start) {
+fun ReplyBubble(e: HistoryEntry) {
+    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
+        OrbGlyph(Modifier.padding(top = 6.dp).size(28.dp).semantics { contentDescription = "Tower" })
+        Spacer(Modifier.width(10.dp))
         Column(
-            Modifier.widthIn(max = 300.dp).clip(RoundedCornerShape(20.dp)).background(if (mine) tc.bubbleMe else tc.bubbleTower)
-                .border(1.dp, tc.edge, RoundedCornerShape(20.dp)).padding(horizontal = 14.dp, vertical = 10.dp),
+            Modifier
+                .padding(end = 32.dp)
+                .clip(RoundedCornerShape(topStart = 8.dp, topEnd = 24.dp, bottomStart = 24.dp, bottomEnd = 24.dp))
+                .background(tc.reply)
+                .border(1.dp, tc.edge, RoundedCornerShape(topStart = 8.dp, topEnd = 24.dp, bottomStart = 24.dp, bottomEnd = 24.dp))
+                .padding(horizontal = 18.dp, vertical = 12.dp),
         ) {
-            Text(e.text.removePrefix("[voice] "), style = MaterialTheme.typography.bodyLarge, color = tc.text)
-            if (e.attachments.isNotEmpty()) {
-                Text(plural(e.attachments.size, "attachment"), style = MaterialTheme.typography.labelSmall, color = tc.faint)
-            }
+            MarkdownText(e.text, tc.text)
             Text(clock(e.at), Modifier.align(Alignment.End), style = MaterialTheme.typography.labelSmall, color = tc.faint)
         }
     }
 }
 
-/** How the panel marks a line of activity: icon, colour and words. */
+@Composable
+private fun WorkingLine() {
+    val reduce = LocalReduceMotion.current
+    val a = if (reduce) 1f else rememberInfiniteTransition(label = "working").animateFloat(0.35f, 1f, infiniteRepeatable(tween(1100), RepeatMode.Reverse), label = "a").value
+    Row(verticalAlignment = Alignment.CenterVertically, modifier = Modifier.padding(start = 2.dp)) {
+        OrbGlyph(Modifier.size(20.dp).alpha(a))
+        Spacer(Modifier.width(10.dp))
+        Text("The tower is working…", style = MaterialTheme.typography.bodyMedium, color = tc.faint, fontStyle = FontStyle.Italic)
+    }
+}
+
+/** The floating input: voice toggle, text (Send on the keyboard sends), and mic or send in one fixed place. */
+@Composable
+private fun InputBar(
+    draft: String, sending: Boolean, connected: Boolean, voiceOn: Boolean,
+    onDraft: (String) -> Unit, onSend: () -> Unit, onMic: () -> Unit, onVoiceToggle: (Boolean) -> Unit,
+) {
+    val shape = RoundedCornerShape(30.dp)
+    Row(
+        Modifier
+            .padding(horizontal = 12.dp, vertical = 10.dp)
+            .fillMaxWidth()
+            .clip(shape)
+            .background(if (tc.dark) Color(0xFF120B08).copy(alpha = 0.85f) else Color.White.copy(alpha = 0.9f))
+            .border(1.dp, tc.edge, shape)
+            .padding(6.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        Box(
+            Modifier.size(44.dp).clip(RoundedCornerShape(22.dp)).clickable(role = Role.Button) { onVoiceToggle(!voiceOn) }
+                .semantics { contentDescription = if (voiceOn) "Phone is the voice: on" else "Phone is the voice: off" },
+            contentAlignment = Alignment.Center,
+        ) { Icon(if (voiceOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff, null, tint = tc.muted) }
+        BasicTextField(
+            draft, onDraft,
+            Modifier.weight(1f).heightIn(min = 44.dp).padding(horizontal = 6.dp, vertical = 11.dp).semantics { contentDescription = "Ask the tower" },
+            textStyle = MaterialTheme.typography.bodyLarge.copy(color = tc.text),
+            cursorBrush = SolidColor(tc.accentHi),
+            keyboardOptions = KeyboardOptions(imeAction = ImeAction.Send),
+            keyboardActions = KeyboardActions(onSend = { onSend() }),
+            maxLines = 5,
+            decorationBox = { inner ->
+                if (draft.isEmpty()) Text("Ask the tower", style = MaterialTheme.typography.bodyLarge, color = tc.faint)
+                inner()
+            },
+        )
+        MicOrSend(draft.isNotBlank(), sending, enabled = connected, size = 48.dp, onMic = onMic, onSend = onSend)
+    }
+}
+
+/** How a line of activity looks: icon, colour and words. */
 @Composable
 fun eventLook(e: HistoryEntry): Triple<ImageVector, Color, String> {
     val who = e.name ?: e.session ?: ""
     return when (e.kind to e.status) {
-        "job" to "working" -> Triple(Icons.Filled.NorthEast, tc.cyan, "Asked $who: ${e.text}")
-        "job" to "done", "job" to "idle" -> Triple(Icons.Filled.CheckCircle, tc.pale, if (e.text.isEmpty()) "$who finished" else "$who finished: ${e.text}")
-        "job" to "blocked" -> Triple(Icons.Filled.Warning, tc.amber, "$who needs you" + if (e.text.isEmpty()) "" else ": ${e.text}")
+        "job" to "working" -> Triple(Icons.Filled.NorthEast, tc.working, "Asked $who: ${e.text}")
+        "job" to "done", "job" to "idle" -> Triple(Icons.Filled.CheckCircle, tc.done, if (e.text.isEmpty()) "$who finished" else "$who finished: ${e.text}")
+        "job" to "blocked" -> Triple(Icons.Filled.Warning, tc.blocked, "$who needs you" + if (e.text.isEmpty()) "" else ": ${e.text}")
         else -> when (e.kind) {
-            "job" -> Triple(Icons.Filled.Error, tc.rose, "$who ${statusWord(e.status ?: "")}" + if (e.text.isEmpty()) "" else ": ${e.text}")
-            "watch" -> Triple(Icons.Filled.Terminal, tc.sky, e.text)
-            "alert" -> Triple(Icons.Filled.Notifications, tc.amber, e.text)
-            "summary" -> Triple(Icons.Filled.Article, tc.peri, "$who: ${e.text}")
-            else -> Triple(Icons.Filled.Info, tc.grey, e.text)
+            "job" -> Triple(Icons.Filled.Error, tc.failed, "$who ${statusWord(e.status ?: "")}" + if (e.text.isEmpty()) "" else ": ${e.text}")
+            "watch" -> Triple(Icons.Filled.Terminal, tc.muted, e.text)
+            "alert" -> Triple(Icons.Filled.Notifications, tc.accentHi.takeIf { tc.dark } ?: tc.accent, e.text)
+            "summary" -> Triple(Icons.AutoMirrored.Filled.Article, tc.muted, "$who: ${e.text}")
+            else -> Triple(Icons.Filled.Info, tc.idle, e.text)
         }
     }
 }
@@ -216,16 +313,21 @@ fun eventLook(e: HistoryEntry): Triple<ImageVector, Color, String> {
 @Composable
 fun EventLine(e: HistoryEntry, accounts: AccountLookup? = null, onOpen: ((String) -> Unit)? = null) {
     val (icon, color, text) = eventLook(e)
+    val session = e.session
     Row(
-        Modifier.fillMaxWidth().then(if (onOpen != null && e.session != null) Modifier.clip(RoundedCornerShape(8.dp)).clickableNoRipple { onOpen(e.session) } else Modifier),
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(12.dp))
+            .then(if (onOpen != null && session != null) Modifier.clickable(role = Role.Button, onClickLabel = "Open $session") { onOpen(session) } else Modifier)
+            .padding(horizontal = 6.dp, vertical = 4.dp),
         verticalAlignment = Alignment.Top,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Text(clock(e.at), Modifier.width(42.dp).padding(top = 2.dp), style = MaterialTheme.typography.labelSmall, color = tc.faint)
-        Icon(icon, null, Modifier.size(15.dp).padding(top = 2.dp), tint = color)
-        Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = if (e.held) tc.muted else tc.text, maxLines = 6)
-        val acc = e.account ?: e.session?.let { accounts?.of(it) }
+        Icon(icon, null, Modifier.padding(top = 2.dp).size(16.dp), tint = color)
+        Text(text, Modifier.weight(1f), style = MaterialTheme.typography.bodyMedium, color = if (e.held) tc.faint else tc.muted, maxLines = 6)
+        val acc = e.account ?: session?.let { accounts?.of(it) }
         if (acc != null && accounts != null) AccountBadge(acc, acc == accounts.default)
+        Text(clock(e.at), Modifier.padding(top = 2.dp), style = MaterialTheme.typography.labelSmall, color = tc.faint)
     }
 }
 
@@ -246,5 +348,3 @@ fun rememberAccounts(session: TowerSession): AccountLookup {
         AccountLookup(m, accounts.default)
     }
 }
-
-fun Modifier.clickableNoRipple(onClick: () -> Unit): Modifier = this.clickable(onClick = onClick)

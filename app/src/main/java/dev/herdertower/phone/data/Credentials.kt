@@ -113,6 +113,11 @@ class Settings(context: Context) {
         get() = prefs.getString("theme", "system") ?: "system"
         set(v) = prefs.edit().putString("theme", v).apply()
 
+    /** What the user calls this tower (the API has no Mac name); empty: not set. */
+    var towerName: String
+        get() = prefs.getString("tower_name", "") ?: ""
+        set(v) = prefs.edit().putString("tower_name", v).apply()
+
     /** Whether the phone should be the tower's voice (restored on launch). */
     var voice: Boolean
         get() = prefs.getBoolean("voice", false)

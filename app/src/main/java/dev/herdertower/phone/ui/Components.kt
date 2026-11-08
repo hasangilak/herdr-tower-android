@@ -1,13 +1,5 @@
 package dev.herdertower.phone.ui
 
-import androidx.compose.animation.core.LinearEasing
-import androidx.compose.animation.core.RepeatMode
-import androidx.compose.animation.core.animateFloat
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.infiniteRepeatable
-import androidx.compose.animation.core.rememberInfiniteTransition
-import androidx.compose.animation.core.tween
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -20,17 +12,21 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.automirrored.filled.ArrowBack
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.getValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
-import androidx.compose.ui.geometry.Offset
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.drawscope.Stroke
+import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
@@ -39,7 +35,6 @@ import java.text.SimpleDateFormat
 import java.util.Calendar
 import java.util.Date
 import java.util.Locale
-import kotlin.math.min
 
 @Composable
 fun Dot(color: Color, size: Dp = 8.dp, modifier: Modifier = Modifier) {
@@ -52,26 +47,19 @@ fun Dot(color: Color, size: Dp = 8.dp, modifier: Modifier = Modifier) {
  */
 @Composable
 fun AccountBadge(account: String, isDefault: Boolean, modifier: Modifier = Modifier) {
-    val shape = CircleShape
-    val base = modifier.widthIn(max = 120.dp).clip(shape)
+    val base = modifier
+        .widthIn(max = 120.dp)
+        .clip(CircleShape)
+        .semantics { contentDescription = "Account $account" + if (isDefault) " (default)" else "" }
     if (isDefault) {
         Text(
-            account,
-            modifier = base.border(1.dp, tc.edge, shape).padding(horizontal = 7.dp, vertical = 1.dp),
-            style = MaterialTheme.typography.labelSmall,
-            color = tc.muted,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+            account, base.border(1.dp, tc.edge, CircleShape).padding(horizontal = 8.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelSmall, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
     } else {
         Text(
-            account,
-            modifier = base.background(Color(0xFF000000 or AccountHue.of(account))).padding(horizontal = 7.dp, vertical = 1.dp),
-            style = MaterialTheme.typography.labelSmall,
-            fontWeight = FontWeight.Medium,
-            color = NAVY,
-            maxLines = 1,
-            overflow = TextOverflow.Ellipsis,
+            account, base.background(Color(0xFF000000 or AccountHue.of(account))).padding(horizontal = 8.dp, vertical = 2.dp),
+            style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = NAVY, maxLines = 1, overflow = TextOverflow.Ellipsis,
         )
     }
 }
@@ -84,7 +72,7 @@ fun SpaceAccountBadge(accounts: List<String>, default: String?) {
         0 -> {}
         1 -> AccountBadge(distinct[0], distinct[0] == default)
         else -> Row(
-            Modifier.clip(CircleShape).border(1.dp, tc.edge, CircleShape).padding(horizontal = 7.dp, vertical = 2.dp),
+            Modifier.clip(CircleShape).border(1.dp, tc.edge, CircleShape).padding(horizontal = 8.dp, vertical = 3.dp),
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -94,36 +82,70 @@ fun SpaceAccountBadge(accounts: List<String>, default: String?) {
     }
 }
 
-/** A rounded pill, filled when [selected] (the panel's segments and focus chips). */
+/** A round glass icon button (the top bar's alerts and menu). */
+@Composable
+fun RoundIcon(icon: ImageVector, label: String, modifier: Modifier = Modifier, badge: Int = 0, size: Dp = 44.dp, onClick: () -> Unit) {
+    Box(modifier) {
+        Box(
+            Modifier
+                .size(size)
+                .clip(CircleShape)
+                .background(tc.card)
+                .border(1.dp, tc.edge, CircleShape)
+                .clickable(role = Role.Button, onClickLabel = label, onClick = onClick)
+                .semantics { contentDescription = if (badge > 0) "$label, $badge" else label },
+            contentAlignment = Alignment.Center,
+        ) { Icon(icon, null, Modifier.size(20.dp), tint = tc.text) }
+        if (badge > 0) {
+            Box(
+                Modifier.align(Alignment.TopEnd).size(18.dp).clip(CircleShape).background(tc.blocked),
+                contentAlignment = Alignment.Center,
+            ) { Text(if (badge > 9) "9+" else "$badge", style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold) }
+        }
+    }
+}
+
+/** The copper pill at the top of the voice and chat screens. */
+@Composable
+fun ClosePill(text: String = "Close", modifier: Modifier = Modifier, onClick: () -> Unit) {
+    Row(
+        modifier
+            .clip(CircleShape)
+            .background(tc.card)
+            .border(1.dp, tc.edge, CircleShape)
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 16.dp, vertical = 9.dp),
+        verticalAlignment = Alignment.CenterVertically,
+        horizontalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Icon(Icons.Filled.Close, null, Modifier.size(16.dp), tint = tc.text)
+        Text(text, style = MaterialTheme.typography.labelLarge, color = tc.text)
+    }
+}
+
+/** A rounded pill, filled when [selected]. */
 @Composable
 fun Pill(text: String, selected: Boolean, modifier: Modifier = Modifier, onClick: () -> Unit) {
     Box(
         modifier
             .clip(CircleShape)
-            .then(if (selected) Modifier.background(tc.pale) else Modifier.border(1.dp, tc.edge, CircleShape))
-            .clickable(onClick = onClick)
-            .padding(horizontal = 12.dp, vertical = 6.dp),
+            .then(if (selected) Modifier.background(tc.accentBrush) else Modifier.border(1.dp, tc.edge, CircleShape))
+            .clickable(role = Role.Button, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 7.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text,
-            style = MaterialTheme.typography.labelMedium,
+            text, style = MaterialTheme.typography.labelMedium,
             fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-            color = if (selected) NAVY else tc.muted,
-            maxLines = 1,
+            color = if (selected) tc.onAccent else tc.muted, maxLines = 1,
         )
     }
 }
 
-/** The panel's segmented control: a rounded track with one filled segment. */
 @Composable
 fun Segments(modifier: Modifier = Modifier, content: @Composable RowScope.() -> Unit) {
     Row(
-        modifier
-            .clip(CircleShape)
-            .background(if (tc.dark) Color.White.copy(alpha = 0.10f) else Color.White.copy(alpha = 0.7f))
-            .border(1.dp, tc.edge, CircleShape)
-            .padding(3.dp),
+        modifier.clip(CircleShape).background(tc.card).border(1.dp, tc.edge, CircleShape).padding(4.dp),
         horizontalArrangement = Arrangement.spacedBy(2.dp),
         content = content,
     )
@@ -135,46 +157,44 @@ fun RowScope.Segment(text: String, selected: Boolean, onClick: () -> Unit) {
         Modifier
             .weight(1f)
             .clip(CircleShape)
-            .then(if (selected) Modifier.background(tc.pale) else Modifier)
-            .clickable(onClick = onClick)
-            .padding(vertical = 7.dp),
+            .then(if (selected) Modifier.background(tc.accentBrush) else Modifier)
+            .clickable(role = Role.Tab, onClick = onClick)
+            .padding(vertical = 9.dp),
         contentAlignment = Alignment.Center,
     ) {
         Text(
-            text,
-            style = MaterialTheme.typography.labelLarge,
-            color = if (selected) NAVY else tc.muted,
-            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal,
-            maxLines = 1,
+            text, style = MaterialTheme.typography.labelLarge,
+            color = if (selected) tc.onAccent else tc.muted,
+            fontWeight = if (selected) FontWeight.Medium else FontWeight.Normal, maxLines = 1,
         )
     }
 }
 
-/** A glass card: the panel's rounded, edged bubble. */
+/** A glass card: rounded, edged, translucent. */
 @Composable
 fun GlassCard(modifier: Modifier = Modifier, highlighted: Boolean = false, onClick: (() -> Unit)? = null, content: @Composable () -> Unit) {
-    val shape = RoundedCornerShape(18.dp)
+    val shape = RoundedCornerShape(24.dp)
     Box(
         modifier
             .clip(shape)
-            .background(if (highlighted) (if (tc.dark) Color.White.copy(alpha = 0.18f) else tc.pale.copy(alpha = 0.25f)) else tc.card)
-            .border(1.dp, if (highlighted) tc.pale else tc.edge, shape)
+            .background(if (highlighted) tc.accent.copy(alpha = if (tc.dark) 0.22f else 0.14f) else tc.card)
+            .border(1.dp, if (highlighted) tc.accentHi.copy(alpha = 0.6f) else tc.edge, shape)
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
-            .padding(16.dp),
+            .padding(18.dp),
     ) { content() }
 }
 
-/** One word for the tower's phase and its colour, as the panel's header shows it. */
+/** One word for the tower's phase and its colour. */
 @Composable
 fun phaseWord(phase: String?): Pair<String, Color> = when (phase) {
-    "listening", "armed" -> "Listening" to tc.cyan
-    "speaking", "announcing" -> "Speaking" to tc.peri
-    "transcribing" -> "Understanding" to tc.sky
-    "thinking" -> "Thinking" to tc.sky
-    "blocked" -> "Needs you" to tc.rose
-    "standby" -> "Standby" to tc.pale
-    null -> "Off" to tc.grey
-    else -> "Ready" to tc.pale
+    "listening", "armed" -> "Listening" to tc.working
+    "speaking", "announcing" -> "Speaking" to tc.accentHi
+    "transcribing" -> "Understanding" to tc.accentHi
+    "thinking" -> "Thinking" to tc.accentHi
+    "blocked" -> "Needs you" to tc.blocked
+    "standby" -> "Standby" to tc.done
+    null, "off" -> "Not connected" to tc.idle
+    else -> "Ready" to tc.done
 }
 
 fun statusWord(status: String): String = when (status) {
@@ -219,54 +239,18 @@ fun dayLabel(ms: Long): String {
     return SimpleDateFormat("EEE d MMM", Locale.getDefault()).format(Date(ms))
 }
 
-enum class OrbMood { Calm, Listening, Thinking, Speaking, Alert, Off }
-
-/**
- * The orb, drawn: a glassy sphere tinted like the Mac's (pale and calm,
- * cyan and glowing while listening, periwinkle while speaking), breathing
- * slowly; [level] swells the ring while the microphone hears you.
- */
+/** The header of a screen opened from the menu: a round back button and a large title. */
 @Composable
-fun Orb(mood: OrbMood, level: Float, modifier: Modifier = Modifier) {
-    val t = tc
-    val tint = when (mood) {
-        OrbMood.Calm -> t.sky
-        OrbMood.Listening -> t.cyan
-        OrbMood.Thinking -> t.sky
-        OrbMood.Speaking -> t.peri
-        OrbMood.Alert -> t.amber
-        OrbMood.Off -> t.grey
-    }
-    val glowing = mood == OrbMood.Listening || mood == OrbMood.Speaking
-    val inf = rememberInfiniteTransition(label = "orb")
-    val breath by inf.animateFloat(
-        0f, 1f,
-        infiniteRepeatable(tween(if (mood == OrbMood.Thinking) 900 else 2600, easing = LinearEasing), RepeatMode.Reverse),
-        label = "breath",
-    )
-    val lvl by animateFloatAsState(level, tween(90), label = "level")
-    Canvas(modifier) {
-        val r = min(size.width, size.height) / 2f * 0.78f
-        val c = center
-        // Glow
-        if (glowing || mood == OrbMood.Alert) {
-            val g = r * (1.18f + 0.12f * breath + 0.35f * lvl)
-            drawCircle(Brush.radialGradient(listOf(tint.copy(alpha = 0.45f), Color.Transparent), c, g), g, c)
+fun SubHeader(title: String, subtitle: String? = null, onBack: () -> Unit) {
+    Row(
+        Modifier.padding(start = 16.dp, end = 20.dp, top = 12.dp, bottom = 8.dp),
+        verticalAlignment = Alignment.CenterVertically,
+    ) {
+        RoundIcon(androidx.compose.material.icons.Icons.AutoMirrored.Filled.ArrowBack, "Back", onClick = onBack)
+        androidx.compose.foundation.layout.Spacer(Modifier.size(14.dp))
+        androidx.compose.foundation.layout.Column {
+            Text(title, style = MaterialTheme.typography.headlineMedium, color = tc.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            subtitle?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis) }
         }
-        // Body: dark core, tinted rim, a highlight up and to the left.
-        val body = r * (1f + 0.02f * breath + 0.08f * lvl)
-        drawCircle(
-            Brush.radialGradient(
-                listOf(Color(0xFF0E1628), Color(0xFF16233A), tint.copy(alpha = 0.85f)),
-                center = c + Offset(-body * 0.18f, -body * 0.2f),
-                radius = body * 1.25f,
-            ),
-            body, c,
-        )
-        drawCircle(
-            Brush.radialGradient(listOf(Color.White.copy(alpha = 0.35f), Color.Transparent), c + Offset(-body * 0.35f, -body * 0.4f), body * 0.55f),
-            body, c,
-        )
-        drawCircle(tint.copy(alpha = if (glowing) 0.95f else 0.6f), body, c, style = Stroke(width = body * (0.035f + 0.05f * lvl)))
     }
 }

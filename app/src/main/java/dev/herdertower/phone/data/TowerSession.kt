@@ -37,6 +37,7 @@ import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
 import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
 
 /** The connection to the tower, as the app shows it. */
@@ -98,6 +99,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     /** Whether this phone is (meant to be) the tower's voice. */
     val voiceOn: StateFlow<Boolean> = _voiceOn.asStateFlow()
 
+    private val _towerName = MutableStateFlow(settings.towerName)
+    /** The Mac's name for greetings: what the user set, or a guess from its address. */
+    val towerName: StateFlow<String> = _towerName.asStateFlow()
+
     private val _foreground = MutableStateFlow(false)
     private val retryNow = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     private var refreshJob: CoJob? = null
@@ -107,6 +112,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     }
 
     init {
+        _creds.value?.let { guessName(it.host) }
         scope.launch {
             combine(_creds, _voiceOn, _foreground) { c, v, fg -> if (c == null) null else Want(c, v, fg) }
                 .distinctUntilChanged()
@@ -152,6 +158,24 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     /** Skip the backoff wait and reconnect now. */
     fun reconnect() {
         retryNow.tryEmit(Unit)
+    }
+
+    fun renameTower(name: String) {
+        settings.towerName = name.trim()
+        _towerName.value = name.trim()
+    }
+
+    /** A Mac answers to its name on the LAN (reverse DNS / mDNS): use it until the user names it. */
+    private fun guessName(host: String) {
+        if (settings.towerName.isNotBlank()) return
+        scope.launch {
+            val name = withContext(Dispatchers.IO) {
+                runCatching { java.net.InetAddress.getByName(host).canonicalHostName }.getOrNull()
+            }?.takeIf { it != host && !it.first().isDigit() }
+                ?.substringBefore('.')
+                ?.replace('-', ' ')
+            if (!name.isNullOrBlank() && settings.towerName.isBlank()) _towerName.value = name
+        }
     }
 
     private fun clientFor(c: Credentials) = TowerClient(c.endpoint, { _creds.value?.token })
@@ -311,6 +335,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         client = clientFor(c)
         _history.value = emptyList()
         _creds.value = c
+        guessName(c.host)
         Result.success(c)
     } catch (e: CancellationException) {
         throw e
