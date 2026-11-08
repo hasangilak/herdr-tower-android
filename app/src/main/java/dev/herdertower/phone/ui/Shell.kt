@@ -15,7 +15,15 @@ import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
 import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
+import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
+import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.material.icons.filled.Stop
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -242,6 +250,12 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
                     is Route.Screenshots -> ScreenshotsScreen(session, route.session, route.open, onBack = { back() })
                 }
             }
+            // The moment the tower speaks (here or on the Mac), one big Stop on every screen.
+            StopButton(
+                visible = connected && (playing != null || state?.speaking == true || state?.announcing == true),
+                onStop = { session.hush() },
+                modifier = Modifier.align(Alignment.BottomCenter).navigationBarsPadding().imePadding().padding(bottom = 92.dp),
+            )
             SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp))
         }
         if (menu) {
@@ -313,6 +327,20 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
                         )
                     }
                 }) { Text("Keep the voice running in the background (battery setting)", color = tc.text) }
+            }
+            if (voiceOn) {
+                val hushWord by session.hushWord.collectAsStateWithLifecycle()
+                Spacer(Modifier.height(6.dp))
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    Column(Modifier.weight(1f)) {
+                        Text("Say \"stop\" to stop", style = MaterialTheme.typography.titleMedium, color = tc.text)
+                        Text(
+                            "While it talks here, the phone listens for stop, hush or quiet.",
+                            style = MaterialTheme.typography.bodySmall, color = tc.muted,
+                        )
+                    }
+                    Switch(hushWord, { on -> if (on) perms.withMic { session.setHushWord(true) } else session.setHushWord(false) }, colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent))
+                }
             }
             Spacer(Modifier.height(10.dp))
             Text("Mac microphone", style = MaterialTheme.typography.labelLarge, color = tc.faint)
@@ -414,6 +442,33 @@ fun ConnectionNotice(link: Link, session: TowerSession, onRepair: () -> Unit, mo
             Spacer(Modifier.size(10.dp))
             Text(msg, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = tc.text)
             TextButton(onClick = action.second) { Text(action.first, color = tc.text, fontWeight = FontWeight.Medium) }
+        }
+    }
+}
+
+/** Stops the tower talking: quiet here at once, the Mac told too. */
+@Composable
+fun StopButton(visible: Boolean, onStop: () -> Unit, modifier: Modifier = Modifier) {
+    val reduce = LocalReduceMotion.current
+    androidx.compose.animation.AnimatedVisibility(
+        visible = visible,
+        modifier = modifier,
+        enter = if (reduce) EnterTransition.None else fadeIn(tween(160)) + scaleIn(tween(160), initialScale = 0.85f),
+        exit = if (reduce) ExitTransition.None else fadeOut(tween(220)),
+    ) {
+        Row(
+            Modifier
+                .shadow(12.dp, CircleShape)
+                .clip(CircleShape)
+                .background(tc.text)
+                .clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = "Stop the tower talking", onClick = onStop)
+                .heightIn(min = 56.dp)
+                .padding(start = 18.dp, end = 24.dp),
+            verticalAlignment = Alignment.CenterVertically,
+        ) {
+            Icon(Icons.Filled.Stop, null, Modifier.size(28.dp), tint = tc.bgTop)
+            Spacer(Modifier.width(8.dp))
+            Text("Stop", style = MaterialTheme.typography.titleMedium, color = tc.bgTop, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
         }
     }
 }

@@ -62,6 +62,19 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    private val hushKeys = dev.herdertower.phone.voice.HushKeys()
+
+    /** Volume down twice (or held) while the tower talks stops it; the press still turns the volume down. */
+    override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
+        if (event.keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN && event.action == android.view.KeyEvent.ACTION_DOWN) {
+            val app = tower
+            val talking = app.session.player.nowPlaying.value != null || app.session.state.value?.speaking == true
+            if (talking && hushKeys.down(event.eventTime, event.repeatCount)) app.session.hush()
+            if (!talking) hushKeys.reset()
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         take(intent)

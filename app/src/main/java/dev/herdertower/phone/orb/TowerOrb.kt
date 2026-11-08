@@ -173,6 +173,8 @@ fun TowerOrb(
     renderScale: Float = 0.5f,
     interactive: Boolean = true,
     description: String? = null,
+    /** A tap on the orb (stopping the tower while it speaks); the press still ripples it. */
+    onTap: (() -> Unit)? = null,
 ) {
     // The shader draws over BLEED times the box so the halo fades out before
     // its edge (as in the Mac's roomy window); the orb is sized to match.
@@ -210,8 +212,9 @@ fun TowerOrb(
         val boxH = maxHeight
         val wPx = with(density) { maxWidth.toPx() }
         val hPx = with(density) { maxHeight.toPx() }
+        val tap by androidx.compose.runtime.rememberUpdatedState(onTap)
         val press = if (interactive) Modifier.pointerInput(Unit) {
-            detectTapGestures(onPress = { p ->
+            detectTapGestures(onTap = { tap?.invoke() }, onPress = { p ->
                 val per = OrbShader.CAM_Z / (OrbShader.FOCAL * engine.sim.o.size) / (min(size.width, size.height) * BLEED)
                 engine.press((p.x - size.width / 2.0) * per, -(p.y - size.height / 2.0) * per)
             })

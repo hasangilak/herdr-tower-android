@@ -133,6 +133,11 @@ class Settings(context: Context) {
         get() = prefs.getString("orb_tier", "auto") ?: "auto"
         set(v) = prefs.edit().putString("orb_tier", v).apply()
 
+    /** Whether saying "stop" while the tower talks on the phone stops it. */
+    var hushWord: Boolean
+        get() = prefs.getBoolean("hush_word", true)
+        set(v) = prefs.edit().putBoolean("hush_word", v).apply()
+
     /** Whether the phone should be the tower's voice (restored on launch). */
     var voice: Boolean
         get() = prefs.getBoolean("voice", false)

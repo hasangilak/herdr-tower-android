@@ -67,7 +67,30 @@ class ClipPlayer(
         }
     }
 
+    /** After the user stopped a reply: its later sentences are dropped, until a new turn (its "Okay.") or [newTurn]. */
+    @Volatile private var mutedUntil = 0L
+
+    /** Whether the user stopped a reply that may still be arriving. */
+    val muted: Boolean get() = System.currentTimeMillis() < mutedUntil
+
+    /**
+     * The user stopped the tower here: quiet now, and if a reply was playing,
+     * the rest of that reply (its later sentences) is ignored too. Alerts and
+     * cues still play.
+     */
+    fun stop() {
+        if (_now.value != null || !queue.isEmpty) mutedUntil = System.currentTimeMillis() + MUTE_MS
+        hush()
+    }
+
+    /** The user asked something new: its reply may play. */
+    fun newTurn() {
+        mutedUntil = 0
+    }
+
     fun enqueue(clip: AudioClip) {
+        if (clip.kind == "ack") mutedUntil = 0 // a new turn began
+        if (clip.kind == "reply" && muted) return
         val g = generation
         val bytes = scope.async(Dispatchers.IO) { fetch(clip) }
         queue.trySend(Item(clip, bytes, g))
@@ -195,5 +218,7 @@ class ClipPlayer(
 
     private companion object {
         const val TAG = "ClipPlayer"
+        /** How long a stopped turn's late clips are dropped at most. */
+        const val MUTE_MS = 120_000L
     }
 }

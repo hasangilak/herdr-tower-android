@@ -327,7 +327,9 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         try {
             val page = c.chat(limit = 60)
             _threadSupported.value = true
-            _thread.value = ChatApi.merge(_thread.value, page.messages)
+            // The newest page joins what's loaded when they overlap; after a gap (or another tower) it replaces it.
+            val joins = page.messages.isEmpty() || _thread.value.any { it.id == page.messages.first().id }
+            _thread.value = if (joins) ChatApi.merge(_thread.value, page.messages) else ChatApi.merge(emptyList(), page.messages)
             if (_thread.value.size == page.messages.size) _threadMore.value = page.more ?: (page.messages.size >= 60)
         } catch (e: CancellationException) {
             throw e
@@ -406,6 +408,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
 
     /** Keep the stream open for a while after asking, even if the app goes to the background. */
     fun linger() {
+        player.newTurn()
         _lingering.value = true
         lingerJob?.cancel()
         lingerJob = scope.launch {
@@ -432,10 +435,28 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         }
     }
 
-    /** Hush: stop the phone now and tell the tower to stop and drop what's queued. */
+    /**
+     * Stop: quiet here at once (no waiting for the network), the rest of this
+     * turn's clips ignored, and the tower told to stop and drop what's queued,
+     * which also silences the Mac if it's the one speaking.
+     */
     fun hush() {
-        player.hush()
+        player.stop()
+        // Several ways to stop can fire for one press (the button, the volume keys): tell the Mac once.
+        val now = System.currentTimeMillis()
+        if (now - lastHush < 500) return
+        lastHush = now
         scope.launch { act { it.hush() } }
+    }
+    private var lastHush = 0L
+
+    private val _hushWord = MutableStateFlow(settings.hushWord)
+    /** Whether saying "stop" while it talks on the phone stops it. */
+    val hushWord: StateFlow<Boolean> = _hushWord.asStateFlow()
+
+    fun setHushWord(on: Boolean) {
+        settings.hushWord = on
+        _hushWord.value = on
     }
 
     // Pairing
@@ -454,6 +475,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         store.save(c)
         client = clientFor(c)
         _history.value = emptyList()
+        _thread.value = emptyList()
         _creds.value = c
         guessName(c.host)
         Result.success(c)

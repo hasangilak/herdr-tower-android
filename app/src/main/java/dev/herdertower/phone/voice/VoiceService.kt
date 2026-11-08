@@ -32,12 +32,14 @@ import kotlinx.coroutines.launch
  * Keeps the voice stream (`?voice=1`) alive while the phone is the tower's
  * voice, screen on or off: a foreground service (microphone + media
  * playback) holding a Wi-Fi lock and a partial wake lock. Its notification
- * says how the connection is and has Talk, Hush and Stop.
+ * says how the connection is and has Stop (the tower talking), Talk and
+ * End voice.
  */
 class VoiceService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
     private var wifi: WifiManager.WifiLock? = null
     private var wake: PowerManager.WakeLock? = null
+    private var media: HushSession? = null
 
     override fun onBind(intent: Intent?): IBinder? = null
 
@@ -59,6 +61,11 @@ class VoiceService : Service() {
         scope.launch {
             app.session.voiceOn.collect { if (!it) stopSelf() }
         }
+        // Headset / Bluetooth pause and volume down twice stop the tower while it talks.
+        val hushSession = HushSession(this) { app.session.hush() }.also { media = it }
+        scope.launch {
+            app.session.player.nowPlaying.collect { hushSession.follow(it != null) }
+        }
         scope.launch {
             combine(app.session.link, app.voice.phase, app.session.player.nowPlaying) { link, phase, playing ->
                 val line = when (phase) {
@@ -66,9 +73,9 @@ class VoiceService : Service() {
                     VoiceController.Phase.Sending -> "Sending what you said…"
                     VoiceController.Phase.Idle -> playing?.text?.takeIf { it.isNotBlank() } ?: describe(link)
                 }
-                line to (phase is VoiceController.Phase.Recording)
-            }.distinctUntilChanged().collect { (line, rec) ->
-                getSystemService(NotificationManager::class.java).notify(NOTIFICATION, build(line, rec))
+                Triple(line, phase is VoiceController.Phase.Recording, playing != null)
+            }.distinctUntilChanged().collect { (line, rec, talking) ->
+                getSystemService(NotificationManager::class.java).notify(NOTIFICATION, build(line, rec, talking))
             }
         }
     }
@@ -85,6 +92,7 @@ class VoiceService : Service() {
 
     override fun onDestroy() {
         scope.cancel()
+        media?.release()
         wifi?.takeIf { it.isHeld }?.release()
         wake?.takeIf { it.isHeld }?.release()
         super.onDestroy()
@@ -99,7 +107,7 @@ class VoiceService : Service() {
         Link.Idle, Link.Unpaired -> "Not connected"
     }
 
-    private fun build(text: String, recording: Boolean?): Notification {
+    private fun build(text: String, recording: Boolean?, talking: Boolean = false): Notification {
         val open = PendingIntent.getActivity(this, 0, Intent(this, MainActivity::class.java), PendingIntent.FLAG_IMMUTABLE)
         fun action(a: String, req: Int) = PendingIntent.getService(this, req, Intent(this, VoiceService::class.java).setAction(a), PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL)
@@ -111,9 +119,12 @@ class VoiceService : Service() {
             .setSilent(true)
             .setCategory(NotificationCompat.CATEGORY_SERVICE)
             .setContentIntent(open)
-            .addAction(0, if (recording == true) "Send" else "Talk", action(ACTION_TALK, 1))
-            .addAction(0, "Hush", action(ACTION_HUSH, 2))
-            .addAction(0, "Stop", action(ACTION_STOP, 3))
+            .apply {
+                // While it talks, Stop comes first (it's what the collapsed notification shows).
+                if (talking) addAction(R.drawable.ic_stop, "Stop", action(ACTION_HUSH, 2))
+                addAction(0, if (recording == true) "Send" else "Talk", action(ACTION_TALK, 1))
+                addAction(0, "End voice", action(ACTION_STOP, 3))
+            }
             .build()
     }
 

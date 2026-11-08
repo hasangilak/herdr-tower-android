@@ -9,6 +9,7 @@ import dev.herdertower.phone.data.KeystoreCredentialStore
 import dev.herdertower.phone.data.Settings
 import dev.herdertower.phone.data.TowerSession
 import dev.herdertower.phone.voice.VoiceController
+import kotlinx.coroutines.launch
 
 class TowerApplication : Application() {
     lateinit var session: TowerSession
@@ -44,6 +45,14 @@ class TowerApplication : Application() {
             android.content.IntentFilter(android.media.AudioManager.ACTION_AUDIO_BECOMING_NOISY),
             androidx.core.content.ContextCompat.RECEIVER_NOT_EXPORTED,
         )
+        // Say "stop" while it talks on the phone: listen only while a reply plays, the phone is the voice and no take runs.
+        val hush = dev.herdertower.phone.voice.HushListener(session) { session.hush() }
+        kotlinx.coroutines.MainScope().launch {
+            kotlinx.coroutines.flow.combine(session.player.nowPlaying, session.voiceOn, session.hushWord, voice.phase) { clip, on, word, phase ->
+                val mic = androidx.core.content.ContextCompat.checkSelfPermission(this@TowerApplication, android.Manifest.permission.RECORD_AUDIO) == android.content.pm.PackageManager.PERMISSION_GRANTED
+                clip to (on && word && mic && phase == VoiceController.Phase.Idle)
+            }.collect { (clip, enabled) -> hush.follow(clip, enabled) }
+        }
         ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, e ->
             when (e) {
                 Lifecycle.Event.ON_START -> session.setForeground(true)

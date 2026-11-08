@@ -14,7 +14,7 @@ It prints the pairing link. From the emulator, the Mac is 10.0.2.2:
 
     adb shell am start -a android.intent.action.VIEW -d '"herdertower://pair?h=10.0.2.2&p=7899&c=...&fp=..."' dev.herdertower.phone
 """
-import argparse, hashlib, json, math, os, queue, secrets, ssl, struct, subprocess, sys, threading, time, zlib
+import argparse, hashlib, json, math, os, queue, secrets, shutil, ssl, struct, subprocess, sys, tempfile, threading, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -152,31 +152,58 @@ def set_state(**kw):
     publish("state", dict(STATE))
 
 
+def whisper(wav):
+    """Real words for a take, when FAKE_WHISPER_MODEL names a whisper.cpp model and whisper-cli is installed; else None."""
+    model, cli = os.environ.get("FAKE_WHISPER_MODEL"), shutil.which("whisper-cli")
+    if not model or not cli:
+        return None
+    with tempfile.NamedTemporaryFile(suffix=".wav") as f:
+        f.write(wav)
+        f.flush()
+        r = subprocess.run([cli, "-m", model, "-f", f.name, "-nt", "-np"], capture_output=True, text=True, timeout=30)
+    text = " ".join(r.stdout.split()).strip()
+    print(f"transcribed: {text!r}", flush=True)
+    return text
+
+
 def chat_message(e, i):
-    """A history entry as a message of the main chat thread (GET /v1/chat, event chat)."""
-    role = {"request": "user", "answer": "tower"}.get(e["kind"], "report")
-    m = {"id": e.get("mid") or f"m{e['at']}", "at": e["at"], "role": role, "text": e.get("text", ""), "source": e.get("source", "phone" if role == "user" else None),
-         "attachments": e.get("attachments", []), "screenshots": [], "kind": e["kind"]}
+    """A history entry as a message of the main chat thread (GET /v1/chat, event chat), as docs/mobile-api.md."""
+    kind = e["kind"]
+    role = {"request": "user", "answer": "tower", "screenshot": "screenshots"}.get(kind, "event")
+    atts = []
+    for n, path in enumerate(e.get("attachments", []), 1):
+        name = path.rsplit("/", 1)[-1]
+        k = "image" if name.lower().endswith((".png", ".jpg", ".jpeg", ".webp", ".gif")) else "video" if name.lower().endswith((".mp4", ".mov")) else "file"
+        atts.append({"n": n, "kind": k, "name": name, "path": path, "url": "/v1/attachments/" + "/".join(path.split("/")[-2:]) if k == "image" else None})
+    m = {"id": f"h{i}", "at": e["at"], "updated_at": e["at"], "role": role, "kind": kind, "text": e.get("text", "") if kind != "screenshot" else "",
+         "source": e.get("source", "phone:d_fake" if role == "user" else "tower"), "attachments": atts, "screenshots": []}
     for k in ("session", "name", "account", "status"):
         if k in e:
             m[k] = e[k]
-    if e["kind"] == "screenshot":
-        m["screenshots"] = [e["id"]]
+    if kind == "screenshot":
+        s = next((x for x in SHOTS if x["id"] == e["id"]), {"id": e["id"]})
+        m["screenshots"] = [{k: s.get(k) for k in ("id", "caption", "session", "name", "account", "at")} | {"url": "/v1/screenshots/" + e["id"]}]
     return m
 
 
 def thread():
-    return [chat_message(e, i) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
+    return [chat_message(e, i + 1) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
 
 
 def add_history(e):
     HISTORY.append(e)
     publish("history", e)
-    publish("chat", chat_message(e, len(HISTORY)))
+    publish("chat", {"op": "add", "message": chat_message(e, len(HISTORY))})
+
+
+HUSHED = [False]
 
 
 def speak(sentences):
+    """Speaks sentence by sentence. A hush stops `speaking`, but the turn's later clips are still announced
+    (as a slow brain might), so the phone's own "ignore the rest of this turn" is exercised."""
     voice = any(v for _, v in SUBS)
+    HUSHED[0] = False
     set_state(phase="speaking", speaking=True)
     for i, s in enumerate(sentences):
         if voice:
@@ -184,8 +211,10 @@ def speak(sentences):
             ms = 400 + 40 * len(s)
             CLIPS[cid] = tone(min(ms, 2500), 440 + 60 * i)
             publish("audio", {"id": cid, "kind": "reply", "text": s, "ms": ms, "url": f"/v1/audio/{cid}"}, voice_only=True)
-        time.sleep(0.3)
+        set_state(said=" ".join(sentences[: i + 1]), said_ms=now())
+        time.sleep(1.2)
     set_state(phase="idle", speaking=False, said=" ".join(sentences), said_ms=now())
+    HUSHED[0] = False
 
 
 def reply_to(text, attachments=()):
@@ -202,15 +231,11 @@ def reply_to(text, attachments=()):
     time.sleep(1.5)
     set_state(work={"word": "Reading", "detail": "web", "since_ms": t, "at_ms": now(), "done_ms": 0})
     time.sleep(2.5)
-    answer = ["You said: " + text + ".", "This is the fake tower, so nothing really happened."]
-    # The reply arrives a few words at a time on the thread (same id, more text), then is recorded.
-    mid, at, words = f"m{now()}", now(), " ".join(answer).split(" ")
-    for k in range(3, len(words), 4):
-        publish("chat", {"id": mid, "at": at, "role": "tower", "text": " ".join(words[:k]), "attachments": [], "screenshots": []})
-        time.sleep(0.25)
-    add_history({"at": at, "mid": mid, "kind": "answer", "text": " ".join(answer)})
-    set_state(work=None)
+    answer = ["You said: " + text + ".", "This is the fake tower, so nothing really happened.", "Web is still on the checkout page.", "Api is waiting for your answer."]
+    # While it speaks, what it says is the state's `said`; the answer lands on the thread after.
     speak(answer)
+    add_history({"at": now(), "kind": "answer", "text": " ".join(answer)})
+    set_state(work=None)
 
 
 def multipart(body, ctype):
@@ -344,7 +369,9 @@ class H(BaseHTTPRequestHandler):
                 FOCUS[0] = json.loads(b).get("space")
                 return self.send(200, {"focus": FOCUS[0]})
             if seg == ["hush"]:
+                HUSHED[0] = True
                 publish("hush", {}, voice_only=True)
+                set_state(phase="idle", speaking=False)
                 return self.send(200, {"ok": True})
             if seg == ["mode"]:
                 set_state(mode=json.loads(b)["mode"])
@@ -353,7 +380,9 @@ class H(BaseHTTPRequestHandler):
                 if b[:4] != b"RIFF" and not self.headers.get("Content-Type", "").startswith("multipart/"):
                     return self.err(415, "bad_audio", "send audio/wav")
                 secs = max(0.0, (len(b) - 44) / 32000)
-                heard = f"a {secs:.1f} second take"
+                heard = whisper(b) if b[:4] == b"RIFF" else None
+                if heard is None:
+                    heard = f"a {secs:.1f} second take"
                 if seg == ["transcribe"] or q.get("send") == "0":
                     return self.send(200, {"heard": heard, "sent": False})
                 set_state(heard=heard, heard_ms=now())

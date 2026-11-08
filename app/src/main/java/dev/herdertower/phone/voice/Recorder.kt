@@ -126,12 +126,17 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
 
         /** Starts recording; the caller must hold RECORD_AUDIO. Throws if the microphone can't be opened. */
         @SuppressLint("MissingPermission")
-        fun start(scope: CoroutineScope, endOnSilence: Boolean, pauseMs: Int = END_PAUSE_FRAMES * 20): Take {
+        fun start(scope: CoroutineScope, endOnSilence: Boolean, pauseMs: Int = END_PAUSE_FRAMES * 20, cancelEcho: Boolean = false): Take {
             val min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-            val rec = AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, RATE))
+            // Listening while the phone talks: the call source, with the echo canceller, takes the phone's own voice out.
+            val source = if (cancelEcho) MediaRecorder.AudioSource.VOICE_COMMUNICATION else MediaRecorder.AudioSource.VOICE_RECOGNITION
+            val rec = AudioRecord(source, RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, RATE))
             if (rec.state != AudioRecord.STATE_INITIALIZED) {
                 rec.release()
                 throw IllegalStateException("The microphone isn't available.")
+            }
+            if (cancelEcho && android.media.audiofx.AcousticEchoCanceler.isAvailable()) {
+                runCatching { android.media.audiofx.AcousticEchoCanceler.create(rec.audioSessionId)?.enabled = true }
             }
             return Take(rec, endOnSilence, pauseMs / 20).also { it.start(scope) }
         }

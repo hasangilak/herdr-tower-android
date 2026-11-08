@@ -150,6 +150,7 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
                 needsYou = needsYou,
                 renderScale = 0.65f,
                 description = "The tower's orb: $statusLine",
+                onTap = { if (playing != null || state?.speaking == true) session.hush() },
             )
         }
         Text(statusLine, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodyMedium, color = tc.faint)
