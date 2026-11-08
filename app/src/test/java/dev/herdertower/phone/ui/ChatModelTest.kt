@@ -45,6 +45,11 @@ class ChatModelTest {
         assertEquals(false, ChatModel.showWork(null, emptyList(), 0))
     }
 
+    @Test fun previewsArePlainText() {
+        assertEquals("Web finished the onboarding page · api is waiting for you.", ChatModel.preview("Web finished the onboarding page [shot:1-a.png]\n\n**api** is waiting for you."))
+        assertEquals("one two see docs", ChatModel.preview("- one\n- `two`\nsee [docs](https://x)"))
+    }
+
     @Test fun theWorkingWordsTurnOver() {
         assertEquals("Thinking", ChatModel.thinkingWord(0))
         assertEquals("Considering", ChatModel.thinkingWord(3500))

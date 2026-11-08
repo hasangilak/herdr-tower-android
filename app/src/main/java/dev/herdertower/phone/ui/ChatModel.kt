@@ -36,6 +36,15 @@ object ChatModel {
         return clean to refs
     }
 
+    /** A reply as one plain line for a preview: no shot markers, no markdown marks. */
+    fun preview(text: String): String = shots(text).first
+        .replace(Regex("""(\*\*|__|`)"""), "")
+        .replace(Regex("""(?m)^\s*([-*•+]|\d{1,3}[.)])\s+"""), "")
+        .replace(Regex("""\[([^\]]+)]\(([^)]+)\)"""), "$1")
+        .replace(Regex("""\s*\n\s*\n\s*"""), " · ")
+        .replace(Regex("""\s*\n\s*"""), " ")
+        .trim()
+
     /** `[Image #N]` markers in a sent message. */
     fun imageMarkers(text: String): List<Int> = Regex("""\[Image #(\d+)]""").findAll(text).map { it.groupValues[1].toInt() }.toList()
 

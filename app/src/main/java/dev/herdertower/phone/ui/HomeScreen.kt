@@ -45,6 +45,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -219,9 +220,9 @@ fun HomeContent(
                 }
                 Spacer(Modifier.width(12.dp))
                 Column(Modifier.weight(1f)) {
-                    Text("${ui.greeting},", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
+                    Text("${ui.greeting} · ${ui.towerName}", style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     Text(
-                        "${ui.towerName} · ${ui.needsLine}", style = MaterialTheme.typography.bodyLarge, color = tc.text,
+                        ui.needsLine.replaceFirstChar { it.uppercase() }, style = MaterialTheme.typography.bodyLarge, color = tc.text,
                         fontWeight = FontWeight.Medium, maxLines = 1, overflow = TextOverflow.Ellipsis,
                     )
                 }
@@ -244,7 +245,10 @@ fun HomeContent(
             }
             Spacer(Modifier.height(20.dp))
             if (ui.suggestions.isNotEmpty()) {
-                LazyRow(contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
+                // A new first card (someone needs you) is shown, not left scrolled out of view.
+                val row = androidx.compose.foundation.lazy.rememberLazyListState()
+                LaunchedEffect(ui.suggestions.first().key) { row.animateScrollToItem(0) }
+                LazyRow(state = row, contentPadding = PaddingValues(horizontal = 20.dp), horizontalArrangement = Arrangement.spacedBy(12.dp)) {
                     items(ui.suggestions, key = { it.key }) { SuggestionCard(it) { onSuggestion(it) } }
                 }
             }
@@ -263,7 +267,7 @@ fun HomeContent(
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Last reply · ${ago(e.at)}", style = MaterialTheme.typography.labelMedium, color = tc.faint)
-                        Text(e.text.replace("**", "").replace("`", ""), style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
+                        Text(ChatModel.preview(e.text), style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
                     }
                     Icon(Icons.AutoMirrored.Filled.ArrowForward, null, Modifier.padding(start = 8.dp, top = 8.dp).size(18.dp), tint = tc.faint)
                 }
