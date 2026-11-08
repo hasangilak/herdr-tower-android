@@ -134,6 +134,12 @@ class TowerClient(
     suspend fun screen(address: String, lines: Int = 60): Screen =
         get(Screen.serializer(), "sessions", address, "screen", query = mapOf("lines" to lines.toString()))
 
+    suspend fun screenshots(limit: Int = 60, session: String? = null): ScreenshotsResponse =
+        get(ScreenshotsResponse.serializer(), "screenshots", query = mapOf("limit" to limit.toString(), "session" to session))
+
+    /** `GET /v1/screenshots/{id}`: the image's bytes (PNG, JPEG, WebP or GIF). */
+    suspend fun screenshotImage(shot: Screenshot): ByteArray = bytes(shot.url, listOf("screenshots", shot.id), "image/*")
+
     // Acting
 
     suspend fun ask(text: String): AskResponse = post(AskResponse.serializer(), json(AskRequest.serializer(), AskRequest(text)), "ask")
@@ -161,11 +167,14 @@ class TowerClient(
     suspend fun voice(wav: ByteArray): VoiceResult = post(VoiceResult.serializer(), wav.toRequestBody(WAV), "voice", client = slow)
 
     /** `GET /v1/audio/{id}`: a reply clip's WAV bytes. */
-    suspend fun audio(clip: AudioClip): ByteArray {
-        val u = clip.url.takeIf { it.startsWith("/v1/") }?.let { path ->
-            HttpUrl.Builder().scheme("https").host(endpoint.host).port(endpoint.port).encodedPath(path).build()
-        } ?: url("audio", clip.id)
-        val resp = execute(http.newCall(request(u).header("Accept", "audio/wav").get().build()))
+    suspend fun audio(clip: AudioClip): ByteArray = bytes(clip.url, listOf("audio", clip.id), "audio/wav")
+
+    /** Bytes from the tower's own [path] (`/v1/…`), or from [segments] when it has none. */
+    private suspend fun bytes(path: String, segments: List<String>, accept: String): ByteArray {
+        val u = path.takeIf { it.startsWith("/v1/") }?.let { p ->
+            HttpUrl.Builder().scheme("https").host(endpoint.host).port(endpoint.port).encodedPath(p).build()
+        } ?: url(*segments.toTypedArray())
+        val resp = execute(http.newCall(request(u).header("Accept", accept).get().build()))
         return withContext(Dispatchers.IO) {
             resp.use {
                 if (!it.isSuccessful) throw error(it.code, it.body.string())

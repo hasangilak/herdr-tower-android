@@ -54,7 +54,7 @@ import kotlinx.coroutines.launch
 
 /** One session: what its terminal shows now, and Approve / Refuse when it's blocked. */
 @Composable
-fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit) {
+fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, onShot: (String) -> Unit = {}) {
     val state by session.state.collectAsStateWithLifecycle()
     val spaces by session.spaces.collectAsStateWithLifecycle()
     val agents by session.agents.collectAsStateWithLifecycle()
@@ -155,6 +155,12 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit) {
             softWrap = false,
         )
 
+        val shots by session.screenshots.collectAsStateWithLifecycle()
+        val myShots = shots.filter { it.session == address }
+        if (myShots.isNotEmpty()) {
+            Text("SCREENSHOTS", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = tc.faint)
+            ShotStrip(session, myShots.take(12)) { onShot(it.id) }
+        }
         val mine = jobs.filter { it.session == address }
         if (mine.isNotEmpty()) {
             Text("JOBS", style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.Medium, color = tc.faint)

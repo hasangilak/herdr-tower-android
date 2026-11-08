@@ -32,6 +32,7 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material.icons.filled.Workspaces
 import androidx.compose.material3.AlertDialog
@@ -83,6 +84,8 @@ sealed interface Route {
     data object Spaces : Route
     data object Activity : Route
     data class Session(val address: String) : Route
+    /** Screenshots: all, or one [session]'s; [open] shows that one in the viewer. */
+    data class Screenshots(val session: String? = null, val open: String? = null) : Route
 
     companion object {
         fun encode(r: Route): String = when (r) {
@@ -92,6 +95,7 @@ sealed interface Route {
             Spaces -> "spaces"
             Activity -> "activity"
             is Session -> "session:${r.address}"
+            is Screenshots -> "shots:${r.session.orEmpty()}:${r.open.orEmpty()}"
         }
 
         fun decode(s: String): Route = when {
@@ -100,6 +104,7 @@ sealed interface Route {
             s == "spaces" -> Spaces
             s == "activity" -> Activity
             s.startsWith("session:") -> Session(s.removePrefix("session:"))
+            s.startsWith("shots:") -> s.removePrefix("shots:").split(":", limit = 2).let { Screenshots(it[0].ifEmpty { null }, it.getOrNull(1)?.ifEmpty { null }) }
             else -> Home
         }
 
@@ -193,10 +198,11 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
                 when (route) {
                     Route.Home -> HomeScreen(session, voice, onVoice = { go(Route.Voice(it)) }, onChat = { go(Route.Chat) }, onOpen = { go(Route.Session(it)) }, onAlerts = { go(Route.Activity) }, onMenu = { menu = true }, onRepair = onRepair)
                     is Route.Voice -> VoiceScreen(session, voice, startListening = route.listen, onClose = { back() }, onChat = { go(Route.Chat) })
-                    Route.Chat -> ChatScreen(session, onClose = { back() }, onVoice = { go(Route.Voice(true)) }, onOpen = { go(Route.Session(it)) })
+                    Route.Chat -> ChatScreen(session, onClose = { back() }, onVoice = { go(Route.Voice(true)) }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
                     Route.Spaces -> SpacesScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) })
                     Route.Activity -> ActivityScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) })
-                    is Route.Session -> SessionScreen(session, route.address, onBack = { back() })
+                    is Route.Session -> SessionScreen(session, route.address, onBack = { back() }, onShot = { go(Route.Screenshots(route.address, it)) })
+                    is Route.Screenshots -> ScreenshotsScreen(session, route.session, route.open, onBack = { back() })
                 }
             }
             SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp))
@@ -231,6 +237,8 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
             SheetRow(Icons.Filled.Workspaces, "Spaces", if (held > 0) "$held new" else plural(spaces.spaces.size, "space")) { onGo(Route.Spaces) }
             SheetRow(Icons.Filled.Timeline, "Activity", if (running > 0) "$running running" else "Jobs and history") { onGo(Route.Activity) }
             SheetRow(Icons.Filled.Forum, "Conversation", "Everything you and the tower said") { onGo(Route.Chat) }
+            val shots by session.screenshots.collectAsStateWithLifecycle()
+            SheetRow(Icons.Filled.PhotoLibrary, "Screenshots", if (shots.isEmpty()) "What sessions show you" else plural(shots.size, "screenshot")) { onGo(Route.Screenshots()) }
             Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {

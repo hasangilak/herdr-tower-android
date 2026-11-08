@@ -11,6 +11,7 @@ import dev.herdertower.phone.api.Fingerprint
 import dev.herdertower.phone.api.HistoryEntry
 import dev.herdertower.phone.api.Job
 import dev.herdertower.phone.api.SSLMismatch
+import dev.herdertower.phone.api.Screenshot
 import dev.herdertower.phone.api.SpacesResponse
 import dev.herdertower.phone.api.TowerApiException
 import dev.herdertower.phone.api.TowerClient
@@ -91,6 +92,13 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     val agents: StateFlow<List<Agent>> = _agents.asStateFlow()
     private val _unreachable = MutableStateFlow<List<Unreachable>>(emptyList())
     val unreachable: StateFlow<List<Unreachable>> = _unreachable.asStateFlow()
+
+    private val _screenshots = MutableStateFlow<List<Screenshot>>(emptyList())
+    /** Screenshots sessions sent, newest first. */
+    val screenshots: StateFlow<List<Screenshot>> = _screenshots.asStateFlow()
+
+    /** Screenshot images, fetched with the token and cached. */
+    val images = Images(this)
 
     private val _accounts = MutableStateFlow(AccountsResponse())
     val accounts: StateFlow<AccountsResponse> = _accounts.asStateFlow()
@@ -222,11 +230,12 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             is TowerEvent.State -> {
                 val before = _state.value
                 _state.value = ev.state
+                if (ev.state.screenshots.isNotEmpty()) _screenshots.value = mergeShots(_screenshots.value, ev.state.screenshots)
                 if (before != null && before.agents.map { it.address to it.status } != ev.state.agents.map { it.address to it.status }) refreshSoon()
             }
             is TowerEvent.History -> {
                 _history.value = merge(_history.value, listOf(ev.entry))
-                if (ev.entry.kind in setOf("job", "summary", "watch", "alert")) refreshSoon()
+                if (ev.entry.kind in setOf("job", "summary", "watch", "alert", "screenshot")) refreshSoon()
             }
             is TowerEvent.Audio -> player.enqueue(ev.clip)
             TowerEvent.Hush -> player.hush()
@@ -257,8 +266,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     suspend fun refreshLists() = coroutineScope {
         val a = async { quietly { _spaces.value = it.spaces() } }
         val b = async { quietly { _jobs.value = it.jobs(status = "all", limit = 100).jobs } }
+        val c = async { quietly { _screenshots.value = mergeShots(_screenshots.value, it.screenshots(limit = 60).screenshots) } }
         a.await()
         b.await()
+        c.await()
     }
 
     suspend fun refreshAgents(all: Boolean = false) {
@@ -356,6 +367,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         _spaces.value = SpacesResponse()
         _jobs.value = emptyList()
         _agents.value = emptyList()
+        _screenshots.value = emptyList()
     }
 
     companion object {
@@ -368,6 +380,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         /** Merges entries, oldest first, without duplicates (the stream and a reload can both bring one). */
         fun merge(a: List<HistoryEntry>, b: List<HistoryEntry>): List<HistoryEntry> =
             (a + b).distinctBy { listOf(it.at, it.kind, it.session, it.text) }.sortedBy { it.at }.takeLast(2000)
+
+        /** Newest first, each once (the state's recent ones and a fetched page overlap). */
+        fun mergeShots(a: List<Screenshot>, b: List<Screenshot>): List<Screenshot> =
+            (b + a).distinctBy { it.id }.sortedByDescending { it.at }.take(300)
 
         fun describe(e: Throwable): String = when (e) {
             is TowerApiException -> when (e.code) {

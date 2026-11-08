@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -37,6 +38,7 @@ import androidx.compose.material.icons.automirrored.filled.VolumeOff
 import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
+import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.NorthEast
@@ -82,7 +84,7 @@ private sealed interface ChatRow {
 }
 
 @Composable
-fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit) {
+fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit) {
     val history by session.history.collectAsStateWithLifecycle()
     val state by session.state.collectAsStateWithLifecycle()
     val link by session.link.collectAsStateWithLifecycle()
@@ -122,8 +124,16 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
         onLoadOlder = { scope.launch { if (session.loadOlder() == 0) snack("That's everything.") } },
         onOpen = onOpen,
         onVoiceToggle = { setVoice(it, session, perms, context) },
+        onShot = onShot,
+        thumb = { e, m -> Thumb(session, shotOf(e), m, maxSide = 600) },
     )
 }
+
+/** The screenshot a history entry announces. */
+fun shotOf(e: HistoryEntry) = dev.herdertower.phone.api.Screenshot(
+    id = e.id.orEmpty(), at = e.at, session = e.session, name = e.name, space = e.space, account = e.account,
+    caption = e.caption ?: e.text, url = "/v1/screenshots/${e.id.orEmpty()}",
+)
 
 @Composable
 fun ChatContent(
@@ -141,6 +151,8 @@ fun ChatContent(
     onLoadOlder: () -> Unit,
     onOpen: (String) -> Unit,
     onVoiceToggle: (Boolean) -> Unit,
+    onShot: (String) -> Unit = {},
+    thumb: @Composable (HistoryEntry, Modifier) -> Unit = { _, _ -> },
 ) {
     val list = rememberLazyListState()
     val rows = remember(entries) {
@@ -189,6 +201,7 @@ fun ChatContent(
                     is ChatRow.Item -> when (r.e.kind) {
                         "request" -> UserBubble(r.e)
                         "answer" -> ReplyBubble(r.e)
+                        "screenshot" -> if (r.e.id != null) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
                         else -> EventLine(r.e, accounts, onOpen)
                     }
                 }
@@ -346,5 +359,27 @@ fun rememberAccounts(session: TowerSession): AccountLookup {
         spaces.spaces.forEach { sp -> sp.sessions.forEach { s -> s.account?.takeIf { it.isNotBlank() }?.let { m[s.address] = it } } }
         state?.agents?.forEach { a -> a.account?.takeIf { it.isNotBlank() }?.let { m[a.address] = it } }
         AccountLookup(m, accounts.default)
+    }
+}
+
+/** A session sent a screenshot: its picture, caption and who, inline; tap to view it full size. */
+@Composable
+private fun ShotLine(e: HistoryEntry, accounts: AccountLookup, onShot: (String) -> Unit, thumb: @Composable (HistoryEntry, Modifier) -> Unit) {
+    Column(
+        Modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(20.dp))
+            .clickable(role = Role.Button, onClickLabel = "View screenshot") { onShot(e.id.orEmpty()) }
+            .padding(4.dp),
+        verticalArrangement = Arrangement.spacedBy(6.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+            Icon(Icons.Filled.Image, null, Modifier.size(16.dp), tint = tc.muted)
+            Text(e.name ?: e.session ?: "A session", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = tc.muted, maxLines = 1)
+            (e.account ?: e.session?.let { accounts.of(it) })?.let { AccountBadge(it, it == accounts.default) }
+            Text(clock(e.at), style = MaterialTheme.typography.labelSmall, color = tc.faint)
+        }
+        thumb(e, Modifier.fillMaxWidth(0.72f).aspectRatio(1.4f))
+        (e.caption ?: e.text).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.text) }
     }
 }

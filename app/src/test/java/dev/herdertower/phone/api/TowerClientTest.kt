@@ -167,6 +167,31 @@ class TowerClientTest {
         assertEquals("Bearer htk_secret", req.headers["Authorization"])
     }
 
+    @Test fun listsScreenshotsAndFetchesTheImage() = runBlocking {
+        server.enqueue(json("""{"screenshots":[{"id":"1794160000000-login.png","at":1794160000000,"session":"t22","name":"Claude in eyzflow",
+            "space":"B2C support","account":"default","job":null,"caption":"The new login page","path":"/x/login.png","url":"/v1/screenshots/1794160000000-login.png"}]}"""))
+        val list = client().screenshots(limit = 30, session = "t22").screenshots
+        assertEquals("The new login page", list.single().caption)
+        assertEquals("Claude in eyzflow", list.single().who)
+        val q = taken().url
+        assertEquals("/v1/screenshots", q.encodedPath)
+        assertEquals("30", q.queryParameter("limit"))
+        assertEquals("t22", q.queryParameter("session"))
+
+        val png = byteArrayOf(0x89.toByte(), 0x50, 0x4e, 0x47, 1, 2, 3)
+        server.enqueue(MockResponse.Builder().code(200).addHeader("Content-Type", "image/png").body(okio.Buffer().write(png)).build())
+        assertEquals(png.toList(), client().screenshotImage(list.single()).toList())
+        val req = taken()
+        assertEquals("/v1/screenshots/1794160000000-login.png", req.url.encodedPath)
+        assertEquals("Bearer htk_secret", req.headers["Authorization"])
+    }
+
+    @Test fun aScreenshotHistoryEntryCarriesItsId() {
+        val e = TowerJson.decodeFromString(HistoryEntry.serializer(), """{"at":1,"kind":"screenshot","session":"t22","id":"a.png","caption":"Login","path":"/x/a.png","text":"Login"}""")
+        assertEquals("a.png", e.id)
+        assertEquals("Login", e.caption)
+    }
+
     @Test fun hushPostsAnEmptyBody() = runBlocking {
         server.enqueue(json("""{"ok": true}"""))
         client().hush()

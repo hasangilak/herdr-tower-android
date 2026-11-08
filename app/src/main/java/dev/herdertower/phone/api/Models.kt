@@ -86,6 +86,8 @@ data class TowerState(
     @SerialName("stt_model") val sttModel: String = "",
     val lan: String = "",
     val phone: String? = null,
+    /** The latest screenshots sessions sent (newest first). */
+    val screenshots: List<Screenshot> = emptyList(),
 )
 
 /** An agent as `GET /v1/agents` (`tower agents --json`) lists it. */
@@ -171,6 +173,10 @@ data class HistoryEntry(
     val text: String = "",
     val attachments: List<String> = emptyList(),
     val held: Boolean = false,
+    /** kind = screenshot: the image's id (fetch `/v1/screenshots/{id}`), caption and path on the Mac. */
+    val id: String? = null,
+    val caption: String? = null,
+    val path: String? = null,
 )
 
 @Serializable
@@ -229,3 +235,23 @@ data class AudioClip(
 /** `hello` event: the first on every stream. */
 @Serializable
 data class StreamHello(val api: Int = 1, val device: String = "", val voice: Boolean = false)
+
+/** A screenshot a session sent to the tower (`GET /v1/screenshots`). */
+@Serializable
+data class Screenshot(
+    val id: String = "",
+    val at: Long = 0,
+    val session: String? = null,
+    val name: String? = null,
+    val space: String? = null,
+    val account: String? = null,
+    val job: String? = null,
+    val caption: String = "",
+    val path: String = "",
+    val url: String = "",
+) {
+    val who: String get() = name?.takeIf { it.isNotBlank() } ?: session.orEmpty()
+}
+
+@Serializable
+data class ScreenshotsResponse(val screenshots: List<Screenshot> = emptyList())
