@@ -7,13 +7,30 @@ package dev.herdertower.phone.orb
  * here (AGSL has no feedback texture, so the slight motion trail is left
  * out): the opaque picture is turned into colour over transparency the same
  * way, so on our background it looks as on the Mac's.
+ *
+ * Two ways to get the liquid surface, as a device allows (see [OrbProbe]):
+ * - [Mode.Maps]: `liquid()` (all 45 modes) and `boil()` computed on the CPU
+ *   into direction maps, looked up here. The maps are alpha-only bitmaps
+ *   (high and low byte), because alpha is never colour-converted: a wide
+ *   colour or linear layer on a real phone would scramble values packed in
+ *   R and G.
+ * - [Mode.Analytic]: no textures; the broad modes (l <= 3) evaluated here,
+ *   no boiling. Smaller, for GPUs where the maps don't work.
  */
 object OrbShader {
     const val FOCAL = 1.32
     const val CAM_Z = 4.0
 
-    /** `liquid()` as straight-line code, exactly as `liquid_msl()` writes it. */
-    fun liquidFunction(): String {
+    enum class Mode { Maps, Analytic }
+
+    /** The Mac marches up to 160 steps; a device whose AGSL compiler refuses that gets fewer, longer ones. */
+    val STEP_LADDER = intArrayOf(160, 140, 120, 100, 80, 64)
+
+    /** The analytic mode's highest degree. */
+    const val ANALYTIC_LMAX = 3
+
+    /** `liquid()` as straight-line code, exactly as `liquid_msl()` writes it (modes up to degree [lmax]). */
+    fun liquidFunction(lmax: Int = Modes.LMAX): String {
         fun num(v: Double) = if (v % 1.0 == 0.0) "%.1f".format(java.util.Locale.ROOT, v) else v.toString()
         fun coeff(k: Int) = "sh[${k shr 2}].${"xyzw"[k and 3]}"
         val lines = mutableListOf("float liquid(float3 n) {", "  float h = 0.0; float re = 1.0; float im = 0.0; float t; float q; float q1; float q2;")
@@ -21,25 +38,28 @@ object OrbShader {
         var qmm = 1.0
         for (m in 0..Modes.LMAX) {
             if (m > 0) {
-                lines += "  t = re * n.x - im * n.y; im = re * n.y + im * n.x; re = t;"
+                if (m <= lmax) lines += "  t = re * n.x - im * n.y; im = re * n.y + im * n.x; re = t;"
                 qmm *= (2 * m - 1).toDouble()
             }
-            lines += "  q1 = 0.0; q2 = 0.0;"
+            if (m <= lmax) lines += "  q1 = 0.0; q2 = 0.0;"
             for (l in m..Modes.LMAX) {
-                lines += if (l == m) {
-                    "  q = ${num(qmm)};"
-                } else {
-                    val a = (2 * l - 1).toDouble() / (l - m)
-                    val b = (l + m - 1).toDouble() / (l - m)
-                    "  q = ${num(a)} * n.z * q1 - ${num(b)} * q2;"
+                val emit = m <= lmax && l <= lmax
+                if (emit) {
+                    lines += if (l == m) {
+                        "  q = ${num(qmm)};"
+                    } else {
+                        val a = (2 * l - 1).toDouble() / (l - m)
+                        val b = (l + m - 1).toDouble() / (l - m)
+                        "  q = ${num(a)} * n.z * q1 - ${num(b)} * q2;"
+                    }
+                    lines += "  q2 = q1; q1 = q;"
                 }
-                lines += "  q2 = q1; q1 = q;"
                 if (l < 2) continue
                 if (m == 0) {
-                    lines += "  h += ${coeff(k)} * q;"
+                    if (emit) lines += "  h += ${coeff(k)} * q;"
                     k += 1
                 } else {
-                    lines += "  h += q * (${coeff(k)} * re + ${coeff(k + 1)} * im);"
+                    if (emit) lines += "  h += q * (${coeff(k)} * re + ${coeff(k + 1)} * im);"
                     k += 2
                 }
             }
@@ -49,22 +69,42 @@ object OrbShader {
         return lines.joinToString("\n")
     }
 
-    /** The Mac marches up to 160 steps; a device whose AGSL compiler refuses that gets fewer, longer ones. */
-    val STEP_LADDER = intArrayOf(160, 140, 120, 100, 80, 64)
-
     val SOURCE: String get() = source(160)
 
-    fun source(steps: Int): String = "const int STEPS = $steps;\nconst float MIN_STEP = ${"%.5f".format(java.util.Locale.ROOT, 0.004 * 160.0 / steps)};\n" + BODY
+    fun source(steps: Int, mode: Mode = Mode.Maps): String =
+        "const int STEPS = $steps;\nconst float MIN_STEP = ${"%.5f".format(java.util.Locale.ROOT, 0.004 * 160.0 / steps)};\n" +
+            (if (mode == Mode.Maps) MAPS else ANALYTIC) + BODY
 
-    private val BODY: String by lazy {
-        """
+    /** The liquid and boiling from the CPU's direction maps: 16 bits as two alpha-only maps (high, low). */
+    private val MAPS = """
+uniform shader liquidHi;
+uniform shader liquidLo;
+uniform shader boilHi;
+uniform shader boilLo;
+uniform float4 maps;
+
+float2 lonLat(float3 n, float2 size) {
+  return float2((atan(n.y, n.x) / 6.2831853 + 0.5) * size.x, acos(clamp(n.z, -1.0, 1.0)) / 3.1415927 * size.y);
+}
+
+float unpack(half hi, half lo) {
+  return (float(hi) * 255.0 * 256.0 + float(lo) * 255.0) / 65535.0 - 0.5;
+}
+
+float liquid(float3 n) { float2 p = lonLat(n, maps.xy); return unpack(liquidHi.eval(p).a, liquidLo.eval(p).a); }
+float boil(float3 n) { float2 p = lonLat(n, maps.zw); return unpack(boilHi.eval(p).a, boilLo.eval(p).a); }
+"""
+
+    /** No textures: the broad modes evaluated here, no boiling. */
+    private val ANALYTIC: String by lazy {
+        "uniform float4 sh[12];\n\n" + liquidFunction(ANALYTIC_LMAX) + "\n\nfloat boil(float3 n) { return 0.0; }\n"
+    }
+
+    private val BODY = """
 uniform float4 rot0;
 uniform float4 rot1;
 uniform float4 rot2;
 uniform float4 center;
-uniform shader liquidMap;
-uniform shader boilMap;
-uniform float4 maps;
 uniform float4 shape;
 uniform float4 wall;
 uniform float4 p1;
@@ -107,19 +147,6 @@ float smax(float a, float b, float k) {
 float highlight(float3 rd, float3 n) {
   return pow(max(dot(reflect(rd, n), normalize(float3(0.7, -0.45, 0.6))), 0.0), 40.0);
 }
-
-// liquid(n) and boil(n) of the Mac's shader, looked up in maps of directions
-// filled each frame on the CPU (OrbMaps): 16 bits in R (high) and G (low).
-float2 lonLat(float3 n, float2 size) {
-  return float2((atan(n.y, n.x) / 6.2831853 + 0.5) * size.x, acos(clamp(n.z, -1.0, 1.0)) / 3.1415927 * size.y);
-}
-
-float unpack(half4 c) {
-  return (float(c.r) * 255.0 * 256.0 + float(c.g) * 255.0) / 65535.0 - 0.5;
-}
-
-float liquid(float3 n) { return unpack(liquidMap.eval(lonLat(n, maps.xy))); }
-float boil(float3 n) { return unpack(boilMap.eval(lonLat(n, maps.zw))); }
 
 float map(float3 p) {
   float3 w = p - center.xyz;
@@ -217,6 +244,14 @@ half4 main(float2 fragCoord) {
   float3 premul = max(col - bg * (1.0 - a), 0.0);
   return half4(half3(premul * outU.x), half(a * outU.x));
 }
-""".trimIndent()
-    }
+"""
+
+    /** A tiny shader that shows what the maps read back as (for the lookup probe): r = boil(+z) + 0.5, g = liquid(+x) + 0.5. */
+    val LOOKUP_PROBE = MAPS + """
+half4 main(float2 p) {
+  float v = clamp(boil(float3(0.0, 0.0, 1.0)) + 0.5, 0.0, 1.0);
+  float u = clamp(liquid(float3(1.0, 0.0, 0.0)) + 0.5, 0.0, 1.0);
+  return half4(half(v), half(u), 0.0, 1.0);
+}
+"""
 }

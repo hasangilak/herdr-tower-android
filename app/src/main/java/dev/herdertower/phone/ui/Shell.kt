@@ -268,11 +268,31 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
             Segments(Modifier.fillMaxWidth()) {
                 listOf("system" to "Auto", "dark" to "Dark", "light" to "Light").forEach { (t, label) -> Segment(label, theme == t) { onTheme(t) } }
             }
+            Text("Orb drawing", style = MaterialTheme.typography.labelLarge, color = tc.faint)
+            var orbChoice by remember { mutableStateOf(session.settings.orbTier) }
+            Segments(Modifier.fillMaxWidth()) {
+                listOf("auto" to "Auto", "Full" to "Full", "Analytic" to "Simple", "Gradient" to "Gradient").forEach { (k, label) ->
+                    Segment(label, orbChoice == k) {
+                        orbChoice = k
+                        session.settings.orbTier = k
+                        dev.herdertower.phone.orb.OrbProbe.override = dev.herdertower.phone.orb.OrbTier.entries.firstOrNull { it.name == k }
+                    }
+                }
+            }
             Spacer(Modifier.height(10.dp))
             TextButton(onClick = { renaming = true }) { Text("Name this tower (${name.ifBlank { "not set" }})", color = tc.text) }
             TextButton(onClick = onRepair) { Text("Pair again…", color = tc.text) }
             TextButton(onClick = { confirmUnpair = true }) { Text("Unpair this phone", color = tc.failed) }
             creds?.let { Text("${it.deviceName} · ${it.host}:${it.port}", style = MaterialTheme.typography.labelSmall, color = tc.faint) }
+            // What's under the hood on this phone (read it out when something looks wrong).
+            val orb by dev.herdertower.phone.orb.OrbProbe.report.collectAsStateWithLifecycle()
+            val frameMs by dev.herdertower.phone.orb.OrbProbe.frameMs.collectAsStateWithLifecycle()
+            androidx.compose.foundation.text.selection.SelectionContainer {
+                Text(
+                    "Diagnostics: " + (orb?.line(frameMs) ?: "probing the orb…"),
+                    Modifier.padding(top = 6.dp), style = MaterialTheme.typography.labelSmall, color = tc.faint,
+                )
+            }
         }
     }
     if (renaming) {

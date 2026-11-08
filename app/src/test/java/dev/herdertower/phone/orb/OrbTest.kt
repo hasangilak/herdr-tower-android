@@ -86,6 +86,24 @@ class OrbTest {
         assertTrue(OrbShader.SOURCE.contains("half4 main(float2 fragCoord)"))
     }
 
+    @Test fun mapValuesSurviveTheTwoAlphaBytes() {
+        val hi = ByteArray(3)
+        val lo = ByteArray(3)
+        listOf(-0.5, 0.0123, 0.2999).forEachIndexed { i, v -> OrbMaps.split(v, hi, lo, i) }
+        assertEquals(-0.5, OrbMaps.join(hi[0], lo[0]), 1e-4)
+        assertEquals(0.0123, OrbMaps.join(hi[1], lo[1]), 1e-4)
+        assertEquals(0.2999, OrbMaps.join(hi[2], lo[2]), 1e-4)
+    }
+
+    @Test fun theAnalyticLiquidKeepsOnlyTheBroadModes() {
+        val src = OrbShader.liquidFunction(OrbShader.ANALYTIC_LMAX)
+        // l <= 3: m = 0 has 2 terms, m = 1..3 have 2, 2, 1 pairs: 2 + 2*5 = 12 coefficients.
+        assertEquals(12, Regex("""sh\[\d+]\.[xyzw]""").findAll(src).count())
+        assertTrue(OrbShader.source(100, OrbShader.Mode.Analytic).contains("uniform float4 sh[12];"))
+        assertTrue(OrbShader.source(100, OrbShader.Mode.Maps).contains("uniform shader boilLo;"))
+        assertTrue(OrbShader.LOOKUP_PROBE.contains("half4 main(float2 p)"))
+    }
+
     @Test fun boostIsOneAtNormalEnergy() {
         assertEquals(1.0, Sim.boost(0.3, 0.4, 2.0, 0.6), 1e-12)
         assertTrue(abs(Sim.boost(1.0, 0.4, 2.0, 0.6) - Math.pow(2.0, 0.6)) < 1e-12)

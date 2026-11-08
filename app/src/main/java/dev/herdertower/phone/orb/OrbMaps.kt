@@ -16,15 +16,18 @@ import kotlin.math.sin
  * shader can look them up instead of computing them at every march step
  * (AGSL caps a program's size, and those two are most of it).
  *
- * Values are packed 16-bit into two 8-bit channels (R high, G low), offset
- * by 0.5, opaque; bilinear filtering of both channels is still linear.
+ * Values are 16-bit, offset by 0.5, split into two alpha-only planes (high
+ * byte, low byte): alpha is never colour-converted, whatever the layer's
+ * colour space, and bilinear filtering of both planes is still linear.
  */
 class OrbMaps(val lw: Int = 128, val lh: Int = 64, val bw: Int = 128, val bh: Int = 64) {
     /** The unnormalised basis at each liquid texel's direction (the shader's coefficients apply to it). */
     private val basis = FloatArray(lw * lh * Modes.COUNT)
     private val boilDirs = DoubleArray(bw * bh * 3)
-    val liquidPixels = IntArray(lw * lh)
-    val boilPixels = IntArray(bw * bh)
+    val liquidHi = ByteArray(lw * lh)
+    val liquidLo = ByteArray(lw * lh)
+    val boilHi = ByteArray(bw * bh)
+    val boilLo = ByteArray(bw * bh)
 
     init {
         val row = DoubleArray(Modes.COUNT)
@@ -47,11 +50,11 @@ class OrbMaps(val lw: Int = 128, val lh: Int = 64, val bw: Int = 128, val bh: In
             val o = t * Modes.COUNT
             var h = 0f
             for (k in 0 until Modes.COUNT) h += basis[o + k] * coeffs[k]
-            liquidPixels[t] = pack(h.toDouble())
+            split(h.toDouble(), liquidHi, liquidLo, t)
         }
         for (t in 0 until bw * bh) {
             val o = t * 3
-            boilPixels[t] = pack(boilAt(boilDirs[o], boilDirs[o + 1], boilDirs[o + 2], boil))
+            split(boilAt(boilDirs[o], boilDirs[o + 1], boilDirs[o + 2], boil), boilHi, boilLo, t)
         }
     }
 
@@ -74,12 +77,20 @@ class OrbMaps(val lw: Int = 128, val lh: Int = 64, val bw: Int = 128, val bh: In
             return doubleArrayOf(s * cos(phi), s * sin(phi), cos(theta))
         }
 
-        fun pack(v: Double): Int {
+        /** [v] (-0.5..0.5) as 16 bits, high byte into [hi], low into [lo]. */
+        fun split(v: Double, hi: ByteArray, lo: ByteArray, at: Int) {
             val x = ((v + 0.5).coerceIn(0.0, 1.0) * 65535.0 + 0.5).toInt()
-            return (0xff shl 24) or ((x shr 8) shl 16) or ((x and 0xff) shl 8)
+            hi[at] = (x shr 8).toByte()
+            lo[at] = (x and 0xff).toByte()
         }
 
-        fun unpack(argb: Int): Double = ((((argb shr 16) and 0xff) * 256 + ((argb shr 8) and 0xff)) / 65535.0) - 0.5
+        /** What the shader's `unpack` makes of the two bytes. */
+        fun join(hi: Byte, lo: Byte): Double = (((hi.toInt() and 0xff) * 256 + (lo.toInt() and 0xff)) / 65535.0) - 0.5
+
+        /** Fills every texel with [v] (the lookup probe's known value). */
+        fun fill(v: Double, hi: ByteArray, lo: ByteArray) {
+            for (i in hi.indices) split(v, hi, lo, i)
+        }
 
         /** `boil()` from the Mac's shader: smooth noise drifting through itself, swelling into bubbles round the hotspot. */
         fun boilAt(x: Double, y: Double, z: Double, b: BoilParams): Double {

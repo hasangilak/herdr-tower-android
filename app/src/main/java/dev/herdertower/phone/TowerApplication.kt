@@ -24,6 +24,9 @@ class TowerApplication : Application() {
         session = TowerSession(this, KeystoreCredentialStore(this), Settings(this))
         voice = VoiceController(session)
         composer = dev.herdertower.phone.compose.Composer(this, session)
+        // How this device can draw the orb: found once, off the main thread, by drawing it.
+        dev.herdertower.phone.orb.OrbProbe.override = dev.herdertower.phone.orb.OrbTier.entries.firstOrNull { it.name == session.settings.orbTier }
+        Thread({ dev.herdertower.phone.orb.OrbProbe.run() }, "orb-probe").start()
         ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, e ->
             when (e) {
                 Lifecycle.Event.ON_START -> session.setForeground(true)

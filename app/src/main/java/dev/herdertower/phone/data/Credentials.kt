@@ -118,6 +118,11 @@ class Settings(context: Context) {
         get() = prefs.getString("tower_name", "") ?: ""
         set(v) = prefs.edit().putString("tower_name", v).apply()
 
+    /** How the orb is drawn: "auto" (what the probe found) or a tier's name. */
+    var orbTier: String
+        get() = prefs.getString("orb_tier", "auto") ?: "auto"
+        set(v) = prefs.edit().putString("orb_tier", v).apply()
+
     /** Whether the phone should be the tower's voice (restored on launch). */
     var voice: Boolean
         get() = prefs.getBoolean("voice", false)
