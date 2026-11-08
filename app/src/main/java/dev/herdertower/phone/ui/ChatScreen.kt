@@ -91,6 +91,9 @@ private sealed interface ChatRow {
 @Composable
 fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit) {
     val history by session.history.collectAsStateWithLifecycle()
+    val thread by session.thread.collectAsStateWithLifecycle()
+    val threadOn by session.threadSupported.collectAsStateWithLifecycle()
+    val threadMore by session.threadMore.collectAsStateWithLifecycle()
     val state by session.state.collectAsStateWithLifecycle()
     val link by session.link.collectAsStateWithLifecycle()
     val shots by session.screenshots.collectAsStateWithLifecycle()
@@ -115,14 +118,25 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
         ?: if (thinking && since > 0) dev.herdertower.phone.api.Work("Thinking", "", since, since, 0) else null
     var viewing by remember { mutableStateOf<Pair<List<Pic>, Int>?>(null) }
 
+    val pendingSent by composer.pending.collectAsStateWithLifecycle()
+    // The tower's thread when it has one (the same as the Mac panel's); otherwise the history.
+    val useThread = threadOn == true
+    val entries = remember(useThread, thread, history) { if (useThread) thread.map(ChatModel::entry) else history }
+    val shotsById = remember(thread) { thread.associate { it.id to it.shots() } }
+    val waiting = remember(pendingSent, thread, now) { if (useThread) ChatModel.unmatched(pendingSent, thread, now) else emptyList() }
+
     Box(Modifier.fillMaxSize()) {
     ChatContent(
-        entries = history,
+        entries = entries,
+        curated = useThread,
+        pending = waiting,
+        canLoadMore = if (useThread) threadMore else history.isNotEmpty(),
         work = work,
         now = now,
         accounts = acc,
         onClose = onClose,
-        onLoadOlder = { scope.launch { if (session.loadOlder() == 0) snack("That's everything.") } },
+        onLoadOlder = { scope.launch { if (useThread) session.loadOlderThread() else if (session.loadOlder() == 0) snack("That's everything.") } },
+        rowShots = { e -> shotsById[e.id].orEmpty().takeIf { it.isNotEmpty() }?.let { shots -> ShotStrip(session, shots) { onShot(it.id) } } },
         onOpen = onOpen,
         onShot = onShot,
         thumb = { e, m -> Thumb(session, shotOf(e), m, maxSide = 600) },
@@ -225,13 +239,19 @@ fun ChatContent(
     thumb: @Composable (HistoryEntry, Modifier) -> Unit = { _, _ -> },
     replyShots: @Composable (List<ChatModel.ShotRef>, Modifier) -> Unit = { _, _ -> },
     sentFiles: @Composable (HistoryEntry) -> Unit = {},
+    /** The thread is the tower's own (shown as it is); the history is filtered as the panel does. */
+    curated: Boolean = false,
+    pending: List<ChatModel.Pending> = emptyList(),
+    canLoadMore: Boolean = true,
+    /** Screenshots that came with a thread message. */
+    rowShots: @Composable (HistoryEntry) -> Unit = {},
     inputBar: @Composable () -> Unit,
 ) {
     val list = rememberLazyListState()
     val rows = remember(entries) {
         buildList<ChatRow> {
             var day = ""
-            ChatModel.items(entries).forEach { e ->
+            (if (curated) entries else ChatModel.items(entries)).forEach { e ->
                 val d = dayLabel(e.at)
                 if (d != day) {
                     add(ChatRow.Day(d))
@@ -242,7 +262,14 @@ fun ChatContent(
         }
     }
     val working = work != null
-    LaunchedEffect(rows.size, working) { if (rows.isNotEmpty()) list.animateScrollToItem(rows.size + (if (working) 1 else 0)) }
+    // New at the end (a message, the working line, something sent): follow it. Older ones loaded at the top don't move the view.
+    val lastKey = (rows.lastOrNull() as? ChatRow.Item)?.e?.let { "${it.at}${it.text.length}" }
+    LaunchedEffect(lastKey, working, pending.size) {
+        if (rows.isNotEmpty()) list.animateScrollToItem(rows.size + pending.size + (if (working) 1 else 0))
+    }
+    // Scrolled to the top: load the older messages.
+    val atTop by remember { androidx.compose.runtime.derivedStateOf { list.firstVisibleItemIndex == 0 && list.layoutInfo.totalItemsCount > 1 } }
+    LaunchedEffect(atTop, canLoadMore) { if (atTop && canLoadMore && rows.isNotEmpty()) onLoadOlder() }
 
     Column(Modifier.fillMaxSize().statusBarsPadding().navigationBarsPadding().imePadding()) {
         Box(Modifier.fillMaxWidth().padding(top = 12.dp, start = 16.dp, end = 16.dp, bottom = 4.dp)) {
@@ -256,7 +283,7 @@ fun ChatContent(
         ) {
             item {
                 Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
-                    if (entries.isNotEmpty()) TextButton(onClick = onLoadOlder) { Text("Earlier messages", color = tc.faint) }
+                    if (entries.isNotEmpty() && canLoadMore) TextButton(onClick = onLoadOlder) { Text("Earlier messages", color = tc.faint) }
                 }
             }
             if (rows.isEmpty()) {
@@ -272,14 +299,18 @@ fun ChatContent(
                     is ChatRow.Day -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Text(r.label, style = MaterialTheme.typography.labelSmall, color = tc.faint)
                     }
-                    is ChatRow.Item -> when (r.e.kind) {
-                        "request" -> UserBubble(r.e, sentFiles)
-                        "answer" -> ReplyBubble(r.e, replyShots)
-                        "screenshot" -> if (r.e.id != null) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
-                        else -> EventLine(r.e, accounts, onOpen)
+                    is ChatRow.Item -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                        when (r.e.kind) {
+                            "request" -> UserBubble(r.e, sentFiles)
+                            "answer" -> ReplyBubble(r.e, replyShots)
+                            "screenshot" -> if (r.e.id != null && !curated) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
+                            else -> EventLine(r.e, accounts, onOpen)
+                        }
+                        if (curated) Box(Modifier.padding(start = if (r.e.kind == "answer") 38.dp else 0.dp)) { rowShots(r.e) }
                     }
                 }
             }
+            items(pending, key = { "pending${it.atMs}" }) { p -> PendingBubble(p) }
             if (work != null) item { WorkingLine(work, now) }
         }
         inputBar()
@@ -428,5 +459,20 @@ private fun ShotLine(e: HistoryEntry, accounts: AccountLookup, onShot: (String) 
         }
         thumb(e, Modifier.fillMaxWidth(0.72f).aspectRatio(1.4f))
         (e.caption ?: e.text).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.text) }
+    }
+}
+
+/** Something sent from here, until the thread brings it back. */
+@Composable
+private fun PendingBubble(p: ChatModel.Pending) {
+    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+        Column(
+            Modifier.padding(start = 56.dp).widthIn(max = 320.dp).alpha(0.7f)
+                .clip(RoundedCornerShape(topStart = 24.dp, topEnd = 24.dp, bottomStart = 24.dp, bottomEnd = 8.dp))
+                .background(tc.userBubble).padding(horizontal = 18.dp, vertical = 12.dp),
+        ) {
+            Text(p.text, style = MaterialTheme.typography.bodyLarge, color = tc.onBubble)
+            Text("sending…" + if (p.files > 0) " · ${plural(p.files, "file")}" else "", Modifier.align(Alignment.End), style = MaterialTheme.typography.labelSmall, color = tc.onBubble.copy(alpha = 0.85f))
+        }
     }
 }

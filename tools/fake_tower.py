@@ -152,9 +152,27 @@ def set_state(**kw):
     publish("state", dict(STATE))
 
 
+def chat_message(e, i):
+    """A history entry as a message of the main chat thread (GET /v1/chat, event chat)."""
+    role = {"request": "user", "answer": "tower"}.get(e["kind"], "report")
+    m = {"id": e.get("mid") or f"m{e['at']}", "at": e["at"], "role": role, "text": e.get("text", ""), "source": e.get("source", "phone" if role == "user" else None),
+         "attachments": e.get("attachments", []), "screenshots": [], "kind": e["kind"]}
+    for k in ("session", "name", "account", "status"):
+        if k in e:
+            m[k] = e[k]
+    if e["kind"] == "screenshot":
+        m["screenshots"] = [e["id"]]
+    return m
+
+
+def thread():
+    return [chat_message(e, i) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
+
+
 def add_history(e):
     HISTORY.append(e)
     publish("history", e)
+    publish("chat", chat_message(e, len(HISTORY)))
 
 
 def speak(sentences):
@@ -185,7 +203,12 @@ def reply_to(text, attachments=()):
     set_state(work={"word": "Reading", "detail": "web", "since_ms": t, "at_ms": now(), "done_ms": 0})
     time.sleep(2.5)
     answer = ["You said: " + text + ".", "This is the fake tower, so nothing really happened."]
-    add_history({"at": now(), "kind": "answer", "text": " ".join(answer)})
+    # The reply arrives a few words at a time on the thread (same id, more text), then is recorded.
+    mid, at, words = f"m{now()}", now(), " ".join(answer).split(" ")
+    for k in range(3, len(words), 4):
+        publish("chat", {"id": mid, "at": at, "role": "tower", "text": " ".join(words[:k]), "attachments": [], "screenshots": []})
+        time.sleep(0.25)
+    add_history({"at": at, "mid": mid, "kind": "answer", "text": " ".join(answer)})
     set_state(work=None)
     speak(answer)
 
@@ -273,6 +296,14 @@ class H(BaseHTTPRequestHandler):
                 before = int(q.get("before_ms", 2**62))
                 lim = int(q.get("limit", 100))
                 return self.send(200, {"entries": [e for e in HISTORY if e["at"] < before][-lim:]})
+            if seg == ["chat"]:
+                t = thread()
+                b = q.get("before")
+                if b:
+                    at = next((m["at"] for m in t if m["id"] == b), None)
+                    t = [m for m in t if at is not None and m["at"] < at]
+                lim = int(q.get("limit", 50))
+                return self.send(200, {"messages": t[-lim:], "more": len(t) > lim})
             if seg == ["accounts"]:
                 return self.send(200, {"default": "main", "accounts": [{"name": "main", "email": "main@example.com"}, {"name": "studio", "email": "studio@example.com"}]})
             if seg == ["screenshots"]:

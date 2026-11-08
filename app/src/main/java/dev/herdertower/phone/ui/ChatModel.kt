@@ -45,6 +45,29 @@ object ChatModel {
         .replace(Regex("""\s*\n\s*"""), " ")
         .trim()
 
+    /** A thread message as the rows the chat already draws (bubbles for you and the tower, report lines for the rest). */
+    fun entry(m: dev.herdertower.phone.api.ChatMessage): HistoryEntry = HistoryEntry(
+        at = m.at,
+        kind = when {
+            m.mine -> "request"
+            m.fromTower -> "answer"
+            else -> m.kind ?: m.role
+        },
+        session = m.session, name = m.name, account = m.account, status = m.status,
+        text = m.text, attachments = m.attachments, id = m.id,
+    )
+
+    /** A message sent from here, shown until the thread brings it back. */
+    data class Pending(val text: String, val atMs: Long, val files: Int)
+
+    private fun norm(t: String) = t.removePrefix("[voice] ").replace(Regex("""\[(Image|Video) #\d+]|\[File #\d+: [^\]]*]"""), "").replace(Regex("""\s+"""), " ").trim()
+
+    /** The sent messages the thread doesn't have yet (no message shown twice). Older than [maxAgeMs] they're dropped. */
+    fun unmatched(pending: List<Pending>, thread: List<dev.herdertower.phone.api.ChatMessage>, now: Long, maxAgeMs: Long = 90_000): List<Pending> =
+        pending.filter { p ->
+            now - p.atMs < maxAgeMs && thread.none { m -> m.mine && m.at >= p.atMs - 10_000 && norm(m.text) == norm(p.text) }
+        }
+
     /** `[Image #N]` markers in a sent message. */
     fun imageMarkers(text: String): List<Int> = Regex("""\[Image #(\d+)]""").findAll(text).map { it.groupValues[1].toInt() }.toList()
 

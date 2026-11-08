@@ -8,6 +8,8 @@ sealed interface TowerEvent {
     data class State(val state: TowerState) : TowerEvent
     data class History(val entry: HistoryEntry) : TowerEvent
     data class Audio(val clip: AudioClip) : TowerEvent
+    /** A message of the main chat thread, new or updated (same id: more text). */
+    data class Chat(val message: ChatMessage) : TowerEvent
     data object Hush : TowerEvent
     data object Pause : TowerEvent
     data object Resume : TowerEvent
@@ -24,6 +26,7 @@ sealed interface TowerEvent {
                 "state" -> State(TowerJson.decodeFromString(TowerState.serializer(), raw.data))
                 "history" -> History(TowerJson.decodeFromString(HistoryEntry.serializer(), raw.data))
                 "audio" -> Audio(TowerJson.decodeFromString(AudioClip.serializer(), raw.data))
+                "chat" -> Chat(ChatApi.message(raw.data))
                 "hush" -> Hush
                 "pause" -> Pause
                 "resume" -> Resume

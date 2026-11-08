@@ -145,6 +145,19 @@ class TowerClient(
     /** `GET /v1/screenshots/{id}`: the image's bytes (PNG, JPEG, WebP or GIF). */
     suspend fun screenshotImage(shot: Screenshot): ByteArray = bytes(shot.url, listOf("screenshots", shot.id), "image/*")
 
+    /** `GET /v1/chat?before=&limit=`: a page of the main chat thread (the latest, or before message [before]). */
+    suspend fun chat(before: String? = null, limit: Int = 50): ChatPage {
+        val req = request(url("chat", query = mapOf("before" to before, "limit" to limit.toString()))).get().build()
+        val resp = execute(http.newCall(req))
+        return withContext(Dispatchers.IO) {
+            resp.use {
+                val body = it.body.string()
+                if (!it.isSuccessful) throw error(it.code, body)
+                ChatApi.page(body)
+            }
+        }
+    }
+
     /** `GET /v1/device/audio`: where this phone's replies are heard. */
     suspend fun audioRoute(): AudioRoute = get(AudioRoute.serializer(), "device", "audio")
 

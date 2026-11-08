@@ -112,6 +112,8 @@ fun HomeScreen(
     val jobs by session.jobs.collectAsStateWithLifecycle()
     val agents by session.agents.collectAsStateWithLifecycle()
     val history by session.history.collectAsStateWithLifecycle()
+    val thread by session.thread.collectAsStateWithLifecycle()
+    val threadOn by session.threadSupported.collectAsStateWithLifecycle()
     val voiceOn by session.voiceOn.collectAsStateWithLifecycle()
     val name by session.towerName.collectAsStateWithLifecycle()
     val composer = context.tower.composer
@@ -134,7 +136,7 @@ fun HomeScreen(
         connected = connected,
         alerts = blocked.size + spaces.spaces.sumOf { it.unread },
         suggestions = if (connected) HomeModel.suggestions(s?.agents.orEmpty(), spaces, jobs, agents) else emptyList(),
-        lastAnswer = history.lastOrNull { it.kind == "answer" },
+        lastAnswer = (if (threadOn == true) thread.lastOrNull { it.fromTower }?.let(ChatModel::entry) else null) ?: history.lastOrNull { it.kind == "answer" },
         focus = spaces.focus,
         spaces = spaces.spaces.map { it.space },
         voiceOn = voiceOn,
@@ -146,7 +148,7 @@ fun HomeScreen(
         asking = true
         scope.launch {
             session.act { it.ask(text) }
-                .onSuccess { session.linger(); onChat() }
+                .onSuccess { composer.addPending(text); session.linger(); onChat() }
                 .onFailure { snack("Couldn't send: ${TowerSession.describe(it)}") }
             asking = false
         }

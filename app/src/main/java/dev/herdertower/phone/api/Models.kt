@@ -285,3 +285,47 @@ data class Screenshot(
 
 @Serializable
 data class ScreenshotsResponse(val screenshots: List<Screenshot> = emptyList())
+
+/**
+ * A message of the tower's main chat thread (`GET /v1/chat`, event `chat`):
+ * the same thread the Mac panel shows. [role] is who speaks ("user" for you,
+ * from the phone or the Mac; "tower" for its replies; others are reports),
+ * [source] where it came from. A reply that is still being written comes
+ * again with the same [id] and more text.
+ */
+@Serializable
+data class ChatMessage(
+    val id: String = "",
+    val at: Long = 0,
+    val role: String = "",
+    val text: String = "",
+    val source: String? = null,
+    val attachments: List<String> = emptyList(),
+    /** Screenshots shown with it: ids, or whole screenshot objects. */
+    val screenshots: List<JsonElement> = emptyList(),
+    val session: String? = null,
+    val name: String? = null,
+    val account: String? = null,
+    val kind: String? = null,
+    val status: String? = null,
+) {
+    val mine: Boolean get() = role == "user" || role == "you" || role == "request"
+    val fromTower: Boolean get() = role == "tower" || role == "assistant" || role == "answer"
+
+    /** The screenshots as objects the gallery and viewer can show. */
+    fun shots(): List<Screenshot> = screenshots.mapNotNull { e ->
+        when (e) {
+            is kotlinx.serialization.json.JsonPrimitive -> e.content.takeIf { it.isNotBlank() }?.let { Screenshot(id = it, at = at, url = "/v1/screenshots/$it") }
+            is kotlinx.serialization.json.JsonObject -> runCatching { TowerJson.decodeFromJsonElement(Screenshot.serializer(), e) }.getOrNull()
+                ?.let { if (it.url.isBlank()) it.copy(url = "/v1/screenshots/${it.id}") else it }
+            else -> null
+        }
+    }
+}
+
+@Serializable
+data class ChatPage(
+    val messages: List<ChatMessage> = emptyList(),
+    /** Whether older messages exist before this page (when the tower says). */
+    val more: Boolean? = null,
+)

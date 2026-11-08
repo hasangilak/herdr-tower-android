@@ -280,6 +280,17 @@ class TowerClientTest {
         assertNull(TowerJson.decodeFromString(Hello.serializer(), """{"api":1}""").audioRoute)
     }
 
+    @Test fun pagesTheThreadBack() = runBlocking {
+        server.enqueue(json("""{"messages":[{"id":"m7","at":7,"role":"user","text":"hi","source":"mac"}],"more":false}"""))
+        val p = client().chat(before = "m8", limit = 20)
+        assertEquals("mac", p.messages.single().source)
+        assertEquals(false, p.more)
+        val q = taken().url
+        assertEquals("/v1/chat", q.encodedPath)
+        assertEquals("m8", q.queryParameter("before"))
+        assertEquals("20", q.queryParameter("limit"))
+    }
+
     @Test fun hushPostsAnEmptyBody() = runBlocking {
         server.enqueue(json("""{"ok": true}"""))
         client().hush()

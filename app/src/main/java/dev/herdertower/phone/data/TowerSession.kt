@@ -6,6 +6,8 @@ import android.util.Log
 import dev.herdertower.phone.api.AccountsResponse
 import dev.herdertower.phone.api.Agent
 import dev.herdertower.phone.api.CertificateMismatchException
+import dev.herdertower.phone.api.ChatApi
+import dev.herdertower.phone.api.ChatMessage
 import dev.herdertower.phone.api.Endpoint
 import dev.herdertower.phone.api.Fingerprint
 import dev.herdertower.phone.api.HistoryEntry
@@ -92,6 +94,18 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     val agents: StateFlow<List<Agent>> = _agents.asStateFlow()
     private val _unreachable = MutableStateFlow<List<Unreachable>>(emptyList())
     val unreachable: StateFlow<List<Unreachable>> = _unreachable.asStateFlow()
+
+    private val _thread = MutableStateFlow<List<ChatMessage>>(emptyList())
+    /** The tower's main chat thread, the same as the Mac panel's (oldest first). */
+    val thread: StateFlow<List<ChatMessage>> = _thread.asStateFlow()
+
+    private val _threadSupported = MutableStateFlow<Boolean?>(null)
+    /** Whether the tower has the thread (`/v1/chat`); false: a tower from before, the chat is built from the history. */
+    val threadSupported: StateFlow<Boolean?> = _threadSupported.asStateFlow()
+
+    private val _threadMore = MutableStateFlow(true)
+    /** Whether older messages may exist before the oldest loaded. */
+    val threadMore: StateFlow<Boolean> = _threadMore.asStateFlow()
 
     private val _screenshots = MutableStateFlow<List<Screenshot>>(emptyList())
     /** Screenshots sessions sent, newest first. */
@@ -254,6 +268,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
                 _history.value = merge(_history.value, listOf(ev.entry))
                 if (ev.entry.kind in setOf("job", "summary", "watch", "alert", "screenshot")) refreshSoon()
             }
+            is TowerEvent.Chat -> {
+                _threadSupported.value = true
+                _thread.value = ChatApi.merge(_thread.value, listOf(ev.message))
+            }
             is TowerEvent.Audio -> {
                 lastClip = ev.clip.id
                 player.enqueue(ev.clip)
@@ -268,6 +286,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     // Reading
 
     private fun refreshAll() {
+        scope.launch { loadThread() }
         scope.launch {
             quietly { r -> setRouteLocal(r.audioRoute().route) }
             catchUp()
@@ -300,6 +319,37 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             _agents.value = r.agents
             _unreachable.value = r.unreachable
         }
+    }
+
+    /** The latest page of the thread (on every connect: what came while away is in it). */
+    private suspend fun loadThread() {
+        val c = client ?: return
+        try {
+            val page = c.chat(limit = 60)
+            _threadSupported.value = true
+            _thread.value = ChatApi.merge(_thread.value, page.messages)
+            if (_thread.value.size == page.messages.size) _threadMore.value = page.more ?: (page.messages.size >= 60)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: TowerApiException) {
+            // A tower from before the thread: the chat falls back to the history.
+            if (e.status == 404) _threadSupported.value = false
+        } catch (e: Exception) {
+            Log.i(TAG, "thread: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** Pages the thread back: the messages before the oldest loaded. Returns how many came. */
+    suspend fun loadOlderThread(limit: Int = 50): Int {
+        val oldest = _thread.value.firstOrNull() ?: return 0
+        var n = 0
+        quietly { c ->
+            val page = c.chat(before = oldest.id.ifBlank { oldest.at.toString() }, limit = limit)
+            n = page.messages.size
+            _thread.value = ChatApi.merge(_thread.value, page.messages)
+            _threadMore.value = page.more ?: (n >= limit)
+        }
+        return n
     }
 
     /** Pages back: the [limit] entries before the oldest one loaded. Returns how many came. */
@@ -427,6 +477,8 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         _jobs.value = emptyList()
         _agents.value = emptyList()
         _screenshots.value = emptyList()
+        _thread.value = emptyList()
+        _threadSupported.value = null
     }
 
     companion object {

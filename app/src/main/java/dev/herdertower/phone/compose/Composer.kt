@@ -54,6 +54,15 @@ class Composer(context: Context, private val session: TowerSession) {
     private val _dictating = MutableStateFlow<DictationEngine>(towerDictation)
     /** The engine dictating now (or last). */
     val dictation: StateFlow<DictationEngine> = _dictating.asStateFlow()
+
+    private val _pending = MutableStateFlow<List<dev.herdertower.phone.ui.ChatModel.Pending>>(emptyList())
+    /** What was sent from here and not yet back in the thread (shown as "sending…", never twice). */
+    val pending: StateFlow<List<dev.herdertower.phone.ui.ChatModel.Pending>> = _pending.asStateFlow()
+
+    fun addPending(text: String, files: Int = 0) {
+        val now = System.currentTimeMillis()
+        _pending.value = _pending.value.filter { now - it.atMs < 90_000 } + dev.herdertower.phone.ui.ChatModel.Pending(text, now, files)
+    }
     /** Where the text stood when dictation began: what it says goes after it. */
     private var dictationBase: String? = null
 
@@ -227,6 +236,7 @@ class Composer(context: Context, private val session: TowerSession) {
                 session.act { it.ask(text, parts) }.map { }
             }
             if (result.isSuccess) {
+                addPending(text, ordered.size)
                 clear()
                 session.linger()
             }
