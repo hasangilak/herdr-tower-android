@@ -54,7 +54,8 @@ import kotlinx.coroutines.launch
 
 /** One session: what its terminal shows now, and Approve / Refuse when it's blocked. */
 @Composable
-fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, onShot: (String) -> Unit = {}) {
+fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, onShot: (String) -> Unit = {}, onQuestion: (String) -> Unit = {}) {
+    val questions by session.questions.collectAsStateWithLifecycle()
     val state by session.state.collectAsStateWithLifecycle()
     val spaces by session.spaces.collectAsStateWithLifecycle()
     val agents by session.agents.collectAsStateWithLifecycle()
@@ -116,6 +117,8 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, on
                     account?.let { AccountBadge(it, it == acc.default) }
                 }
         agent?.doing?.takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.text) }
+        // What it asks, with the tower's answers.
+        QuestionCards(QuestionModel.forUser(questions, address), onQuestion)
 
         if (blocked) {
             GlassCard(Modifier.fillMaxWidth(), highlighted = true) {

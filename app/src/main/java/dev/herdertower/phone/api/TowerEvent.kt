@@ -10,6 +10,8 @@ sealed interface TowerEvent {
     data class Audio(val clip: AudioClip) : TowerEvent
     /** A message of the main chat thread, new or updated (same id: more text). */
     data class Chat(val message: ChatMessage) : TowerEvent
+    /** A question set appeared, changed or closed. */
+    data class QuestionChanged(val change: QuestionEvent) : TowerEvent
     data object Hush : TowerEvent
     data object Pause : TowerEvent
     data object Resume : TowerEvent
@@ -27,6 +29,7 @@ sealed interface TowerEvent {
                 "history" -> History(TowerJson.decodeFromString(HistoryEntry.serializer(), raw.data))
                 "audio" -> Audio(TowerJson.decodeFromString(AudioClip.serializer(), raw.data))
                 "chat" -> Chat(ChatApi.message(raw.data))
+                "question" -> QuestionChanged(QuestionsApi.event(raw.data))
                 "hush" -> Hush
                 "pause" -> Pause
                 "resume" -> Resume

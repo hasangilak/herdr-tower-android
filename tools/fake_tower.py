@@ -14,7 +14,7 @@ It prints the pairing link. From the emulator, the Mac is 10.0.2.2:
 
     adb shell am start -a android.intent.action.VIEW -d '"herdertower://pair?h=10.0.2.2&p=7899&c=...&fp=..."' dev.herdertower.phone
 """
-import argparse, hashlib, json, math, os, queue, secrets, shutil, ssl, struct, subprocess, sys, tempfile, threading, time, zlib
+import argparse, hashlib, json, math, os, queue, re, secrets, shutil, ssl, struct, subprocess, sys, tempfile, threading, time, zlib
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import urlparse, parse_qs, unquote
 
@@ -80,7 +80,7 @@ STATE = {
         {"address": "vps/t2", "name": "deploy", "status": "idle", "app": "codex"},
     ],
     "error": "", "talk_key": "ctrl", "voice": "af_bella", "stt_model": "fake", "lan": "", "phone": None,
-    "screenshots": [], "work": None,
+    "screenshots": [], "work": None, "questions": [], "question_policy": "normal",
 }
 SHOTS = [
     {"id": "1794160000003-onboarding.png", "at": T0 - 4 * MIN, "session": "t5", "name": "web", "space": "Storefront", "account": "main", "job": "j1", "caption": "The new onboarding page, three steps"},
@@ -209,7 +209,7 @@ def chat_message(e, i):
 
 
 def thread():
-    return [chat_message(e, i + 1) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
+    return [chat_message(e, i + 1) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot", "answered") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
 
 
 def add_history(e):
@@ -277,6 +277,187 @@ def multipart(body, ctype):
     return text, files
 
 
+# Questions (docs/questions.md in herder-tower): sets that blocked sessions ask, recommendations, the 90/10 decision.
+QUESTIONS = {}
+QPOLICY = ["normal"]
+
+
+def q_publish(op, qs):
+    STATE["questions"] = [x for x in QUESTIONS.values()]
+    STATE["question_policy"] = QPOLICY[0]
+    publish("question", {"op": op, "id": qs["id"], "question": qs if op != "closed" else None})
+
+
+def q_open(qs):
+    QUESTIONS[qs["id"]] = qs
+    q_publish("open", qs)
+
+
+def q_update(qid, **kw):
+    qs = QUESTIONS.get(qid)
+    if qs:
+        qs.update(kw)
+        q_publish("update", qs)
+
+
+def q_close(qid):
+    qs = QUESTIONS.pop(qid, None)
+    if qs:
+        q_publish("closed", qs)
+
+
+def opt(label, description=""):
+    return {"label": label, "description": description, "key": ""}
+
+
+def questions_life():
+    """An escalated three-question set whose recommendations take a few seconds, a permission prompt, and a
+    routine question the tower answers by itself (a quiet 'answered' line in the chat)."""
+    q1 = {"id": "q3f1a9c", "session": "t3", "name": "api", "kind": "claude-ask", "title": "3 questions: Database, Features, Deploy",
+          "detail": "", "context": "Set up the orders service",
+          "tabs": [
+              {"title": "Database", "question": "Which database should the orders service use?", "options": [opt("Postgres", "the shared cluster, with the other services"), opt("SQLite", "one file next to the service"), opt("DynamoDB", "managed, pay per request")], "multi": False, "allows_other": True, "answered": False},
+              {"title": "Features", "question": "Which features should the first version have?", "options": [opt("Refunds"), opt("Partial shipments"), opt("Invoices as PDF"), opt("Webhooks")], "multi": True, "allows_other": True, "answered": False},
+              {"title": "Deploy", "question": "Should I deploy it to production once the tests pass?", "options": [opt("Yes, deploy"), opt("Staging only"), opt("Don't deploy yet")], "multi": False, "allows_other": True, "answered": False}],
+          "current_tab": 0, "submit_state": "answering", "recommendations": None, "decision": "escalate",
+          "reason": "deploying to production is yours to decide", "status": "open", "error": None, "answered_with": None, "at_ms": now() - 60_000}
+    q2 = {"id": "q7c20e1", "session": "t5", "name": "web", "kind": "claude-permission", "title": "Run a command",
+          "detail": "rm -rf build/ && npm run build:prod", "context": "Fix the checkout page",
+          "tabs": [{"title": "", "question": "Do you want to proceed?", "options": [opt("Yes"), opt("Yes, and don't ask again for rm in this project"), opt("No, and tell Claude what to do differently")], "multi": False, "allows_other": False, "answered": False}],
+          "current_tab": 0, "submit_state": "single", "recommendations": [{"tab": 0, "options": [
+              {"label": "No", "why": "it deletes the build folder; ask first what it needs", "choice": 2},
+              {"label": "Yes", "why": "the build folder is generated anyway", "choice": 0},
+              {"label": "Yes, don't ask again", "why": "if it keeps rebuilding", "choice": 1}]}],
+          "decision": "escalate", "reason": "deleting files", "status": "open", "error": None, "answered_with": None, "at_ms": now() - 20_000}
+    q_open(q1)
+    q_open(q2)
+    while not SUBS:  # the rest happens once a phone watches
+        time.sleep(0.5)
+    time.sleep(6)
+    q_update("q3f1a9c", recommendations=[
+        {"tab": 0, "options": [{"label": "Postgres", "why": "the other services already use it", "choice": 0},
+                               {"label": "SQLite", "why": "simplest, if it stays small", "choice": 1},
+                               {"label": "Postgres, own schema", "why": "shared cluster, kept apart", "choice": {"other": "Postgres, in its own schema"}}]},
+        {"tab": 1, "options": [{"label": "Refunds and webhooks", "why": "what the shop asks for most", "choice": {"options": [0, 3]}},
+                               {"label": "Refunds only", "why": "smallest first version", "choice": {"options": [0]}},
+                               {"label": "All four", "why": "if there's time", "choice": {"options": [0, 1, 2, 3]}}]},
+        {"tab": 2, "options": [{"label": "Staging only", "why": "production is yours to decide", "choice": 1},
+                               {"label": "Don't deploy yet", "why": "nothing to show yet", "choice": 2},
+                               {"label": "Yes, deploy", "why": "if the tests are green", "choice": 0}]}])
+    time.sleep(8)
+    q3 = {"id": "q90bb12", "session": "t1", "name": "docs", "kind": "claude-ask", "title": "Which test runner?", "detail": "", "context": "Add tests to the docs site",
+          "tabs": [{"title": "Runner", "question": "Which test runner should I use?", "options": [opt("Vitest"), opt("Jest")], "multi": False, "allows_other": True, "answered": False}],
+          "current_tab": 0, "submit_state": "single", "recommendations": None, "decision": None, "reason": None, "status": "open", "error": None, "answered_with": None, "at_ms": now()}
+    q_open(q3)
+    time.sleep(2)
+    q_update("q90bb12", recommendations=[{"tab": 0, "options": [{"label": "Vitest", "why": "the project already uses Vite", "choice": 0}]}],
+             decision="auto", reason="routine: which of two reasonable tools", status="answering")
+    time.sleep(1.5)
+    q_close("q90bb12")
+    add_history({"at": now(), "kind": "answered", "session": "t1", "name": "docs", "text": "answered for you: Which test runner should I use? -> Vitest, because the project already uses Vite"})
+    time.sleep(int(os.environ.get("FAKE_TEXT_QUESTION_S", "20")))
+    # A session finished its turn with a question in plain text; the tower leaves it to the user.
+    q_open({"id": "qtx51d0", "session": "t5", "name": "web", "kind": "text", "title": "Open the PR now?", "detail": "", "context": "Fix the checkout page",
+            "tabs": [{"title": "", "question": "The checkout fix is done and tested. Want me to open the PR now, or wait for the design review?", "options": [], "multi": False, "allows_other": True, "answered": False}],
+            "current_tab": 0, "submit_state": "single", "recommendations": [{"tab": 0, "options": [
+                {"label": "Wait for the design review", "why": "the design team asked to see it first", "choice": {"other": "Wait for the design review, then open the PR."}},
+                {"label": "Open it as a draft", "why": "reviewers can look early", "choice": {"other": "Open it as a draft PR now."}},
+                {"label": "Open the PR now", "why": "it's tested", "choice": {"other": "Yes, open the PR now."}}]}],
+            "decision": "escalate", "reason": "pushing to a shared branch", "status": "open", "error": None, "answered_with": None, "at_ms": now()})
+
+
+def interpret(qs, tab, text):
+    t = (text or "").lower().strip(" .!?")
+    options = qs["tabs"][tab]["options"]
+    words = {"first": 0, "one": 0, "1": 0, "erste": 0, "second": 1, "two": 1, "2": 1, "zweite": 1, "third": 2, "three": 2, "3": 2, "dritte": 2}
+    picked = sorted({i for w, i in words.items() if re.search(rf"\b{w}\b", t) and i < len(options)})
+    if "last" in t:
+        picked = [len(options) - 1]
+    picked += [i for i, o in enumerate(options) if o["label"].lower() in t and i not in picked]
+    if picked:
+        return {"options": picked[: (len(options) if qs["tabs"][tab]["multi"] else 1)], "other": None}
+    return {"options": [], "other": text}
+
+
+def questions_route(h, method, seg, q, b):
+    """The question endpoints; True when handled."""
+    if seg == ["questions-policy"]:
+        if method == "PUT":
+            p = json.loads(b or b"{}").get("policy")
+            if p not in ("normal", "keep-moving", "ask-everything"):
+                h.err(400, "bad_policy", "normal, keep-moving or ask-everything")
+                return True
+            QPOLICY[0] = p
+            set_state(question_policy=p)
+        h.send(200, {"policy": QPOLICY[0]})
+        return True
+    if not seg or seg[0] != "questions":
+        return False
+    if seg == ["questions"] and method == "GET":
+        h.send(200, {"questions": list(QUESTIONS.values())})
+        return True
+    qs = QUESTIONS.get(seg[1]) if len(seg) > 1 else None
+    if qs is None:
+        h.err(404, "no_question", "no such question")
+        return True
+    if len(seg) == 2 and method == "GET":
+        h.send(200, qs)
+        return True
+    if len(seg) == 2 and method == "DELETE":
+        q_close(qs["id"])
+        h.send(200, {"ok": True})
+        return True
+    if seg[2:] == ["answer"] and method == "POST":
+        ctype = h.headers.get("Content-Type", "")
+        files = []
+        if ctype.startswith("multipart/"):
+            boundary = ctype.split("boundary=")[-1].strip('"').encode()
+            body = {}
+            for part in b.split(b"--" + boundary):
+                head, _, data = part.partition(b"\r\n\r\n")
+                data = data.rsplit(b"\r\n", 1)[0]
+                hd = head.decode("utf-8", "replace")
+                if 'name="json"' in hd:
+                    body = json.loads(data)
+                elif 'name="tab' in hd:
+                    files.append(hd.split('name="')[1].split('"')[0])
+        else:
+            body = json.loads(b or b"{}")
+        answers = body.get("answers", [])
+        if FAIL_NEXT[0]:
+            FAIL_NEXT[0] = False
+            q_update(qs["id"], status="failed", error="the dialog moved to another question")
+            h.err(409, "changed", "the dialog moved to another question before the answer went in")
+            return True
+        print(f"answer {qs['id']}: {json.dumps(answers)} files={files}", flush=True)
+        q_update(qs["id"], status="answering", answered_with=answers)
+
+        def finish():
+            time.sleep(2)
+            q_update(qs["id"], status="answered")
+            time.sleep(0.5)
+            q_close(qs["id"])
+        threading.Thread(target=finish, daemon=True).start()
+        h.send(200, {"ok": True, "id": qs["id"], "submitted": True})
+        return True
+    if seg[2:] == ["interpret"] and method == "POST":
+        d = json.loads(b or b"{}")
+        tab = int(d.get("tab", 0))
+        h.send(200, {"tab": tab, "choice": interpret(qs, tab, d.get("text", ""))})
+        return True
+    if seg[2:] == ["voice"] and method == "POST":
+        tab = int(q.get("tab", 0))
+        heard = whisper(b) or "the second one"
+        h.send(200, {"tab": tab, "heard": heard, "choice": interpret(qs, tab, heard)})
+        return True
+    h.err(404, "not_found", "no such path")
+    return True
+
+
+# FAKE_FAIL_FIRST_ANSWER=1: the first answer stops with 409 changed (to see the failed state).
+FAIL_NEXT = [bool(os.environ.get("FAKE_FAIL_FIRST_ANSWER"))]
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -323,6 +504,9 @@ class H(BaseHTTPRequestHandler):
         dev = self.device()
         if dev is None:
             return self.err(401, "unauthorized", "unknown token")
+        if seg[:1] in (["questions"], ["questions-policy"]):
+            if questions_route(self, method, seg, q, self.body() if method in ("POST", "PUT") else b""):
+                return
         if method == "GET":
             if seg == ["hello"]:
                 return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS), "audio_route": ROUTE.get(dev["id"], "phone")})
@@ -501,5 +685,6 @@ if __name__ == "__main__":
     srv = ThreadingHTTPServer((a.host, a.port), H)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     link = f"herdertower://pair?h={a.link_host}&p={a.port}&c={CODE}&fp={FP}"
+    threading.Thread(target=questions_life, daemon=True).start()
     print(f"fake tower on https://{a.host}:{a.port}\ncode {CODE}\nfingerprint {' '.join(FP[i:i+4] for i in range(0, 64, 4))}\nLINK {link}", flush=True)
     srv.serve_forever()

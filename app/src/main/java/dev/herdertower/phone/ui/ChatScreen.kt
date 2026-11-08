@@ -18,6 +18,9 @@ import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
+import androidx.compose.foundation.rememberScrollState
+import androidx.compose.foundation.verticalScroll
+import androidx.compose.material.icons.filled.Check
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -91,7 +94,8 @@ private sealed interface ChatRow {
 }
 
 @Composable
-fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit) {
+fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit, onQuestion: (String) -> Unit = {}) {
+    val questions by session.questions.collectAsStateWithLifecycle()
     val history by session.history.collectAsStateWithLifecycle()
     val thread by session.thread.collectAsStateWithLifecycle()
     val threadOn by session.threadSupported.collectAsStateWithLifecycle()
@@ -158,6 +162,8 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
             SentFiles(session, e) { pics, i -> viewing = pics to i }
         },
         inputBar = {
+            // Questions left to the user stay in view above the input, until answered.
+            QuestionCards(QuestionModel.forUser(questions), onQuestion, Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp).heightIn(max = 260.dp).verticalScroll(rememberScrollState()), compact = true)
             Column(
                 Modifier
                     .padding(horizontal = 12.dp, vertical = 10.dp)
@@ -417,6 +423,8 @@ fun eventLook(e: HistoryEntry): Triple<ImageVector, Color, String> {
             "watch" -> Triple(Icons.Filled.Terminal, tc.muted, ChatModel.report(e.text))
             "alert" -> Triple(Icons.Filled.Notifications, tc.accentHi.takeIf { tc.dark } ?: tc.accent, e.text)
             "summary" -> Triple(Icons.AutoMirrored.Filled.Article, tc.muted, "$who: ${e.text}")
+            // A question the tower answered for the user: quiet.
+            "answered" -> Triple(Icons.Filled.Check, tc.faint, e.text.removePrefix("answered for you: ").let { "Answered for you: $it" })
             // A card of screenshots a session sent (the pictures follow).
             "screenshot" -> Triple(Icons.Filled.PhotoLibrary, tc.muted, e.text.ifBlank { if (who.isEmpty()) "Screenshots" else "Screenshots from $who" })
             else -> Triple(Icons.Filled.Info, tc.idle, e.text)

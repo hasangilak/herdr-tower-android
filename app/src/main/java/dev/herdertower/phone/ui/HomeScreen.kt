@@ -101,6 +101,7 @@ fun HomeScreen(
     onAlerts: () -> Unit,
     onMenu: () -> Unit,
     onRepair: () -> Unit,
+    onQuestion: (String) -> Unit = {},
 ) {
     val context = LocalContext.current
     val perms = rememberPermissions()
@@ -108,6 +109,7 @@ fun HomeScreen(
     val snack = LocalSnack.current
     val state by session.state.collectAsStateWithLifecycle()
     val link by session.link.collectAsStateWithLifecycle()
+    val questions by session.questions.collectAsStateWithLifecycle()
     val spaces by session.spaces.collectAsStateWithLifecycle()
     val jobs by session.jobs.collectAsStateWithLifecycle()
     val agents by session.agents.collectAsStateWithLifecycle()
@@ -135,7 +137,9 @@ fun HomeScreen(
         statusLine = status,
         connected = connected,
         alerts = blocked.size + spaces.spaces.sumOf { it.unread },
-        suggestions = if (connected) HomeModel.suggestions(s?.agents.orEmpty(), spaces, jobs, agents) else emptyList(),
+        // A session whose question has a card isn't suggested again.
+        suggestions = if (connected) HomeModel.suggestions(s?.agents.orEmpty(), spaces, jobs, agents)
+            .filterNot { sg -> sg is Suggestion.Answer && questions.any { it.forUser && it.session == sg.address } } else emptyList(),
         lastAnswer = (if (threadOn == true) thread.lastOrNull { it.fromTower }?.let(ChatModel::entry) else null) ?: history.lastOrNull { it.kind == "answer" },
         focus = spaces.focus,
         spaces = spaces.spaces.map { it.space },
@@ -163,6 +167,9 @@ fun HomeScreen(
     HomeContent(
         ui = ui,
         notice = { ConnectionNotice(link, session, onRepair) },
+        questions = {
+            QuestionCards(QuestionModel.forUser(questions), onQuestion, Modifier.padding(horizontal = 20.dp))
+        },
         askBox = {
             AskBox(
                 field = { DraftField(composer, "Ask the tower, or describe the work", 2, actions.send, actions.add, Modifier.fillMaxWidth()) },
@@ -202,6 +209,8 @@ fun HomeScreen(
 fun HomeContent(
     ui: HomeUi,
     notice: @Composable () -> Unit = {},
+    /** The questions sessions leave to the user, as cards. */
+    questions: @Composable () -> Unit = {},
     askBox: @Composable () -> Unit,
     onSuggestion: (Suggestion) -> Unit,
     onAlerts: () -> Unit,
@@ -241,6 +250,7 @@ fun HomeContent(
                 Spacer(Modifier.width(8.dp))
                 Text(ui.statusLine, style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
+            questions()
             Spacer(Modifier.height(20.dp))
             if (ui.suggestions.isNotEmpty()) {
                 // A new first card (someone needs you) is shown, not left scrolled out of view.

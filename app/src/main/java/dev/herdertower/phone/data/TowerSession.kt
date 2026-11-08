@@ -4,6 +4,9 @@ import android.content.Context
 import android.os.Build
 import android.util.Log
 import dev.herdertower.phone.api.AccountsResponse
+import dev.herdertower.phone.api.Question
+import dev.herdertower.phone.api.QuestionsApi
+import dev.herdertower.phone.api.TabAnswer
 import dev.herdertower.phone.api.Agent
 import dev.herdertower.phone.api.CertificateMismatchException
 import dev.herdertower.phone.api.ChatApi
@@ -187,6 +190,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
 
     fun setForeground(fg: Boolean) {
         _foreground.value = fg
+        if (fg) notices.clearAll()
     }
 
     fun setVoice(on: Boolean) {
@@ -262,6 +266,11 @@ class TowerSession(private val context: Context, private val store: CredentialSt
                 val before = _state.value
                 _state.value = ev.state
                 if (ev.state.screenshots.isNotEmpty()) _screenshots.value = mergeShots(_screenshots.value, ev.state.screenshots)
+                ev.state.questionPolicy?.let {
+                    _questionPolicy.value = it
+                    _questionsSupported.value = true
+                    setQuestions(ev.state.questions)
+                }
                 if (before != null && before.agents.map { it.address to it.status } != ev.state.agents.map { it.address to it.status }) refreshSoon()
             }
             is TowerEvent.History -> {
@@ -279,7 +288,56 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             TowerEvent.Hush -> player.hush()
             TowerEvent.Pause -> player.pause()
             TowerEvent.Resume -> player.resume()
+            is TowerEvent.QuestionChanged -> {
+                _questionsSupported.value = true
+                setQuestions(QuestionsApi.apply(_questions.value, ev.change))
+            }
             is TowerEvent.Hello, TowerEvent.Ping, is TowerEvent.Unknown -> {}
+        }
+    }
+
+    // Questions
+
+    private val _questions = MutableStateFlow<List<Question>>(emptyList())
+    /** The open question sets (all of them: the UI shows those for the user, [Question.forUser]). */
+    val questions: StateFlow<List<Question>> = _questions.asStateFlow()
+
+    private val _questionsSupported = MutableStateFlow(false)
+    val questionsSupported: StateFlow<Boolean> = _questionsSupported.asStateFlow()
+
+    private val _questionPolicy = MutableStateFlow<String?>(null)
+    /** `normal`, `keep-moving` or `ask-everything`; null until the tower says (or it has no questions). */
+    val questionPolicy: StateFlow<String?> = _questionPolicy.asStateFlow()
+
+    private val notices = QuestionNotices(context)
+
+    private fun setQuestions(list: List<Question>) {
+        _questions.value = list
+        notices.follow(list, background = !_foreground.value)
+    }
+
+    suspend fun setQuestionPolicy(policy: String): Result<String> =
+        act { it.setQuestionPolicy(policy) }.onSuccess { _questionPolicy.value = it }
+
+    /** Answers a question set; the tower types it into the session's dialog. */
+    suspend fun answerQuestion(id: String, answers: List<TabAnswer>): Result<Unit> {
+        _questions.value = _questions.value.map { if (it.id == id) it.copy(status = "answering", error = null) else it }
+        return act { it.answerQuestion(id, answers) }.onSuccess {
+            _questions.value = _questions.value.map { if (it.id == id && it.status == "answering") it.copy(status = "answered") else it }
+        }.onFailure { e ->
+            _questions.value = _questions.value.map { if (it.id == id) it.copy(status = "failed", error = describe(e)) else it }
+        }
+    }
+
+    suspend fun dismissQuestion(id: String): Result<Unit> =
+        act { it.dismissQuestion(id) }.onSuccess { setQuestions(_questions.value.filterNot { q -> q.id == id }) }
+
+    private suspend fun loadQuestions() {
+        quietly { c ->
+            val list = c.questions()
+            _questionsSupported.value = true
+            setQuestions(list)
+            _questionPolicy.value = c.questionPolicy()
         }
     }
 
@@ -287,6 +345,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
 
     private fun refreshAll() {
         scope.launch { loadThread() }
+        scope.launch { loadQuestions() }
         scope.launch {
             quietly { r -> setRouteLocal(r.audioRoute().route) }
             catchUp()

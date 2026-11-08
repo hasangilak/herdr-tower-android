@@ -291,6 +291,45 @@ class TowerClientTest {
         assertEquals("20", q.queryParameter("limit"))
     }
 
+    @Test fun answersAQuestionAsJson() = runBlocking {
+        server.enqueue(json("""{"ok":true,"id":"q1","submitted":true}"""))
+        client().answerQuestion("q1", listOf(TabAnswer(0, Choice.Pick(1)), TabAnswer(1, Choice.Several(listOf(0, 2), "CSV"))))
+        val req = taken()
+        assertEquals("/v1/questions/q1/answer", req.url.encodedPath)
+        assertEquals("""{"answers":[{"tab":0,"choice":1},{"tab":1,"choice":{"options":[0,2],"other":"CSV"}}],"submit":true}""", req.body!!.utf8())
+    }
+
+    @Test fun aTypedAnswerWithFilesIsMultipart() = runBlocking {
+        server.enqueue(json("""{"ok":true}"""))
+        val png = FilePart("sketch.png", "image/png", byteArrayOf(0x89.toByte(), 'P'.code.toByte()))
+        client().answerQuestion("q1", listOf(TabAnswer(2, Choice.Own("like this"), listOf(png))))
+        val body = taken().body!!.string(Charsets.ISO_8859_1)
+        val j = body.indexOf("name=\"json\"")
+        assertTrue(j >= 0 && body.indexOf("{\"answers\":[{\"tab\":2,\"choice\":{\"other\":\"like this\"}}]") > j)
+        assertTrue(body.contains("name=\"tab2\"; filename=\"sketch.png\""))
+    }
+
+    @Test fun aStoppedAnswerSaysWhere() = runBlocking {
+        server.enqueue(json("""{"error":{"code":"changed","message":"the dialog moved on"}}""", 409))
+        val e = runCatching { client().answerQuestion("q1", listOf(TabAnswer(0, Choice.Pick(0)))) }.exceptionOrNull()
+        assertTrue(e is TowerApiException && e.code == "changed" && e.message!!.contains("moved on"))
+    }
+
+    @Test fun questionPolicyAndVoice() = runBlocking {
+        server.enqueue(json("""{"policy":"keep-moving"}"""))
+        assertEquals("keep-moving", client().setQuestionPolicy("keep-moving"))
+        val put = taken()
+        assertEquals("PUT", put.method)
+        assertEquals("""{"policy":"keep-moving"}""", put.body!!.utf8())
+        server.enqueue(json("""{"tab":1,"heard":"the second one","choice":{"options":[1],"other":null}}"""))
+        val r = client().questionVoice("q1", 1, byteArrayOf(1, 2))
+        assertEquals("/v1/questions/q1/voice?tab=1", taken().url.let { it.encodedPath + "?" + it.encodedQuery })
+        assertEquals(Choice.Several(listOf(1)), r.parsed)
+        server.enqueue(json("", 200))
+        client().dismissQuestion("q1")
+        assertEquals("DELETE", taken().method)
+    }
+
     @Test fun hushPostsAnEmptyBody() = runBlocking {
         server.enqueue(json("""{"ok": true}"""))
         client().hush()

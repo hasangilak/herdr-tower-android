@@ -59,6 +59,7 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.CompositionLocalProvider
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -97,6 +98,8 @@ sealed interface Route {
     data class Space(val name: String) : Route
     /** Screenshots: all, or one [session]'s; [open] shows that one in the viewer. */
     data class Screenshots(val session: String? = null, val open: String? = null) : Route
+    /** Answering a question a session asks. */
+    data class Question(val id: String) : Route
 
     companion object {
         fun encode(r: Route): String = when (r) {
@@ -108,6 +111,7 @@ sealed interface Route {
             is Session -> "session:${r.address}"
             is Space -> "space:${r.name}"
             is Screenshots -> "shots:${r.session.orEmpty()}:${r.open.orEmpty()}"
+            is Question -> "question:${r.id}"
         }
 
         fun decode(s: String): Route = when {
@@ -117,6 +121,7 @@ sealed interface Route {
             s == "activity" -> Activity
             s.startsWith("session:") -> Session(s.removePrefix("session:"))
             s.startsWith("space:") -> Space(s.removePrefix("space:"))
+            s.startsWith("question:") -> Question(s.removePrefix("question:"))
             s.startsWith("shots:") -> s.removePrefix("shots:").split(":", limit = 2).let { Screenshots(it[0].ifEmpty { null }, it.getOrNull(1)?.ifEmpty { null }) }
             else -> Home
         }
@@ -202,7 +207,7 @@ fun setVoice(on: Boolean, session: TowerSession, perms: Permissions, context: Co
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme: (String) -> Unit, onRepair: () -> Unit) {
+fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme: (String) -> Unit, onRepair: () -> Unit, openQuestion: String? = null, onQuestionOpened: () -> Unit = {}) {
     var stack by rememberSaveable(stateSaver = Route.StackSaver) { mutableStateOf(listOf<Route>(Route.Home)) }
     val snack = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -217,6 +222,13 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
         if (stack.size > 1) stack = stack.dropLast(1)
     }
     BackHandler(enabled = stack.size > 1) { back() }
+    // From the notification: straight to that question.
+    LaunchedEffect(openQuestion) {
+        if (openQuestion != null) {
+            go(Route.Question(openQuestion))
+            onQuestionOpened()
+        }
+    }
 
     val state by session.state.collectAsStateWithLifecycle()
     val link by session.link.collectAsStateWithLifecycle()
@@ -240,13 +252,14 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
                 label = "route",
             ) { route ->
                 when (route) {
-                    Route.Home -> HomeScreen(session, voice, onVoice = { go(Route.Voice(it)) }, onChat = { go(Route.Chat) }, onOpen = { go(Route.Session(it)) }, onAlerts = { go(Route.Activity) }, onMenu = { menu = true }, onRepair = onRepair)
+                    Route.Home -> HomeScreen(session, voice, onVoice = { go(Route.Voice(it)) }, onChat = { go(Route.Chat) }, onOpen = { go(Route.Session(it)) }, onAlerts = { go(Route.Activity) }, onMenu = { menu = true }, onRepair = onRepair, onQuestion = { go(Route.Question(it)) })
                     is Route.Voice -> VoiceScreen(session, voice, startListening = route.listen, onClose = { back() }, onChat = { go(Route.Chat) })
-                    Route.Chat -> ChatScreen(session, onClose = { back() }, onVoice = { go(Route.Voice(true)) }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
+                    Route.Chat -> ChatScreen(session, onClose = { back() }, onVoice = { go(Route.Voice(true)) }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) }, onQuestion = { go(Route.Question(it)) })
                     Route.Spaces -> SpacesScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onSpace = { go(Route.Space(it)) })
                     Route.Activity -> ActivityScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
                     is Route.Space -> SpaceScreen(session, route.name, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
-                    is Route.Session -> SessionScreen(session, route.address, onBack = { back() }, onShot = { go(Route.Screenshots(route.address, it)) })
+                    is Route.Session -> SessionScreen(session, route.address, onBack = { back() }, onShot = { go(Route.Screenshots(route.address, it)) }, onQuestion = { go(Route.Question(it)) })
+                    is Route.Question -> QuestionScreen(session, route.id, onClose = { back() }, onSession = { go(Route.Session(it)) })
                     is Route.Screenshots -> ScreenshotsScreen(session, route.session, route.open, onBack = { back() })
                 }
             }
@@ -341,6 +354,27 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
                     }
                     Switch(hushWord, { on -> if (on) perms.withMic { session.setHushWord(true) } else session.setHushWord(false) }, colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent))
                 }
+            }
+            val qOn by session.questionsSupported.collectAsStateWithLifecycle()
+            val policy by session.questionPolicy.collectAsStateWithLifecycle()
+            if (qOn) {
+                Spacer(Modifier.height(10.dp))
+                Text("Questions sessions ask", style = MaterialTheme.typography.labelLarge, color = tc.faint)
+                Segments(Modifier.fillMaxWidth()) {
+                    listOf("normal" to "Normal", "keep-moving" to "Keep moving", "ask-everything" to "Ask me all").forEach { (p, label) ->
+                        Segment(label, (policy ?: "normal") == p) {
+                            scope.launch { session.setQuestionPolicy(p).onFailure { snack(TowerSession.describe(it)) } }
+                        }
+                    }
+                }
+                Text(
+                    when (policy ?: "normal") {
+                        "keep-moving" -> "The tower answers borderline ones too; deploys, pushes, deleting and money still come to you."
+                        "ask-everything" -> "Nothing is answered for you: every question comes here."
+                        else -> "The tower answers routine ones (a quiet line in the chat) and leaves the rest to you."
+                    },
+                    style = MaterialTheme.typography.bodySmall, color = tc.muted,
+                )
             }
             Spacer(Modifier.height(10.dp))
             Text("Mac microphone", style = MaterialTheme.typography.labelLarge, color = tc.faint)

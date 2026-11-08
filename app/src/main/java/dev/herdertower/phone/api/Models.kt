@@ -98,6 +98,9 @@ data class TowerState(
     val screenshots: List<Screenshot> = emptyList(),
     /** What the brain is doing right now, or null between turns. */
     val work: Work? = null,
+    /** What blocked sessions ask (question sets), and how the tower handles them. */
+    val questions: List<Question> = emptyList(),
+    @SerialName("question_policy") val questionPolicy: String? = null,
 )
 
 /** The brain's current step, as the panel's working line shows it ("Delegating to orb-rust · 12s"). */

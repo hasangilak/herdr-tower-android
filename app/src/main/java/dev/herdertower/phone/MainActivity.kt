@@ -24,6 +24,8 @@ class MainActivity : ComponentActivity() {
     /** The user asked to pair again while paired. */
     private var repairing by mutableStateOf(false)
     private var theme by mutableStateOf("system")
+    /** A question to open (its notification was tapped). */
+    private var openQuestion by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -56,6 +58,8 @@ class MainActivity : ComponentActivity() {
                         app.session, app.voice, theme,
                         onTheme = { theme = it; app.session.settings.theme = it },
                         onRepair = { repairing = true },
+                        openQuestion = openQuestion,
+                        onQuestionOpened = { openQuestion = null },
                     )
                 }
             }
@@ -87,6 +91,10 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun take(intent: Intent?) {
+        if (intent?.action == dev.herdertower.phone.data.QuestionNotices.ACTION) {
+            openQuestion = intent.getStringExtra(dev.herdertower.phone.data.QuestionNotices.EXTRA_ID)
+            return
+        }
         val data = intent?.data?.toString() ?: return
         if (!data.startsWith(PairLink.SCHEME + "://", ignoreCase = true)) return
         link = runCatching { PairLink.parse(data) }.getOrNull()

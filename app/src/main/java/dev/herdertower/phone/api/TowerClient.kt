@@ -219,6 +219,48 @@ class TowerClient(
         return post(FocusResponse.serializer(), body, "focus")
     }
 
+    // Questions (docs/questions.md)
+
+    suspend fun questions(): List<Question> = get(QuestionsResponse.serializer(), "questions").questions
+
+    suspend fun question(id: String): Question = get(Question.serializer(), "questions", id)
+
+    /**
+     * `POST /v1/questions/{id}/answer`: types the answers into the session's
+     * dialog and submits. With files (for a tab's typed words) it's
+     * multipart: the JSON as part `json`, each file as part `tab<N>`.
+     * A `409` says where it stopped (`stopped`, `changed`, `cannot_answer`).
+     */
+    suspend fun answerQuestion(id: String, answers: List<TabAnswer>, submit: Boolean = true) {
+        val text = QuestionsApi.body(answers, submit)
+        val files = answers.flatMap { a -> a.files.map { a.tab to it } }
+        val body = if (files.isEmpty()) text.toRequestBody(JSON) else MultipartBody.Builder().setType(MultipartBody.FORM)
+            .addFormDataPart("json", null, text.toRequestBody(JSON))
+            .apply { files.forEach { (tab, f) -> addFormDataPart("tab$tab", f.name, partBody(f)) } }
+            .build()
+        post(Ignored.serializer(), body, "questions", id, "answer", client = if (files.isEmpty()) slow else upload)
+    }
+
+    /** `DELETE /v1/questions/{id}`: not a question after all, or answered in the terminal. */
+    suspend fun dismissQuestion(id: String) {
+        call(http, request(url("questions", id)).delete().build(), Ignored.serializer())
+    }
+
+    /** `POST /v1/questions/{id}/interpret`: what words said for [tab] pick ("the second one"), to show before sending. */
+    suspend fun interpret(id: String, tab: Int, text: String): Interpreted {
+        val body = buildJsonObject { put("tab", JsonPrimitive(tab)); put("text", JsonPrimitive(text)) }.toString().toRequestBody(JSON)
+        return post(Interpreted.serializer(), body, "questions", id, "interpret", client = slow)
+    }
+
+    /** `POST /v1/questions/{id}/voice?tab=N`: a spoken answer (WAV), transcribed and interpreted on the Mac. */
+    suspend fun questionVoice(id: String, tab: Int, wav: ByteArray): Interpreted =
+        call(slow, request(url("questions", id, "voice", query = mapOf("tab" to tab.toString()))).post(wav.toRequestBody(WAV)).build(), Interpreted.serializer())
+
+    suspend fun questionPolicy(): String = get(QuestionPolicy.serializer(), "questions-policy").policy
+
+    suspend fun setQuestionPolicy(policy: String): String =
+        call(http, request(url("questions-policy")).put(json(QuestionPolicy.serializer(), QuestionPolicy(policy))).build(), QuestionPolicy.serializer()).policy
+
     suspend fun hush() {
         post(Ignored.serializer(), ByteArray(0).toRequestBody(null), "hush")
     }
