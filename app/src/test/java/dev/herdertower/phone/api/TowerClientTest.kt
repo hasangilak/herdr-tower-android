@@ -255,6 +255,31 @@ class TowerClientTest {
         }
     }
 
+    @Test fun readsAndSetsTheAudioRoute() = runBlocking {
+        server.enqueue(json("""{"route": "mac"}"""))
+        assertEquals("mac", client().audioRoute().route)
+        assertEquals("/v1/device/audio", taken().url.encodedPath)
+        server.enqueue(json("""{"route": "phone"}"""))
+        assertEquals("phone", client().setAudioRoute("phone").route)
+        val req = taken()
+        assertEquals("PUT", req.method)
+        assertEquals("""{"route":"phone"}""", req.body!!.utf8())
+    }
+
+    @Test fun listsMissedClipsAfterTheLastOne() = runBlocking {
+        server.enqueue(json("""{"clips": [{"id": "a18", "kind": "reply", "text": "Done.", "ms": 900, "url": "/v1/audio/a18", "at_ms": 1794170000000}]}"""))
+        val clips = client().missedClips("a17").clips
+        assertEquals(AudioClip("a18", "reply", "Done.", 900, "/v1/audio/a18", 1794170000000), clips.single())
+        val req = taken()
+        assertEquals("/v1/audio", req.url.encodedPath)
+        assertEquals("a17", req.url.queryParameter("after"))
+    }
+
+    @Test fun helloCarriesTheRoute() {
+        assertEquals("mac", TowerJson.decodeFromString(Hello.serializer(), """{"api":1,"audio_route":"mac"}""").audioRoute)
+        assertNull(TowerJson.decodeFromString(Hello.serializer(), """{"api":1}""").audioRoute)
+    }
+
     @Test fun hushPostsAnEmptyBody() = runBlocking {
         server.enqueue(json("""{"ok": true}"""))
         client().hush()

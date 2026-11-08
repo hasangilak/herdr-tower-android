@@ -110,6 +110,7 @@ JOBS = [
     {"job": "j0", "session": "vps/t2", "name": "deploy", "space": "Infra", "account": None, "status": "done", "asked": "Deploy v2.3 to staging", "summary": "Deployed; health checks green.", "started_ms": T0 - 60 * MIN, "updated_ms": T0 - 40 * MIN},
 ]
 FOCUS = [None]
+ROUTE = {}  # device id -> "phone" | "mac"
 SPACES = [("Storefront", ["t3", "t5", "t7"], "The shop: checkout, onboarding and the orders API."), ("Infra", ["vps/t2"], None)]
 SCREEN = """╭─ Claude Code ────────────────────────╮
 │ Bash command                                   │
@@ -252,7 +253,11 @@ class H(BaseHTTPRequestHandler):
             return self.err(401, "unauthorized", "unknown token")
         if method == "GET":
             if seg == ["hello"]:
-                return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS)})
+                return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS), "audio_route": ROUTE.get(dev["id"], "phone")})
+            if seg == ["device", "audio"]:
+                return self.send(200, {"route": ROUTE.get(dev["id"], "phone")})
+            if seg == ["audio"]:
+                return self.send(200, {"clips": []})
             if seg == ["state"]:
                 return self.send(200, STATE)
             if seg == ["agents"]:
@@ -323,6 +328,12 @@ class H(BaseHTTPRequestHandler):
                 set_state(heard=heard, heard_ms=now())
                 threading.Thread(target=reply_to, args=(heard,), daemon=True).start()
                 return self.send(200, {"heard": heard, "sent": True})
+        if (method, seg) == ("PUT", ["device", "audio"]):
+            r = json.loads(self.body() or b"{}").get("route")
+            if r not in ("phone", "mac"):
+                return self.err(400, "bad_route", "route is phone or mac")
+            ROUTE[dev["id"]] = r
+            return self.send(200, {"route": r})
         if (method, seg) == ("DELETE", ["device"]):
             for t, d in list(TOKENS.items()):
                 if d is dev:
@@ -378,6 +389,9 @@ class H(BaseHTTPRequestHandler):
 
     def do_DELETE(self):
         self.route("DELETE")
+
+    def do_PUT(self):
+        self.route("PUT")
 
 
 def cert():

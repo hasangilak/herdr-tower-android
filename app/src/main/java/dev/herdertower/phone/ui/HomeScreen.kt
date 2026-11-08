@@ -146,7 +146,7 @@ fun HomeScreen(
         asking = true
         scope.launch {
             session.act { it.ask(text) }
-                .onSuccess { onChat() }
+                .onSuccess { session.linger(); onChat() }
                 .onFailure { snack("Couldn't send: ${TowerSession.describe(it)}") }
             asking = false
         }
@@ -171,11 +171,7 @@ fun HomeScreen(
                 leading = {
                     AttachButton(actions)
                     Spacer(Modifier.width(8.dp))
-                    RoundIcon(
-                        if (ui.voiceOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                        if (ui.voiceOn) "Phone is the voice: on" else "Phone is the voice: off",
-                        size = 40.dp,
-                    ) { setVoice(!ui.voiceOn, session, perms, context) }
+                    RouteToggle(session)
                     Spacer(Modifier.width(8.dp))
                     FocusPill(ui.focus, ui.spaces, ::focus)
                 },

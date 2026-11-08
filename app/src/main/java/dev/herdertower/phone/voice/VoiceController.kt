@@ -131,6 +131,7 @@ class VoiceController(private val session: TowerSession) {
             }
             session.act { it.voice(wav) }
                 .onSuccess { r ->
+                    if (r.sent) session.linger()
                     _heard.value = Heard(r.heard, r.sent, System.currentTimeMillis())
                     if (!r.sent && r.heard.isBlank()) _error.value = "The Mac heard nothing it could send."
                 }

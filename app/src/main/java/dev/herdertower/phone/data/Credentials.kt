@@ -118,6 +118,16 @@ class Settings(context: Context) {
         get() = prefs.getString("tower_name", "") ?: ""
         set(v) = prefs.edit().putString("tower_name", v).apply()
 
+    /** The last known audio route ("phone" or "mac"), until the Mac says. */
+    var audioRoute: String?
+        get() = prefs.getString("audio_route", null)
+        set(v) = prefs.edit().putString("audio_route", v).apply()
+
+    /** The last reply clip this phone got (to fetch what it missed). */
+    var lastClip: String?
+        get() = prefs.getString("last_clip", null)
+        set(v) = prefs.edit().putString("last_clip", v).apply()
+
     /** How the orb is drawn: "auto" (what the probe found) or a tier's name. */
     var orbTier: String
         get() = prefs.getString("orb_tier", "auto") ?: "auto"

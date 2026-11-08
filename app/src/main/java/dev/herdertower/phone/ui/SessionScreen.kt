@@ -95,6 +95,7 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, on
         scope.launch {
             session.act { it.answer(address, approve, note) }
                 .onSuccess {
+                    session.linger()
                     answered = if (approve) "Asked the tower to approve." else "Asked the tower to refuse."
                     note = ""
                 }

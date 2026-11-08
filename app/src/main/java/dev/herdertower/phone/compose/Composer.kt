@@ -226,7 +226,10 @@ class Composer(context: Context, private val session: TowerSession) {
                 val parts = ordered.map { FilePart(it.name.ifBlank { it.file.name }, it.mime, file = it.file) }
                 session.act { it.ask(text, parts) }.map { }
             }
-            if (result.isSuccess) clear()
+            if (result.isSuccess) {
+                clear()
+                session.linger()
+            }
             return result
         } finally {
             _sending.value = false

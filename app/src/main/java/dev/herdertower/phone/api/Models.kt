@@ -39,7 +39,15 @@ data class Hello(
     val device: Device = Device(),
     val voice: String = "",
     @SerialName("phone_is_voice") val phoneIsVoice: Boolean = false,
+    /** Where this phone's replies are heard: "phone" or "mac" (null: a tower from before the setting). */
+    @SerialName("audio_route") val audioRoute: String? = null,
 )
+
+@Serializable
+data class AudioRoute(val route: String = "phone")
+
+@Serializable
+data class MissedClips(val clips: List<AudioClip> = emptyList())
 
 @Serializable
 data class Alert(
@@ -250,6 +258,8 @@ data class AudioClip(
     val text: String = "",
     val ms: Long = 0,
     val url: String = "",
+    /** When it was made (in `GET /v1/audio?after=` listings). */
+    @SerialName("at_ms") val atMs: Long = 0,
 )
 
 /** `hello` event: the first on every stream. */

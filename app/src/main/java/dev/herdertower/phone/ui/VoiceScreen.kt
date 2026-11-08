@@ -82,6 +82,7 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
     val heard by voice.heard.collectAsStateWithLifecycle()
     val error by voice.error.collectAsStateWithLifecycle()
     val playing by session.player.nowPlaying.collectAsStateWithLifecycle()
+    val route by session.audioRoute.collectAsStateWithLifecycle()
     val paused by session.player.paused.collectAsStateWithLifecycle()
     val reduce = LocalReduceMotion.current
 
@@ -104,8 +105,7 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
         !connected -> "not connected"
         s?.phase == "thinking" -> "thinking…"
         needsYou -> "${plural(blocked, "session")} ${if (blocked == 1) "needs" else "need"} you"
-        !voiceOn -> "replies play on the Mac"
-        else -> "ready"
+        else -> routeWords(route, connected)
     }
 
     // The words of the clip playing light up as it plays.
@@ -139,11 +139,7 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
                 if (recording) voice.cancel()
                 onClose()
             }
-            RoundIcon(
-                if (voiceOn) Icons.AutoMirrored.Filled.VolumeUp else Icons.AutoMirrored.Filled.VolumeOff,
-                if (voiceOn) "Phone is the voice: on" else "Phone is the voice: off",
-                Modifier.align(Alignment.CenterEnd), size = 40.dp,
-            ) { setVoice(!voiceOn, session, perms, context) }
+            RouteToggle(session, Modifier.align(Alignment.CenterEnd))
             RoundIcon(Icons.Filled.Forum, "Conversation", Modifier.align(Alignment.CenterStart), size = 40.dp, onClick = onChat)
         }
         Box(Modifier.weight(1f).fillMaxWidth().padding(vertical = 8.dp), contentAlignment = Alignment.Center) {

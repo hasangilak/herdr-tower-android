@@ -145,7 +145,17 @@ class TowerClient(
     /** `GET /v1/screenshots/{id}`: the image's bytes (PNG, JPEG, WebP or GIF). */
     suspend fun screenshotImage(shot: Screenshot): ByteArray = bytes(shot.url, listOf("screenshots", shot.id), "image/*")
 
+    /** `GET /v1/device/audio`: where this phone's replies are heard. */
+    suspend fun audioRoute(): AudioRoute = get(AudioRoute.serializer(), "device", "audio")
+
+    /** `GET /v1/audio?after=<id>`: clips meant for this phone it missed while no stream was open (last 15 minutes). */
+    suspend fun missedClips(after: String?): MissedClips = get(MissedClips.serializer(), "audio", query = mapOf("after" to after))
+
     // Acting
+
+    /** `PUT /v1/device/audio`: hear the replies to what this phone sends on the phone or on the Mac. */
+    suspend fun setAudioRoute(route: String): AudioRoute =
+        call(http, request(url("device", "audio")).put(json(AudioRoute.serializer(), AudioRoute(route))).build(), AudioRoute.serializer())
 
     suspend fun ask(text: String): AskResponse = post(AskResponse.serializer(), json(AskRequest.serializer(), AskRequest(text)), "ask")
 

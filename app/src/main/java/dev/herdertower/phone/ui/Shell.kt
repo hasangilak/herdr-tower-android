@@ -32,6 +32,8 @@ import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.ArrowForward
 import androidx.compose.material.icons.filled.Forum
+import androidx.compose.material.icons.filled.Computer
+import androidx.compose.material.icons.automirrored.filled.VolumeUp
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Timeline
 import androidx.compose.material.icons.filled.Workspaces
@@ -150,6 +152,34 @@ fun rememberPermissions(): Permissions {
     }
 }
 
+/** Where replies are heard, in words: for the status lines. */
+fun routeWords(route: String?, connected: Boolean): String = when {
+    route == "mac" -> "replies play on the Mac"
+    !connected -> "not connected: replies to you wait on the Mac for 15 minutes"
+    else -> "replies play on this phone"
+}
+
+/** The replies switch: this phone or the Mac. */
+@Composable
+fun RouteToggle(session: TowerSession, modifier: Modifier = Modifier, size: androidx.compose.ui.unit.Dp = 40.dp) {
+    val route by session.audioRoute.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val snack = LocalSnack.current
+    val onMac = route == "mac"
+    RoundIcon(
+        if (onMac) androidx.compose.material.icons.Icons.Filled.Computer else androidx.compose.material.icons.Icons.AutoMirrored.Filled.VolumeUp,
+        if (onMac) "Replies play on the Mac. Tap to hear them on this phone." else "Replies play on this phone. Tap to hear them on the Mac.",
+        modifier, size = size,
+    ) {
+        scope.launch {
+            val to = if (onMac) "phone" else "mac"
+            session.setAudioRoute(to)
+                .onSuccess { snack(if (to == "mac") "Replies play on the Mac" else "Replies play on this phone") }
+                .onFailure { snack("Couldn't switch: ${TowerSession.describe(it)}") }
+        }
+    }
+}
+
 /** Turns "the phone is the voice" on (with its permissions and service) or off. */
 fun setVoice(on: Boolean, session: TowerSession, perms: Permissions, context: Context) {
     if (!on) return session.setVoice(false)
@@ -244,11 +274,26 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
             val shots by session.screenshots.collectAsStateWithLifecycle()
             SheetRow(Icons.Filled.PhotoLibrary, "Screenshots", if (shots.isEmpty()) "What sessions show you" else plural(shots.size, "screenshot")) { onGo(Route.Screenshots()) }
             Spacer(Modifier.height(10.dp))
+            val route by session.audioRoute.collectAsStateWithLifecycle()
+            Text("Replies to what you send", style = MaterialTheme.typography.labelLarge, color = tc.faint)
+            Segments(Modifier.fillMaxWidth()) {
+                listOf("phone" to "This phone", "mac" to "The Mac").forEach { (r, label) ->
+                    Segment(label, (route ?: "phone") == r) {
+                        scope.launch { session.setAudioRoute(r).onFailure { e -> snack("Couldn't switch: ${TowerSession.describe(e)}") } }
+                    }
+                }
+            }
+            Text(
+                if (route == "mac") "The Mac speaks; the phone shows the text." else "Heard here while the app is open (or for 2 minutes after you send); the Mac stays silent for them.",
+                style = MaterialTheme.typography.bodySmall, color = tc.muted,
+            )
+            Spacer(Modifier.height(10.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Column(Modifier.weight(1f)) {
                     Text("Phone is the voice", style = MaterialTheme.typography.titleMedium, color = tc.text)
                     Text(
-                        if (voiceOn) "Replies play here and the Mac stays silent, also with the screen off." else "Off: the tower speaks on the Mac.",
+                        if (voiceOn) "Everything the tower says, alerts too, plays here, also with the screen off. The Mac stays silent."
+                        else "Off: alerts and the Mac's own turns are spoken on the Mac.",
                         style = MaterialTheme.typography.bodySmall, color = tc.muted,
                     )
                 }

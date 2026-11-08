@@ -111,6 +111,20 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     /** The Mac's name for greetings: what the user set, or a guess from its address. */
     val towerName: StateFlow<String> = _towerName.asStateFlow()
 
+    private val _route = MutableStateFlow<String?>(settings.audioRoute)
+    /** Where the replies to what this phone sends are heard: "phone" or "mac" (the Mac keeps it; this is its last known value). */
+    val audioRoute: StateFlow<String?> = _route.asStateFlow()
+
+    /** After this phone asks something, the stream stays open a while even in the background, so the reply isn't missed. */
+    private val _lingering = MutableStateFlow(false)
+    private var lingerJob: CoJob? = null
+    /** The last clip heard (or seen) here, to ask for what was missed after a gap. */
+    @Volatile private var lastClip: String? = settings.lastClip
+        set(v) {
+            field = v
+            settings.lastClip = v
+        }
+
     private val _foreground = MutableStateFlow(false)
     private val retryNow = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
     private var refreshJob: CoJob? = null
@@ -122,7 +136,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     init {
         _creds.value?.let { guessName(it.host) }
         scope.launch {
-            combine(_creds, _voiceOn, _foreground) { c, v, fg -> if (c == null) null else Want(c, v, fg) }
+            combine(_creds, _voiceOn, _foreground, _lingering) { c, v, fg, linger -> if (c == null) null else Want(c, v, fg || linger) }
                 .distinctUntilChanged()
                 .collectLatest { want ->
                     when {
@@ -240,7 +254,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
                 _history.value = merge(_history.value, listOf(ev.entry))
                 if (ev.entry.kind in setOf("job", "summary", "watch", "alert", "screenshot")) refreshSoon()
             }
-            is TowerEvent.Audio -> player.enqueue(ev.clip)
+            is TowerEvent.Audio -> {
+                lastClip = ev.clip.id
+                player.enqueue(ev.clip)
+            }
             TowerEvent.Hush -> player.hush()
             TowerEvent.Pause -> player.pause()
             TowerEvent.Resume -> player.resume()
@@ -252,6 +269,8 @@ class TowerSession(private val context: Context, private val store: CredentialSt
 
     private fun refreshAll() {
         scope.launch {
+            quietly { r -> setRouteLocal(r.audioRoute().route) }
+            catchUp()
             quietly { _history.value = merge(_history.value, it.history(limit = 150).entries) }
             refreshLists()
             quietly { _accounts.value = it.accounts() }
@@ -305,6 +324,43 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             _link.value = Link.Revoked(e.message)
         } catch (e: Exception) {
             Log.i(TAG, "refresh failed: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /**
+     * Clips meant for this phone that came while no stream was open: the
+     * recent ones are played (a reply just missed), older ones skipped (their
+     * text is in the chat; old speech out of the blue would confuse).
+     */
+    private suspend fun catchUp() {
+        val after = lastClip ?: return
+        quietly { c ->
+            val missed = c.missedClips(after).clips
+            val now = System.currentTimeMillis()
+            missed.lastOrNull()?.let { lastClip = it.id }
+            missed.filter { it.atMs == 0L || now - it.atMs < RECENT_MS }.forEach { player.enqueue(it) }
+        }
+    }
+
+    private fun setRouteLocal(route: String) {
+        _route.value = route
+        settings.audioRoute = route
+    }
+
+    /** Hear the replies to what this phone sends on the phone ("phone") or on the Mac ("mac"). */
+    suspend fun setAudioRoute(route: String): Result<Unit> {
+        val before = _route.value
+        setRouteLocal(route) // show it at once; the Mac's answer is the truth
+        return act { it.setAudioRoute(route) }.map { setRouteLocal(it.route) }.onFailure { if (before != null) setRouteLocal(before) }
+    }
+
+    /** Keep the stream open for a while after asking, even if the app goes to the background. */
+    fun linger() {
+        _lingering.value = true
+        lingerJob?.cancel()
+        lingerJob = scope.launch {
+            delay(LINGER_MS)
+            _lingering.value = false
         }
     }
 
@@ -377,6 +433,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         private const val TAG = "TowerSession"
         /** Seconds between reconnects, as the contract asks: 1, 2, 5, 10, then every 10. */
         val BACKOFF = intArrayOf(1, 2, 5, 10)
+        /** Missed clips younger than this are played on reconnect. */
+        const val RECENT_MS = 60_000L
+        /** How long the stream stays open after asking, with the app in the background. */
+        const val LINGER_MS = 120_000L
 
         fun defaultDeviceName(): String = Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android phone"
 
