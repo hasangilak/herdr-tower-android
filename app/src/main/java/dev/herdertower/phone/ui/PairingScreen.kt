@@ -57,17 +57,12 @@ import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import com.google.zxing.BarcodeFormat
-import com.google.zxing.BinaryBitmap
-import com.google.zxing.DecodeHintType
-import com.google.zxing.MultiFormatReader
-import com.google.zxing.PlanarYUVLuminanceSource
-import com.google.zxing.common.HybridBinarizer
 import dev.herdertower.phone.api.CertificateProbe
 import dev.herdertower.phone.api.Endpoint
 import dev.herdertower.phone.api.Fingerprint
 import dev.herdertower.phone.api.PairLink
 import dev.herdertower.phone.api.PairLinkException
+import dev.herdertower.phone.api.QrScan
 import dev.herdertower.phone.data.TowerSession
 import dev.herdertower.phone.orb.TowerOrb
 import kotlinx.coroutines.Dispatchers
@@ -174,10 +169,10 @@ private fun QrCamera(onText: (String) -> Boolean) {
             future.addListener({
                 val provider = future.get()
                 val preview = Preview.Builder().build().also { it.surfaceProvider = view.surfaceProvider }
-                val reader = MultiFormatReader().apply { setHints(mapOf(DecodeHintType.POSSIBLE_FORMATS to listOf(BarcodeFormat.QR_CODE))) }
+                val scan = QrScan()
                 val analysis = ImageAnalysis.Builder().setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST).build()
                 analysis.setAnalyzer(executor) { image ->
-                    val text = decode(reader, image)
+                    val text = decode(scan, image)
                     image.close()
                     if (text != null && !done) main.execute { if (!done && onText(text)) done = true }
                 }
@@ -193,7 +188,7 @@ private fun QrCamera(onText: (String) -> Boolean) {
     )
 }
 
-private fun decode(reader: MultiFormatReader, image: ImageProxy): String? {
+private fun decode(scan: QrScan, image: ImageProxy): String? {
     val plane = image.planes[0]
     val w = image.width
     val h = image.height
@@ -204,13 +199,7 @@ private fun decode(reader: MultiFormatReader, image: ImageProxy): String? {
         buf.position(row * stride)
         buf.get(y, row * w, w)
     }
-    return try {
-        reader.decodeWithState(BinaryBitmap(HybridBinarizer(PlanarYUVLuminanceSource(y, w, h, 0, 0, w, h, false)))).text
-    } catch (e: Exception) {
-        null
-    } finally {
-        reader.reset()
-    }
+    return scan.decode(y, w, h)
 }
 
 @Composable
