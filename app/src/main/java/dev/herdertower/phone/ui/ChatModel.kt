@@ -54,7 +54,7 @@ object ChatModel {
             else -> m.kind ?: m.role
         },
         session = m.session, name = m.name, account = m.account, status = m.status,
-        text = m.text, attachments = m.attachments, id = m.id,
+        text = m.text, attachments = m.attachmentPaths(), id = m.id,
     )
 
     /** A message sent from here, shown until the thread brings it back. */

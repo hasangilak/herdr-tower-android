@@ -21,7 +21,7 @@ object ChatApi {
         }
         val messages = (list as? JsonArray).orEmpty().mapNotNull { runCatching { TowerJson.decodeFromJsonElement(ChatMessage.serializer(), it) }.getOrNull() }
         val more = (e as? JsonObject)?.get("more")?.let { runCatching { it.toString().toBooleanStrict() }.getOrNull() }
-        return ChatPage(messages.sortedBy { it.at }, more)
+        return ChatPage(messages.sortedWith(ORDER), more)
     }
 
     fun message(data: String): ChatMessage {
@@ -30,10 +30,13 @@ object ChatApi {
         return TowerJson.decodeFromJsonElement(ChatMessage.serializer(), obj)
     }
 
+    /** The tower's order: by `h<line>`, by time for messages without one. */
+    private val ORDER = compareBy<ChatMessage>({ if (it.line == Long.MAX_VALUE) 1 else 0 }, { it.line }, { it.at })
+
     /** Merges messages into the thread: by id (a later copy replaces an earlier), oldest first. */
     fun merge(thread: List<ChatMessage>, more: List<ChatMessage>): List<ChatMessage> {
         val byId = LinkedHashMap<String, ChatMessage>()
         (thread + more).forEach { m -> byId[m.id.ifBlank { "${m.at}:${m.role}:${m.text.hashCode()}" }] = m }
-        return byId.values.sortedBy { it.at }.takeLast(1000)
+        return byId.values.sortedWith(ORDER).takeLast(1000)
     }
 }

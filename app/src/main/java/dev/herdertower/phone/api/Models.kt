@@ -300,7 +300,9 @@ data class ChatMessage(
     val role: String = "",
     val text: String = "",
     val source: String? = null,
-    val attachments: List<String> = emptyList(),
+    /** The files for its `#n` tokens: `{n, kind, name, path, url}` (or bare paths). */
+    val attachments: List<JsonElement> = emptyList(),
+    @kotlinx.serialization.SerialName("updated_at") val updatedAt: Long = 0,
     /** Screenshots shown with it: ids, or whole screenshot objects. */
     val screenshots: List<JsonElement> = emptyList(),
     val session: String? = null,
@@ -311,6 +313,24 @@ data class ChatMessage(
 ) {
     val mine: Boolean get() = role == "user" || role == "you" || role == "request"
     val fromTower: Boolean get() = role == "tower" || role == "assistant" || role == "answer"
+
+    /** Its place in the thread: the line of `h<line>`, so the thread is in the tower's order. */
+    val line: Long get() = id.removePrefix("h").toLongOrNull() ?: Long.MAX_VALUE
+
+    /** The attachments' paths on the Mac, in token order (`attachments[n-1]` is token `#n`). */
+    fun attachmentPaths(): List<String> = attachments.mapIndexedNotNull { i, e ->
+        when (e) {
+            is kotlinx.serialization.json.JsonPrimitive -> (i + 1) to e.content
+            is kotlinx.serialization.json.JsonObject -> {
+                val n = (e["n"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: (i + 1)
+                val path = (e["path"] as? kotlinx.serialization.json.JsonPrimitive)?.content
+                    ?: (e["url"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.takeIf { it != "null" }
+                    ?: ""
+                n to path
+            }
+            else -> null
+        }
+    }.sortedBy { it.first }.map { it.second }
 
     /** The screenshots as objects the gallery and viewer can show. */
     fun shots(): List<Screenshot> = screenshots.mapNotNull { e ->

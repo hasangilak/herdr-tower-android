@@ -53,4 +53,33 @@ class ChatApiTest {
         assertEquals("t1", report.session)
         assertTrue(ChatMessage("x", 1, "you", "").mine)
     }
+
+    /** The message exactly as docs/mobile-api.md shows it. */
+    @Test fun readsTheTowersMessage() {
+        val page = ChatApi.page(
+            """{"messages":[{"id":"h812","at":1794158000000,"updated_at":1794158000000,"role":"user","kind":"request",
+            "text":"[Image #1] [File #2: notes.pdf] compare these","source":"phone:d_9fce5c6c",
+            "attachments":[{"n":1,"kind":"image","name":"1-login.png","path":"/x/attachments/1794-phone/1-login.png","url":"/v1/attachments/1794-phone/1-login.png"},
+            {"n":2,"kind":"file","name":"2-notes.pdf","path":"/x/attachments/1794-phone/2-notes.pdf","url":null}],"screenshots":[]},
+            {"id":"h813","at":1794158000000,"updated_at":1794158060000,"role":"screenshots","kind":"screenshot","text":"","session":"t5","name":"web",
+            "screenshots":[{"id":"s1.png","caption":"Login","session":"t5","name":"web","account":"main","at":1,"url":"/v1/screenshots/s1.png"}]}],"more":true}""",
+        )
+        assertEquals(true, page.more)
+        val (ask, card) = page.messages
+        assertTrue(ask.mine)
+        assertEquals(listOf("/x/attachments/1794-phone/1-login.png", "/x/attachments/1794-phone/2-notes.pdf"), ask.attachmentPaths())
+        assertEquals(ChatModel.entry(ask).attachments, ask.attachmentPaths())
+        assertEquals("screenshot", ChatModel.entry(card).kind)
+        assertEquals("Login", card.shots().single().caption)
+        assertEquals(1794158060000, card.updatedAt)
+    }
+
+    @Test fun theThreadIsInTheTowersOrder() {
+        val a = ChatMessage("h9", 500, "user", "a")
+        val b = ChatMessage("h10", 400, "tower", "b") // later line, earlier clock: still after
+        val merged = ChatApi.merge(listOf(b), listOf(a))
+        assertEquals(listOf("h9", "h10"), merged.map { it.id })
+        val grown = ChatApi.merge(merged, listOf(ChatApi.message("""{"op":"update","message":{"id":"h9","at":500,"role":"user","text":"a2"}}""")))
+        assertEquals(listOf("a2", "b"), grown.map { it.text })
+    }
 }

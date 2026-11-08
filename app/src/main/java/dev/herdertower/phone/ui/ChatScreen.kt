@@ -114,14 +114,16 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
             kotlinx.coroutines.delay(1000)
         }
     }
-    val work = state?.work?.takeIf { link is Link.Live && ChatModel.showWork(it, history, now) }
-        ?: if (thinking && since > 0) dev.herdertower.phone.api.Work("Thinking", "", since, since, 0) else null
     var viewing by remember { mutableStateOf<Pair<List<Pic>, Int>?>(null) }
 
     val pendingSent by composer.pending.collectAsStateWithLifecycle()
     // The tower's thread when it has one (the same as the Mac panel's); otherwise the history.
     val useThread = threadOn == true
     val entries = remember(useThread, thread, history) { if (useThread) thread.map(ChatModel::entry) else history }
+    val work = state?.work?.takeIf { link is Link.Live && ChatModel.showWork(it, entries, now) }
+        ?: if (thinking && since > 0) dev.herdertower.phone.api.Work("Thinking", "", since, since, 0) else null
+    // The reply in progress: what the tower says this turn, until the answer lands on the thread.
+    val saying = state?.takeIf { work != null && it.said.isNotBlank() && it.saidMs >= work.sinceMs }?.said
     val shotsById = remember(thread) { thread.associate { it.id to it.shots() } }
     val waiting = remember(pendingSent, thread, now) { if (useThread) ChatModel.unmatched(pendingSent, thread, now) else emptyList() }
 
@@ -132,6 +134,7 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
         pending = waiting,
         canLoadMore = if (useThread) threadMore else history.isNotEmpty(),
         work = work,
+        saying = saying,
         now = now,
         accounts = acc,
         onClose = onClose,
@@ -233,6 +236,8 @@ fun ChatContent(
     now: Long,
     accounts: AccountLookup,
     onClose: () -> Unit,
+    /** What the tower is saying this turn, before its answer lands. */
+    saying: String? = null,
     onLoadOlder: () -> Unit,
     onOpen: (String) -> Unit,
     onShot: (String) -> Unit = {},
@@ -264,8 +269,8 @@ fun ChatContent(
     val working = work != null
     // New at the end (a message, the working line, something sent): follow it. Older ones loaded at the top don't move the view.
     val lastKey = (rows.lastOrNull() as? ChatRow.Item)?.e?.let { "${it.at}${it.text.length}" }
-    LaunchedEffect(lastKey, working, pending.size) {
-        if (rows.isNotEmpty()) list.animateScrollToItem(rows.size + pending.size + (if (working) 1 else 0))
+    LaunchedEffect(lastKey, working, pending.size, saying?.length) {
+        if (rows.isNotEmpty()) list.animateScrollToItem(rows.size + pending.size + (if (working) 1 else 0) + (if (saying != null) 1 else 0))
     }
     // Scrolled to the top: load the older messages.
     val atTop by remember { androidx.compose.runtime.derivedStateOf { list.firstVisibleItemIndex == 0 && list.layoutInfo.totalItemsCount > 1 } }
@@ -294,7 +299,7 @@ fun ChatContent(
                     }
                 }
             }
-            items(rows, key = { r -> when (r) { is ChatRow.Day -> "d" + r.label; is ChatRow.Item -> "e${r.e.at}${r.e.kind}${r.e.text.hashCode()}" } }) { r ->
+            items(rows, key = { r -> when (r) { is ChatRow.Day -> "d" + r.label; is ChatRow.Item -> r.e.id?.let { "i$it" } ?: "e${r.e.at}${r.e.kind}${r.e.text.hashCode()}" } }) { r ->
                 when (r) {
                     is ChatRow.Day -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Text(r.label, style = MaterialTheme.typography.labelSmall, color = tc.faint)
@@ -311,7 +316,8 @@ fun ChatContent(
                 }
             }
             items(pending, key = { "pending${it.atMs}" }) { p -> PendingBubble(p) }
-            if (work != null) item { WorkingLine(work, now) }
+            if (saying != null) item(key = "saying") { ReplyBubble(HistoryEntry(at = now, kind = "answer", text = saying)) }
+            if (work != null) item(key = "working") { WorkingLine(work, now) }
         }
         inputBar()
     }
