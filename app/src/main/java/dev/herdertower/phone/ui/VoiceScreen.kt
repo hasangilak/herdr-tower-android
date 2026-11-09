@@ -134,7 +134,7 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
         phase == Phase.Sending -> (heard?.text ?: "…") to 0f
         towerText != null -> towerText to progress
         heard != null && (s?.saidMs ?: 0) < (heard?.atMs ?: 0) -> heard!!.text.ifBlank { "…" } to 1f
-        !s?.said.isNullOrBlank() -> s!!.said to 1f
+        !s?.said.isNullOrBlank() -> s.said to 1f
         else -> "Hold the button and talk, or tap it once." to 0f
     }
 
@@ -161,6 +161,13 @@ fun VoiceScreen(session: TowerSession, voice: VoiceController, startListening: B
             )
         }
         Text(statusLine, Modifier.semantics { liveRegion = LiveRegionMode.Polite }, style = MaterialTheme.typography.bodyMedium, color = tc.faint)
+        // Muted, the tower hears you but says nothing: say so here, where you talk to it, with the way back.
+        val mute = LocalMute.current
+        if (mute.muted) {
+            androidx.compose.material3.TextButton(onClick = mute.toggle, enabled = mute.enabled, modifier = Modifier.heightIn(min = 48.dp)) {
+                Text("The tower is muted: it says nothing out loud. Unmute", color = tc.blocked, textAlign = TextAlign.Center)
+            }
+        }
         // About to send after a pause: show it, so a thought mid-sentence isn't cut off. Talking again resets it.
         if (recording && pause > 0f && !waiting) SendingSoon(pause) { voice.keepListening() }
         Spacer(Modifier.height(18.dp))
@@ -256,8 +263,13 @@ private fun TalkButton(voice: VoiceController, perms: Permissions, recording: Bo
                             return@detectTapGestures
                         }
                         voice.press()
-                        tryAwaitRelease()
-                        voice.release()
+                        // Also when the gesture is cut short (the screen recreated, the button disabled):
+                        // otherwise the hold would record until the 115 s cap and send it all.
+                        try {
+                            tryAwaitRelease()
+                        } finally {
+                            voice.release()
+                        }
                     })
                 },
             contentAlignment = Alignment.Center,

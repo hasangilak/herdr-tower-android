@@ -11,7 +11,6 @@ import kotlinx.serialization.json.buildJsonArray
 import kotlinx.serialization.json.buildJsonObject
 import kotlinx.serialization.json.contentOrNull
 import kotlinx.serialization.json.intOrNull
-import kotlinx.serialization.json.jsonPrimitive
 import kotlinx.serialization.json.put
 
 /** One option of a question, as the session's dialog shows it. */
@@ -130,7 +129,7 @@ sealed interface Choice {
         fun parse(e: JsonElement): Choice? = when (e) {
             is JsonPrimitive -> e.intOrNull?.let(::Pick)
             is JsonObject -> {
-                val opts = (e["options"] as? JsonArray)?.mapNotNull { it.jsonPrimitive.intOrNull }
+                val opts = (e["options"] as? JsonArray)?.mapNotNull { (it as? JsonPrimitive)?.intOrNull }
                 val other = (e["other"] as? JsonPrimitive)?.takeIf { it !is JsonNull }?.contentOrNull
                 val spoken = (e["spoken"] as? JsonPrimitive)?.contentOrNull
                 when {

@@ -5,6 +5,7 @@ import android.content.SharedPreferences
 import android.security.keystore.KeyGenParameterSpec
 import android.security.keystore.KeyProperties
 import android.util.Base64
+import androidx.core.content.edit
 import dev.herdertower.phone.api.Endpoint
 import java.security.KeyStore
 import javax.crypto.Cipher
@@ -54,18 +55,18 @@ class KeystoreCredentialStore(context: Context) : CredentialStore {
     }
 
     override fun save(c: Credentials) {
-        prefs.edit()
-            .putString("host", c.host)
-            .putInt("port", c.port)
-            .putString("fingerprint", c.fingerprint)
-            .putString("token", seal(c.token))
-            .putString("device_id", c.deviceId)
-            .putString("device_name", c.deviceName)
-            .apply()
+        prefs.edit {
+            putString("host", c.host)
+            putInt("port", c.port)
+            putString("fingerprint", c.fingerprint)
+            putString("token", seal(c.token))
+            putString("device_id", c.deviceId)
+            putString("device_name", c.deviceName)
+        }
     }
 
     override fun clear() {
-        prefs.edit().clear().apply()
+        prefs.edit { clear() }
         runCatching { keystore().deleteEntry(ALIAS) }
     }
 
@@ -111,35 +112,40 @@ class Settings(context: Context) {
     /** "system", "dark" or "light". */
     var theme: String
         get() = prefs.getString("theme", "system") ?: "system"
-        set(v) = prefs.edit().putString("theme", v).apply()
+        set(v) = prefs.edit { putString("theme", v) }
 
     /** What the user calls this tower (the API has no Mac name); empty: not set. */
     var towerName: String
         get() = prefs.getString("tower_name", "") ?: ""
-        set(v) = prefs.edit().putString("tower_name", v).apply()
+        set(v) = prefs.edit { putString("tower_name", v) }
 
     /** The last known audio route ("phone" or "mac"), until the Mac says. */
     var audioRoute: String?
         get() = prefs.getString("audio_route", null)
-        set(v) = prefs.edit().putString("audio_route", v).apply()
+        set(v) = prefs.edit { putString("audio_route", v) }
 
     /** The last reply clip this phone got (to fetch what it missed). */
     var lastClip: String?
         get() = prefs.getString("last_clip", null)
-        set(v) = prefs.edit().putString("last_clip", v).apply()
+        set(v) = prefs.edit { putString("last_clip", v) }
 
     /** How the orb is drawn: "auto" (what the probe found) or a tier's name. */
     var orbTier: String
         get() = prefs.getString("orb_tier", "auto") ?: "auto"
-        set(v) = prefs.edit().putString("orb_tier", v).apply()
+        set(v) = prefs.edit { putString("orb_tier", v) }
 
     /** Whether saying "stop" while the tower talks on the phone stops it. */
     var hushWord: Boolean
         get() = prefs.getBoolean("hush_word", true)
-        set(v) = prefs.edit().putBoolean("hush_word", v).apply()
+        set(v) = prefs.edit { putBoolean("hush_word", v) }
+
+    /** Whether the app asked for notifications (Android 13+) once questions came up: asked once, not on every launch. */
+    var askedNotifications: Boolean
+        get() = prefs.getBoolean("asked_notifications", false)
+        set(v) = prefs.edit { putBoolean("asked_notifications", v) }
 
     /** Whether the phone should be the tower's voice (restored on launch). */
     var voice: Boolean
         get() = prefs.getBoolean("voice", false)
-        set(v) = prefs.edit().putBoolean("voice", v).apply()
+        set(v) = prefs.edit { putBoolean("voice", v) }
 }

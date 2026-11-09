@@ -1,6 +1,8 @@
 package dev.herdertower.phone.api
 
 import kotlinx.coroutines.flow.toList
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
 import kotlinx.coroutines.runBlocking
 import mockwebserver3.MockResponse
 import mockwebserver3.MockWebServer
@@ -312,7 +314,7 @@ class TowerClientTest {
     @Test fun aStoppedAnswerSaysWhere() = runBlocking {
         server.enqueue(json("""{"error":{"code":"changed","message":"the dialog moved on"}}""", 409))
         val e = runCatching { client().answerQuestion("q1", listOf(TabAnswer(0, Choice.Pick(0)))) }.exceptionOrNull()
-        assertTrue(e is TowerApiException && e.code == "changed" && e.message!!.contains("moved on"))
+        assertTrue(e is TowerApiException && e.code == "changed" && e.message.contains("moved on"))
     }
 
     @Test fun questionPolicyAndVoice() = runBlocking {
@@ -347,7 +349,7 @@ class TowerClientTest {
         assertEquals("/v1/behaviors/x/preview", taken().url.encodedPath)
         server.enqueue(json("""{"error":{"code":"behavior","message":"nothing to undo"}}""", 400))
         val e = runCatching { client().undoBehavior() }.exceptionOrNull()
-        assertTrue(e is TowerApiException && e.message!!.contains("nothing to undo"))
+        assertTrue(e is TowerApiException && e.message.contains("nothing to undo"))
         server.enqueue(json("""{"changes":[{"at":2,"op":"edit","id":"x","title":"T","by":"brain","diff":""}]}"""))
         assertEquals("brain", client().behaviorHistory(10).single().by)
         assertEquals("limit=10", taken().let { taken() }.url.encodedQuery)
@@ -425,5 +427,27 @@ class TowerClientTest {
 
     @Test fun theProbeReadsTheFingerprintForManualPairing() {
         assertEquals(fp, CertificateProbe.fingerprint(server.hostName, server.port))
+    }
+
+    @Test fun mutesTheWholeTowerAndReadsItBack() = runBlocking {
+        server.enqueue(json("""{"muted": true}"""))
+        assertTrue(client().setMuted(true).muted)
+        val req = taken()
+        assertEquals("POST", req.method)
+        assertEquals("/v1/mute", req.url.encodedPath)
+        assertEquals("""{"muted":true}""", req.body!!.utf8())
+        // The state carries it, and an older tower without it reads as not muted.
+        assertTrue(TowerJson.decodeFromString(TowerState.serializer(), """{"phase": "idle", "muted": true}""").muted)
+        assertEquals(false, TowerJson.decodeFromString(TowerState.serializer(), """{"phase": "idle"}""").muted)
+    }
+
+    @Test fun cancellingACallCancelsTheRequest() = runBlocking {
+        // The tower takes its time: a cancelled caller mustn't wait for it (nor leave the request running).
+        server.enqueue(MockResponse.Builder().headersDelay(10, TimeUnit.SECONDS).addHeader("Content-Type", "application/json").body("{}").build())
+        val job = launch(kotlinx.coroutines.Dispatchers.IO) { client().hello() }
+        taken()
+        val t0 = System.currentTimeMillis()
+        kotlinx.coroutines.withTimeout(3_000) { job.cancelAndJoin() }
+        assertTrue("cancel took ${System.currentTimeMillis() - t0} ms", System.currentTimeMillis() - t0 < 3_000)
     }
 }

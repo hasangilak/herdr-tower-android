@@ -4,6 +4,12 @@ import java.net.URLDecoder
 
 /** What the pairing QR (`herdertower://pair?h=&p=&c=&fp=`) carries. */
 data class PairLink(val host: String, val port: Int, val code: String, val fingerprint: String) {
+    /** Back to a `herdertower://pair` link that [parse] reads (to keep it across a recreate). */
+    fun toLink(): String {
+        fun enc(v: String) = java.net.URLEncoder.encode(v, "UTF-8")
+        return "$SCHEME://pair?h=${enc(host)}&p=$port&c=$code&fp=$fingerprint"
+    }
+
     companion object {
         const val SCHEME = "herdertower"
         const val DEFAULT_PORT = 7843
@@ -40,7 +46,8 @@ data class PairLink(val host: String, val port: Int, val code: String, val finge
         /** The 8-digit code; tolerates spaces or dashes the user typed. */
         fun validCode(raw: String?): String? = raw?.filter { it.isDigit() }?.takeIf { it.length == 8 && raw.all { c -> c.isDigit() || c == ' ' || c == '-' } }
 
-        private fun decode(s: String): String = URLDecoder.decode(s, Charsets.UTF_8)
+        // The String overload: the Charset one needs Android 13 (API 33).
+        private fun decode(s: String): String = URLDecoder.decode(s, "UTF-8")
     }
 }
 

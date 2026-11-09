@@ -1,6 +1,7 @@
 package dev.herdertower.phone.ui
 
 import androidx.compose.foundation.background
+import androidx.compose.animation.animateContentSize
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -89,6 +90,8 @@ data class HomeUi(
     val focus: String?,
     val spaces: List<String>,
     val voiceOn: Boolean,
+    /** A session or the brain waits for the user (the status dot turns red). */
+    val needsYou: Boolean = false,
 )
 
 @Composable
@@ -144,6 +147,7 @@ fun HomeScreen(
         focus = spaces.focus,
         spaces = spaces.spaces.map { it.space },
         voiceOn = voiceOn,
+        needsYou = HomeModel.needsYou(connected, s?.phase, blocked.size),
     )
 
     /** A suggestion's question, sent as it is (the draft stays). */
@@ -225,8 +229,8 @@ fun HomeContent(
     GlassScaffold(header = {
         // The tower, how it is: where the other screens have Close.
         Box(Modifier.size(48.dp), contentAlignment = Alignment.Center) {
-            OrbGlyph(Modifier.size(34.dp).semantics { contentDescription = if (ui.connected) "Tower, connected" else "Tower, not connected" })
-            Dot(if (ui.connected) tc.working else tc.idle, 10.dp, Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp).border(2.dp, tc.bgTop, CircleShape))
+            MuteOrb(34.dp, status = if (ui.connected) "Tower, connected. " else "Tower, not connected. ")
+            Dot(if (ui.connected) tc.working else tc.idle, size = 10.dp, modifier = Modifier.align(Alignment.BottomEnd).padding(end = 4.dp, bottom = 4.dp).border(2.dp, tc.bgTop, CircleShape))
         }
         if (anyActive) Box(Modifier.weight(1f).padding(start = 4.dp, end = 4.dp)) { activePills(Modifier.fillMaxWidth()) }
         else androidx.compose.foundation.layout.BoxWithConstraints(Modifier.weight(1f).padding(horizontal = 6.dp)) {
@@ -241,13 +245,15 @@ fun HomeContent(
             }
         }
         HeaderButton(Icons.Filled.Notifications, "Activity", badge = ui.alerts, onClick = onAlerts)
+        Spacer(Modifier.width(4.dp))
         HeaderButton(Icons.Filled.Menu, "Menu", onClick = onMenu)
         StopSlot()
     }) {
     Column(Modifier.fillMaxSize().navigationBarsPadding().imePadding()) {
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState())) {
             Spacer(Modifier.height(headerTop() + 10.dp))
-            Box(Modifier.padding(horizontal = 20.dp, vertical = 8.dp)) { notice() }
+            // Grows and shrinks instead of jumping when the connection card comes or goes.
+            Box(Modifier.animateContentSize().padding(horizontal = 20.dp, vertical = 8.dp)) { notice() }
             Spacer(Modifier.height(28.dp))
             Text(
                 "What should the tower do?",
@@ -256,7 +262,7 @@ fun HomeContent(
             )
             Row(Modifier.padding(horizontal = 24.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
                 val (_, color) = phaseWord(if (ui.connected) "idle" else null)
-                Dot(if (ui.needsLine.contains("need")) tc.blocked else color, 7.dp)
+                Dot(if (ui.needsYou) tc.blocked else color, size = 7.dp)
                 Spacer(Modifier.width(8.dp))
                 Text(ui.statusLine, style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             }
@@ -281,7 +287,7 @@ fun HomeContent(
                         .padding(4.dp),
                     verticalAlignment = Alignment.Top,
                 ) {
-                    OrbGlyph(Modifier.padding(top = 2.dp).size(22.dp))
+                    OrbGlyph(Modifier.padding(top = 2.dp).size(22.dp), muted = LocalMute.current.muted)
                     Spacer(Modifier.width(10.dp))
                     Column(Modifier.weight(1f)) {
                         Text("Last reply · ${ago(e.at)}", style = MaterialTheme.typography.labelMedium, color = tc.faint)
@@ -362,17 +368,23 @@ fun AskBox(
 fun FocusPill(focus: String?, spaces: List<String>, onFocus: (String?) -> Unit, modifier: Modifier = Modifier) {
     var open by remember { mutableStateOf(false) }
     Box(modifier) {
+        // 48dp to touch, the pill drawn smaller inside.
+        Box(
+            Modifier.heightIn(min = 48.dp).clip(CircleShape)
+                .clickable(role = Role.DropdownList, onClickLabel = "Choose the focused space") { open = true },
+            contentAlignment = Alignment.Center,
+        ) {
         Row(
             Modifier
                 .clip(CircleShape)
                 .background(tc.card)
                 .border(1.dp, tc.edge, CircleShape)
-                .clickable(role = Role.DropdownList, onClickLabel = "Choose the focused space") { open = true }
                 .padding(start = 14.dp, end = 10.dp, top = 9.dp, bottom = 9.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
             Text(focus ?: "All spaces", style = MaterialTheme.typography.labelLarge, color = tc.text, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f, fill = false).widthIn(max = 150.dp))
             Icon(Icons.Filled.KeyboardArrowDown, null, Modifier.size(18.dp), tint = tc.muted)
+        }
         }
         DropdownMenu(open, { open = false }) {
             DropdownMenuItem(text = { Text("All spaces (no focus)") }, onClick = { open = false; onFocus(null) })

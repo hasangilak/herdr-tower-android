@@ -71,14 +71,17 @@ object QuestionModel {
     /** The questions still without an answer. */
     fun missing(q: Question, drafts: Map<Int, TabDraft>): List<Int> = q.tabs.indices.filter { t -> choice(q.tabs[t], drafts[t] ?: TabDraft()) == null }
 
-    /** What to send, or null while a question has no answer. */
+    /** What to send, or null while a question has no answer (or the set has no questions to answer here). */
     fun answers(q: Question, drafts: Map<Int, TabDraft>): List<TabAnswer>? {
-        if (missing(q, drafts).isNotEmpty()) return null
+        if (q.tabs.isEmpty() || missing(q, drafts).isNotEmpty()) return null
         return q.tabs.indices.map { t ->
             val d = drafts[t] ?: TabDraft()
             TabAnswer(t, choice(q.tabs[t], d)!!, if (d.other.isNotBlank()) d.files else emptyList())
         }
     }
+
+    /** Where the stepper is: [step] kept within the set's questions and its review (it may have shrunk). */
+    fun clampStep(q: Question, step: Int): Int = step.coerceIn(0, steps(q) - 1)
 
     /** The steps of the stepper: one per question, then the review (a one-question set is reviewed on its own page). */
     fun steps(q: Question): Int = if (q.tabs.size > 1) q.tabs.size + 1 else 1

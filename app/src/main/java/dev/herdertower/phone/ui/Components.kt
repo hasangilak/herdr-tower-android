@@ -37,7 +37,7 @@ import java.util.Date
 import java.util.Locale
 
 @Composable
-fun Dot(color: Color, size: Dp = 8.dp, modifier: Modifier = Modifier) {
+fun Dot(color: Color, modifier: Modifier = Modifier, size: Dp = 8.dp) {
     Box(modifier.size(size).clip(CircleShape).background(color))
 }
 
@@ -76,7 +76,7 @@ fun SpaceAccountBadge(accounts: List<String>, default: String?) {
             horizontalArrangement = Arrangement.spacedBy(4.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            distinct.take(3).forEach { Dot(if (it == default) tc.muted else Color(0xFF000000 or AccountHue.of(it)), 5.dp) }
+            distinct.take(3).forEach { Dot(if (it == default) tc.muted else Color(0xFF000000 or AccountHue.of(it)), size = 5.dp) }
             Text("mixed", style = MaterialTheme.typography.labelSmall, color = tc.muted)
         }
     }
@@ -107,7 +107,7 @@ fun RoundIcon(icon: ImageVector, label: String, modifier: Modifier = Modifier, b
 
 /** The copper pill at the top of the voice and chat screens. */
 @Composable
-fun ClosePill(text: String = "Close", modifier: Modifier = Modifier, onClick: () -> Unit) {
+fun ClosePill(modifier: Modifier = Modifier, text: String = "Close", onClick: () -> Unit) {
     Row(
         modifier
             .clip(CircleShape)

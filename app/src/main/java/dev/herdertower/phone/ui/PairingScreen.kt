@@ -10,6 +10,7 @@ import androidx.camera.core.ImageProxy
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -48,7 +49,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
+import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.ImeAction
@@ -70,13 +71,19 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import java.util.concurrent.Executors
 
+/** Where a pairing came from: the QR scanned in the app is trusted as it is; a link from outside, or one typed by hand, is compared by eye. */
+private enum class Source { Qr, Link, Manual }
+
 /** What the user is pairing with, once the fingerprint is known. */
-private data class Candidate(val host: String, val port: Int, val code: String, val fingerprint: String, val fromQr: Boolean)
+private data class Candidate(val host: String, val port: Int, val code: String, val fingerprint: String, val source: Source)
 
 @Composable
 fun PairingScreen(session: TowerSession, initial: PairLink?, onCancel: (() -> Unit)?) {
-    var candidate by remember(initial) { mutableStateOf(initial?.let { Candidate(it.host, it.port, it.code, it.fingerprint, true) }) }
+    // A link that opened the app may come from any web page or app, not only the Mac's QR: its fingerprint is compared by eye.
+    var candidate by remember(initial) { mutableStateOf(initial?.let { Candidate(it.host, it.port, it.code, it.fingerprint, Source.Link) }) }
     var tab by rememberSaveable { mutableStateOf(0) }
+    // Android 17+: pairing is a connection to the Mac on the local network, which needs this permission first.
+    val localNet = rememberLocalNetwork(askNow = true)
 
     Backdrop("idle", false) {
     Box(Modifier.fillMaxSize().safeDrawingPadding().imePadding()) {
@@ -93,6 +100,7 @@ fun PairingScreen(session: TowerSession, initial: PairLink?, onCancel: (() -> Un
                 }
                 if (onCancel != null) TextButton(onClick = onCancel) { Text("Cancel") }
             }
+            LocalNetworkNotice(localNet)
             val c = candidate
             if (c != null) {
                 Confirm(session, c, onBack = { candidate = null })
@@ -102,7 +110,7 @@ fun PairingScreen(session: TowerSession, initial: PairLink?, onCancel: (() -> Un
                     Segment("Enter by hand", tab == 1) { tab = 1 }
                 }
                 if (tab == 0) {
-                    Scan(onLink = { candidate = Candidate(it.host, it.port, it.code, it.fingerprint, true) })
+                    Scan(onLink = { candidate = Candidate(it.host, it.port, it.code, it.fingerprint, Source.Qr) })
                 } else {
                     Manual(onProbed = { candidate = it })
                 }
@@ -159,7 +167,19 @@ private fun QrCamera(onText: (String) -> Boolean) {
     val executor = remember { Executors.newSingleThreadExecutor() }
     val main = remember { ContextCompat.getMainExecutor(context) }
     var done by remember { mutableStateOf(false) }
-    DisposableEffect(Unit) { onDispose { executor.shutdown() } }
+    // The camera is bound to the activity's lifecycle: unbind it when the scanner leaves (a code found, the other tab),
+    // or it stays open (and its indicator on) until the app goes to the background.
+    var bound by remember { mutableStateOf<Pair<ProcessCameraProvider, List<androidx.camera.core.UseCase>>?>(null) }
+    DisposableEffect(Unit) {
+        onDispose {
+            bound?.let { (provider, cases) ->
+                (cases.firstOrNull { it is ImageAnalysis } as? ImageAnalysis)?.clearAnalyzer()
+                runCatching { provider.unbind(*cases.toTypedArray()) }
+            }
+            bound = null
+            executor.shutdown()
+        }
+    }
 
     AndroidView(
         modifier = Modifier.fillMaxSize(),
@@ -176,12 +196,13 @@ private fun QrCamera(onText: (String) -> Boolean) {
                     image.close()
                     if (text != null && !done) main.execute { if (!done && onText(text)) done = true }
                 }
+                if (executor.isShutdown) return@addListener // the scanner left before the camera was ready
                 runCatching {
                     provider.unbindAll()
                     provider.bindToLifecycle(owner, CameraSelector.DEFAULT_BACK_CAMERA, preview, analysis)
                 }.recoverCatching {
                     provider.bindToLifecycle(owner, CameraSelector.DEFAULT_FRONT_CAMERA, preview, analysis)
-                }
+                }.onSuccess { bound = provider to listOf(preview, analysis) }
             }, main)
             view
         },
@@ -212,7 +233,7 @@ private fun Manual(onProbed: (Candidate) -> Unit) {
     val scope = rememberCoroutineScope()
 
     Text(
-        "Type the address and code `tower phone pair` printed. The app then shows the certificate's fingerprint for you to compare with the Mac's.",
+        "Type the address and code “tower phone pair” printed. The app then shows the certificate's fingerprint for you to compare with the Mac's.",
         style = MaterialTheme.typography.bodyMedium, color = tc.muted,
     )
     OutlinedTextField(
@@ -245,9 +266,9 @@ private fun Manual(onProbed: (Candidate) -> Unit) {
             scope.launch {
                 try {
                     val fp = withContext(Dispatchers.IO) { CertificateProbe.fingerprint(h!!, p!!) }
-                    onProbed(Candidate(h!!, p!!, c!!, fp, fromQr = false))
+                    onProbed(Candidate(h!!, p!!, c!!, fp, Source.Manual))
                 } catch (e: Exception) {
-                    error = "Couldn't reach $h:$p (${e.message ?: e.javaClass.simpleName}). Is `tower phone enable` on, and the phone on the same network?"
+                    error = "Couldn't reach $h:$p (${e.message ?: e.javaClass.simpleName}). Is “tower phone enable” on, and the phone on the same network?"
                 } finally {
                     busy = false
                 }
@@ -263,7 +284,8 @@ private fun Manual(onProbed: (Candidate) -> Unit) {
 @Composable
 private fun Confirm(session: TowerSession, c: Candidate, onBack: () -> Unit) {
     var name by rememberSaveable { mutableStateOf(TowerSession.defaultDeviceName()) }
-    var matches by remember { mutableStateOf(c.fromQr) }
+    var matches by remember(c) { mutableStateOf(c.source == Source.Qr) }
+    val paired by session.credentials.collectAsStateWithLifecycle()
     var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
@@ -272,7 +294,11 @@ private fun Confirm(session: TowerSession, c: Candidate, onBack: () -> Unit) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Tower at ${c.host}:${c.port}", style = MaterialTheme.typography.titleMedium, color = tc.text)
             Text(
-                if (c.fromQr) "Certificate fingerprint (from the QR):" else "Compare this fingerprint with the one the Mac printed, group by group:",
+                when (c.source) {
+                    Source.Qr -> "Certificate fingerprint (from the QR):"
+                    Source.Link -> "This came from a link, not from the QR scanned here. Compare this fingerprint with the one “tower phone pair” printed on the Mac, group by group:"
+                    Source.Manual -> "Compare this fingerprint with the one the Mac printed, group by group:"
+                },
                 style = MaterialTheme.typography.bodyMedium, color = tc.muted,
             )
             Text(
@@ -295,6 +321,13 @@ private fun Confirm(session: TowerSession, c: Candidate, onBack: () -> Unit) {
             style = MaterialTheme.typography.bodySmall, color = tc.faint,
         )
         return
+    }
+    // Pairing again replaces the tower this phone is paired with: say so, with its address.
+    paired?.takeIf { it.host != c.host || it.port != c.port || it.fingerprint != c.fingerprint }?.let { old ->
+        Text(
+            "This replaces the pairing with the tower at ${old.host}:${old.port}.",
+            style = MaterialTheme.typography.bodyMedium, color = tc.blocked,
+        )
     }
     OutlinedTextField(name, { name = it.take(40) }, Modifier.fillMaxWidth(), label = { Text("This phone's name") }, singleLine = true)
     error?.let { Text(it, color = tc.failed, style = MaterialTheme.typography.bodyMedium) }

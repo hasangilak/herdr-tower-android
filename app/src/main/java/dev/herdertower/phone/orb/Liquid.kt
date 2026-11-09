@@ -84,18 +84,23 @@ object Modes {
         }
     }
 
-    /** Least-squares mode coefficients of shape(x, y, z), added to [out]. */
-    fun project(shape: (Double, Double, Double) -> Double, out: DoubleArray) {
-        val acc = DoubleArray(COUNT)
+    /** Least-squares mode coefficients of shape(x, y, z), added to [out]; [acc] is scratch space (it's cleared). */
+    fun project(shape: Shape, out: DoubleArray, acc: DoubleArray = DoubleArray(COUNT)) {
+        acc.fill(0.0)
         for (i in dirs.indices) {
             val d = dirs[i]
-            val f = shape(d[0], d[1], d[2])
+            val f = shape.at(d[0], d[1], d[2])
             if (f == 0.0) continue
             val row = table[i]
             for (k in 0 until COUNT) acc[k] += f * row[k]
         }
         for (k in 0 until COUNT) out[k] += acc[k] / norm[k]
     }
+}
+
+/** A displacement over directions. Not a Kotlin function type, which would box every Double it's called with. */
+fun interface Shape {
+    fun at(x: Double, y: Double, z: Double): Double
 }
 
 /** mulberry32, as in the prototype and the Mac, so the same seed moves the same way. */
@@ -127,6 +132,7 @@ class Liquid(seed: Int) {
     private val stirSize = DoubleArray(n)
     private val wiggleSize = DoubleArray(n)
     private val rest = DoubleArray(n)
+    private val scratch = DoubleArray(n)
 
     init {
         val stirByDegree = doubleArrayOf(0.0, 0.0, 0.035, 0.0175, 0.024, 0.018, 0.016)
@@ -140,7 +146,7 @@ class Liquid(seed: Int) {
     }
 
     /** Advance by dt; [shape] is the equilibrium displacement in a direction, or null when nothing pushes. */
-    fun step(dt: Double, flow: Flow, shape: ((Double, Double, Double) -> Double)?) {
+    fun step(dt: Double, flow: Flow, shape: Shape?) {
         val tension = max(flow.tension, 0.1)
         val keep = exp(-dt * tension / 4.5)
         val kick = sqrt(1.0 - keep * keep)
@@ -148,7 +154,7 @@ class Liquid(seed: Int) {
             stir[k] = stir[k] * keep + stirSize[k] * flow.agitation * kick * rand.gauss()
             rest[k] = stir[k]
         }
-        if (shape != null) Modes.project(shape, rest)
+        if (shape != null) Modes.project(shape, rest, scratch)
         val sqdt = sqrt(dt)
         for (k in 0 until n) {
             val omega2 = tension * tension * stiff[k]
@@ -169,7 +175,7 @@ class Liquid(seed: Int) {
     }
 
     /** Instant change of surface velocity, e.g. a poke. */
-    fun impulse(shape: (Double, Double, Double) -> Double) = Modes.project(shape, vel)
+    fun impulse(shape: Shape) = Modes.project(shape, vel, scratch)
 
     /** How far the surface is displaced at most (over the sample directions). */
     fun extent(): Double {

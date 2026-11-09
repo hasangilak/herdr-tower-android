@@ -6,7 +6,7 @@ plugins {
 
 android {
     namespace = "dev.herdertower.phone"
-    compileSdk = 36
+    compileSdk = 37
 
     // Every build a higher version (the commit count), so a new APK always installs over the last one.
     val commits = providers.exec { commandLine("git", "rev-list", "--count", "HEAD") }.standardOutput.asText.map { it.trim().toIntOrNull() ?: 1 }.getOrElse(1)
@@ -14,7 +14,7 @@ android {
     defaultConfig {
         applicationId = "dev.herdertower.phone"
         minSdk = 29
-        targetSdk = 36
+        targetSdk = 37
         versionCode = commits
         versionName = "0.$commits"
     }
@@ -23,6 +23,16 @@ android {
         // The same key for every build on this machine (the SDK's debug key, ~/.android/debug.keystore,
         // or one named in ~/.gradle/gradle.properties as towerKeystore/towerKeystorePassword/towerKeyAlias),
         // so an update installs in place over the last APK instead of asking to uninstall.
+        // Release builds: their own key, named in ~/.gradle/gradle.properties as
+        // towerReleaseKeystore/towerReleaseKeystorePassword/towerReleaseKeyAlias (kept out of the repo).
+        providers.gradleProperty("towerReleaseKeystore").orNull?.let { path ->
+            create("release") {
+                storeFile = file(path)
+                storePassword = providers.gradleProperty("towerReleaseKeystorePassword").get()
+                keyAlias = providers.gradleProperty("towerReleaseKeyAlias").get()
+                keyPassword = providers.gradleProperty("towerReleaseKeystorePassword").get()
+            }
+        }
         getByName("debug") {
             providers.gradleProperty("towerKeystore").orNull?.let { path ->
                 storeFile = file(path)
@@ -39,10 +49,15 @@ android {
             if (providers.gradleProperty("demo").isPresent) applicationIdSuffix = ".demo"
         }
         release {
-            // Signed with the debug key unless a real one is configured: installable for local use.
-            signingConfig = signingConfigs.getByName("debug")
+            // Signed with the release key (above). Without one it falls back to the debug key so a local release
+            // still installs, and the build says so: don't ship that one.
+            signingConfig = signingConfigs.findByName("release") ?: signingConfigs.getByName("debug")
+            if (signingConfigs.findByName("release") == null && gradle.startParameter.taskNames.any { it.contains("Release", ignoreCase = true) }) {
+                logger.warn("w: release build signed with the debug key; set towerReleaseKeystore, towerReleaseKeystorePassword and towerReleaseKeyAlias in ~/.gradle/gradle.properties to sign it with your own")
+            }
             if (providers.gradleProperty("demo").isPresent) applicationIdSuffix = ".demo"
             isMinifyEnabled = true
+            isShrinkResources = true
             proguardFiles(getDefaultProguardFile("proguard-android-optimize.txt"), "proguard-rules.pro")
         }
     }
@@ -54,6 +69,11 @@ android {
 
     buildFeatures {
         compose = true
+    }
+
+    lint {
+        // A call that needs a newer Android than minSdk crashes on the older phones: the release build stops on it.
+        fatal += "NewApi"
     }
 
     testOptions {

@@ -9,6 +9,8 @@ import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.combinedClickable
+import androidx.compose.foundation.indication
+import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -29,8 +31,10 @@ import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.State
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
@@ -76,9 +80,9 @@ object ActiveModel {
     /** The tower's test sessions: never shown. */
     fun isTest(name: String): Boolean = name.trim().lowercase().let { it.startsWith("qfix") || it.startsWith("tower.test") }
 
-    /** Working or blocked sessions from the state's agents (never test ones): blocked first, then the longest running. */
+    /** Working or blocked sessions from the state's agents (never test ones), each once: blocked first, then the longest running. */
     fun active(agents: List<StateAgent>, jobs: List<Job>, spaces: SpacesResponse?): List<Active> =
-        agents.filter { it.status == "working" || it.status == "blocked" }.mapNotNull { a ->
+        agents.filter { (it.status == "working" || it.status == "blocked") && it.address.isNotBlank() }.distinctBy { it.address }.mapNotNull { a ->
             val name = a.name.ifBlank { a.address }
             if (isTest(name)) return@mapNotNull null
             val job = jobs.filter { it.session == a.address && it.open }.maxByOrNull { it.startedMs }
@@ -115,7 +119,8 @@ fun activeSessions(session: TowerSession): List<Pair<Active, Boolean>> {
     val state by session.state.collectAsStateWithLifecycle()
     val jobs by session.jobs.collectAsStateWithLifecycle()
     val spaces by session.spaces.collectAsStateWithLifecycle()
-    return ActiveModel.focusFirst(ActiveModel.active(state?.agents.orEmpty(), jobs, spaces), spaces.focus)
+    val agents = state?.agents.orEmpty()
+    return remember(agents, jobs, spaces) { ActiveModel.focusFirst(ActiveModel.active(agents, jobs, spaces), spaces.focus) }
 }
 
 /**
@@ -139,7 +144,8 @@ fun ActivePills(session: TowerSession, onOpen: (String) -> Unit, modifier: Modif
         }
     }
     val reduce = LocalReduceMotion.current
-    val pulse = if (reduce) 1f else rememberInfiniteTransition(label = "active").animateFloat(0.4f, 1f, infiniteRepeatable(tween(1300), RepeatMode.Reverse), label = "pulse").value
+    // Read only while drawing the dot, so the pulse redraws the dots, not the whole row, every frame.
+    val pulse: State<Float>? = if (reduce) null else rememberInfiniteTransition(label = "active").animateFloat(0.4f, 1f, infiniteRepeatable(tween(1300), RepeatMode.Reverse), label = "pulse")
     // A new first pill (a focus, someone now blocked) is shown, not left scrolled out of view.
     val row = androidx.compose.foundation.lazy.rememberLazyListState()
     LaunchedEffect(list.first().first.address) { row.animateScrollToItem(0) }
@@ -155,16 +161,22 @@ fun ActivePills(session: TowerSession, onOpen: (String) -> Unit, modifier: Modif
     ) {
         items(list, key = { it.first.address }) { (a, dim) ->
             var menu by remember { mutableStateOf(false) }
-            Box {
+            val press = remember { MutableInteractionSource() }
+            // A 48 dp tall touch target round the slim pill; the ripple stays on the pill.
+            Box(
+                Modifier.heightIn(min = 48.dp)
+                    .combinedClickable(interactionSource = press, indication = null, onClickLabel = "Open ${a.name}", onLongClickLabel = "More for ${a.name}", onLongClick = { menu = true }) { onOpen(a.address) }
+                    .semantics { contentDescription = ActiveModel.describe(a, now) },
+                contentAlignment = Alignment.Center,
+            ) {
                 Row(
                     Modifier.alpha(if (dim) 0.5f else 1f).heightIn(min = 34.dp).clip(CircleShape)
                         .background(tc.card).border(1.dp, if (a.blocked) tc.blocked.copy(alpha = 0.75f) else tc.edge, CircleShape)
-                        .combinedClickable(onClickLabel = "Open ${a.name}", onLongClickLabel = "More for ${a.name}", onLongClick = { menu = true }) { onOpen(a.address) }
-                        .semantics { contentDescription = ActiveModel.describe(a, now) }
+                        .indication(press, ripple())
                         .padding(start = 10.dp, end = 12.dp, top = 6.dp, bottom = 6.dp),
                     verticalAlignment = Alignment.CenterVertically,
                 ) {
-                    Box(Modifier.size(8.dp).alpha(pulse).clip(CircleShape).background(if (a.blocked) tc.blocked else tc.working))
+                    Box(Modifier.size(8.dp).graphicsLayer { alpha = pulse?.value ?: 1f }.clip(CircleShape).background(if (a.blocked) tc.blocked else tc.working))
                     Spacer(Modifier.width(6.dp))
                     Text(a.name, Modifier.widthIn(max = 120.dp), style = MaterialTheme.typography.labelLarge, color = tc.text, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis)
                     a.account?.takeIf { it.isNotBlank() }?.let { acc ->

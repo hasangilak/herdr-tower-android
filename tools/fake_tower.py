@@ -26,6 +26,25 @@ MIN = 60_000
 
 CODE = f"{secrets.randbelow(10**8):08d}"
 TOKENS = {}  # token -> device
+
+
+def _tokens_file():
+    return os.path.join(CERT_DIR, "tokens.json")
+
+
+def load_tokens():
+    """Paired phones survive a restart (kept beside the certificate), so a phone needn't pair again."""
+    try:
+        with open(_tokens_file()) as f:
+            TOKENS.update(json.load(f))
+    except (OSError, ValueError):
+        pass
+
+
+def save_tokens():
+    os.makedirs(CERT_DIR, exist_ok=True)
+    with open(_tokens_file(), "w") as f:
+        json.dump(TOKENS, f)
 SUBS = []  # (queue, voice)
 CLIPS = {}
 LOCK = threading.Lock()
@@ -70,7 +89,7 @@ ATTACHMENT = page((200, 80, 120))
 
 STATE = {
     "version": 1, "updated_ms": now(), "pid": os.getpid(), "running": True, "phase": "idle",
-    "mode": "ptt", "mic": "closed", "armed": False, "transcribing": False, "speaking": False, "announcing": False,
+    "mode": "ptt", "mic": "closed", "armed": False, "transcribing": False, "speaking": False, "announcing": False, "muted": False,
     "brain": "done", "brain_app": "claude-code", "hearing": "", "heard": "", "heard_ms": 0,
     "said": "Web finished the checkout page. Api is waiting for your answer.", "said_ms": now() - 2 * MIN, "alerts": [],
     "agents": [
@@ -230,10 +249,12 @@ def speak(sentences):
     (as a slow brain might), so the phone's own "ignore the rest of this turn" is exercised."""
     voice = any(v for _, v in SUBS)
     HUSHED[0] = False
-    set_state(phase="speaking", speaking=True)
+    if not STATE.get("muted"):
+        set_state(phase="speaking", speaking=True)
     for i, s in enumerate(sentences):
         ms = 1200
-        if voice:
+        # Muted (`tower mute`): the words still land in the state and the chat, but nothing is said.
+        if voice and not STATE.get("muted"):
             cid = f"a{secrets.token_hex(3)}"
             CLIPS[cid], ms = speech(s, 440 + 60 * i)
             publish("audio", {"id": cid, "kind": "reply", "text": s, "ms": ms, "url": f"/v1/audio/{cid}", "at_ms": now()}, voice_only=True)
@@ -250,7 +271,7 @@ def reply_to(text, attachments=()):
     if attachments:
         e["attachments"] = list(attachments)
     add_history(e)
-    if any(v for _, v in SUBS):
+    if any(v for _, v in SUBS) and not STATE.get("muted"):
         cid = f"a{secrets.token_hex(3)}"
         CLIPS[cid] = tone(300, 660)
         publish("audio", {"id": cid, "kind": "ack", "text": "Okay.", "ms": 300, "url": f"/v1/audio/{cid}"}, voice_only=True)
@@ -664,6 +685,7 @@ class H(BaseHTTPRequestHandler):
             tok = "htk_" + secrets.token_urlsafe(32)
             dev = {"id": "d_" + secrets.token_hex(4), "name": b.get("name", "phone")}
             TOKENS[tok] = dev
+            save_tokens()
             print(f"paired {dev['name']} ({dev['id']})", flush=True)
             return self.send(200, {"token": tok, "device": dev, "fingerprint": FP, "api": 1})
         dev = self.device()
@@ -753,6 +775,17 @@ class H(BaseHTTPRequestHandler):
                 publish("hush", {}, voice_only=True)
                 set_state(phase="idle", speaking=False)
                 return self.send(200, {"ok": True})
+            if seg == ["mute"]:
+                # The tower-wide mute: stops talking now and says nothing, anywhere, until unmuted.
+                on = bool(json.loads(b or b"{}").get("muted"))
+                if on:
+                    HUSHED[0] = True
+                    publish("hush", {}, voice_only=True)
+                    set_state(muted=True, phase="idle", speaking=False)
+                else:
+                    set_state(muted=False)
+                print(f"muted: {on}", flush=True)
+                return self.send(200, {"muted": on})
             if seg == ["mode"]:
                 set_state(mode=json.loads(b)["mode"])
                 return self.send(200, {"mode": STATE["mode"]})
@@ -778,6 +811,7 @@ class H(BaseHTTPRequestHandler):
             for t, d in list(TOKENS.items()):
                 if d is dev:
                     del TOKENS[t]
+                    save_tokens()
             return self.send(200, {"revoked": dev["id"]})
         return self.err(404, "not_found", f"no {method} {u.path}")
 
@@ -853,6 +887,7 @@ if __name__ == "__main__":
     crt, key, FP = cert()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
+    load_tokens()
     srv = ThreadingHTTPServer((a.host, a.port), H)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     link = f"herdertower://pair?h={a.link_host}&p={a.port}&c={CODE}&fp={FP}"

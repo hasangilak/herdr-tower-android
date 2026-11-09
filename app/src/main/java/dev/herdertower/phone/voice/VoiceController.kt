@@ -1,6 +1,8 @@
 package dev.herdertower.phone.voice
 
+import dev.herdertower.phone.api.VoiceResult
 import dev.herdertower.phone.data.TowerSession
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -12,7 +14,22 @@ import kotlinx.coroutines.launch
  * tap it once: then it listens until you pause (or you tap again). Starting
  * a take hushes the tower first (barge-in), here and on the Mac.
  */
-class VoiceController(private val session: TowerSession) {
+class VoiceController(
+    private val scope: CoroutineScope,
+    private val hush: () -> Unit,
+    private val send: suspend (ByteArray) -> Result<VoiceResult>,
+    private val linger: () -> Unit,
+    private val open: () -> Mic,
+    private val clock: () -> Long = System::currentTimeMillis,
+) {
+    constructor(session: TowerSession) : this(
+        session.scope,
+        session::hush,
+        { wav -> session.act { it.voice(wav) } },
+        session::linger,
+        { Take.start(session.scope, endOnSilence = true).also { it.what = "voice" } },
+    )
+
     sealed interface Phase {
         data object Idle : Phase
         /** [handsFree]: a tap started it, and a pause ends it. */
@@ -32,7 +49,7 @@ class VoiceController(private val session: TowerSession) {
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
-    private var take: Take? = null
+    private var take: Mic? = null
     private var watcher: Job? = null
     private var pressedAt = 0L
 
@@ -64,7 +81,7 @@ class VoiceController(private val session: TowerSession) {
     fun press() {
         when (_phase.value) {
             Phase.Idle -> {
-                pressedAt = System.currentTimeMillis()
+                pressedAt = clock()
                 begin(handsFree = false)
             }
             is Phase.Recording, Phase.Sending -> pressedAt = 0
@@ -76,7 +93,7 @@ class VoiceController(private val session: TowerSession) {
         val p = _phase.value
         if (p !is Phase.Recording) return
         if (pressedAt == 0L) return finish() // second tap ends a hands-free take
-        val held = System.currentTimeMillis() - pressedAt
+        val held = clock() - pressedAt
         pressedAt = 0
         if (!p.handsFree && held < TAP_MS) {
             _phase.value = Phase.Recording(handsFree = true)
@@ -103,7 +120,7 @@ class VoiceController(private val session: TowerSession) {
         _level.value = 0f
         _pause.value = 0f
         _waiting.value = false
-        session.scope.launch { t.stop() }
+        scope.launch { t.stop() }
         _phase.value = Phase.Idle
     }
 
@@ -115,10 +132,10 @@ class VoiceController(private val session: TowerSession) {
         _error.value = null
         beforeTake()
         // Barge in: the tower stops talking over you.
-        session.hush()
+        hush()
         _waiting.value = false
         val t = try {
-            Take.start(session.scope, endOnSilence = true).also { it.what = "voice"; if (!handsFree) it.holdUntilStopped() }
+            open().also { if (!handsFree) it.holdUntilStopped() }
         } catch (e: Exception) {
             _error.value = e.message ?: "The microphone isn't available."
             return
@@ -126,15 +143,20 @@ class VoiceController(private val session: TowerSession) {
         take = t
         _phase.value = Phase.Recording(handsFree)
         levels?.cancel()
-        levels = session.scope.launch {
+        levels = scope.launch {
             launch { t.pauseProgress.collect { _pause.value = it } }
             t.level.collect { _level.value = it }
         }
-        watcher = session.scope.launch {
+        watcher = scope.launch {
             when (t.ended.await()) {
                 Take.Reason.NothingSaid -> {
                     cancel()
                     _error.value = "Didn't hear anything."
+                }
+                // The microphone failed: send what was said, if anything was.
+                Take.Reason.MicFailed -> if (t.heardSpeech) finish() else {
+                    cancel()
+                    _error.value = "The microphone stopped."
                 }
                 else -> finish()
             }
@@ -150,16 +172,16 @@ class VoiceController(private val session: TowerSession) {
         _pause.value = 0f
         _waiting.value = false
         _phase.value = Phase.Sending
-        session.scope.launch {
+        scope.launch {
             val wav = t.stop()
             if (t.durationMs < MIN_MS) {
                 _error.value = "Too short. Hold the button while you talk, or tap once."
                 _phase.value = Phase.Idle
                 return@launch
             }
-            session.act { it.voice(wav) }
+            send(wav)
                 .onSuccess { r ->
-                    if (r.sent) session.linger()
+                    if (r.sent) linger()
                     _heard.value = Heard(clean(r.heard), r.sent, System.currentTimeMillis())
                     if (!r.sent && r.heard.isBlank()) _error.value = "The Mac heard nothing it could send."
                 }

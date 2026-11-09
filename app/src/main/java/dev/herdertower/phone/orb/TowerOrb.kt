@@ -1,6 +1,7 @@
 package dev.herdertower.phone.orb
 
 import android.graphics.Bitmap
+import androidx.core.graphics.createBitmap
 import android.graphics.BitmapShader
 import android.graphics.RuntimeShader
 import android.os.Build
@@ -39,6 +40,7 @@ import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.onClick
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -59,7 +61,12 @@ import kotlin.math.sin
 class OrbEngine(size: Double = 1.0) {
     val sim = Sim().also { it.o.size = size }
     private val drive = Drive()
-    private var cue = Cue.CALM
+    // The cue now, eased towards the phase's (as Cue.eased, kept in place so a frame allocates nothing).
+    private val tint = Cue.CALM.tint.copyOf()
+    private var tintAmount = Cue.CALM.tintAmount
+    private val haloRgb = Cue.CALM.halo.copyOf()
+    private var haloAmount = Cue.CALM.haloAmount
+    private var speed = Cue.CALM.speed
     private var fade = 1.0
     private var time = 0.0
     private var realT = 0.0
@@ -67,8 +74,10 @@ class OrbEngine(size: Double = 1.0) {
     private val maps by lazy { OrbMaps() }
     private val boilParams = OrbMaps.BoilParams()
     private val bitmaps by lazy {
-        listOf(maps.lw to maps.lh, maps.lw to maps.lh, maps.bw to maps.bh, maps.bw to maps.bh).map { (w, h) -> Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8) }
+        listOf(maps.lw to maps.lh, maps.lw to maps.lh, maps.bw to maps.bh, maps.bw to maps.bh).map { (w, h) -> createBitmap(w, h, Bitmap.Config.ALPHA_8) }
     }
+    private val buffers by lazy { listOf(maps.liquidHi, maps.liquidLo, maps.boilHi, maps.boilLo).map { ByteBuffer.wrap(it) } }
+    private var boilUploaded = false
     private val mapShaders by lazy {
         bitmaps.map { b ->
             BitmapShader(b, android.graphics.Shader.TileMode.REPEAT, android.graphics.Shader.TileMode.CLAMP).apply {
@@ -89,11 +98,22 @@ class OrbEngine(size: Double = 1.0) {
     fun advance(dtReal: Double) {
         val dt = min(dtReal, 0.1) // a pause waits; it doesn't fast-forward
         realT += dt
-        time += dt * cue.speed
+        time += dt * speed
         drive.tick(sim)
         sim.simulateTo(time)
         fade += (drive.fade(sim.t) - fade) * (1.0 - exp(-dt / 0.25))
-        cue = cue.eased(drive.cue(), 1.0 - exp(-dt / 0.3))
+        ease(drive.cue(), 1.0 - exp(-dt / 0.3))
+    }
+
+    private fun ease(to: Cue, k: Double) {
+        val kf = k.toFloat()
+        for (i in 0..2) {
+            tint[i] = tint[i] + (to.tint[i] - tint[i]) * kf
+            haloRgb[i] = haloRgb[i] + (to.halo[i] - haloRgb[i]) * kf
+        }
+        tintAmount += (to.tintAmount - tintAmount) * kf
+        haloAmount += (to.haloAmount - haloAmount) * kf
+        speed += (to.speed - speed) * k
     }
 
     /** Settles the orb without animating (reduce motion, and the probe). */
@@ -115,11 +135,14 @@ class OrbEngine(size: Double = 1.0) {
             boilParams.height = sim.boil
             boilParams.frequency = 7.0 / maxOf(o.bubbleSize, 0.1)
             boilParams.phase = sim.boilPhase
-            boilParams.hot = sim.hotspotDir()
+            sim.hotspotDir(boilParams.hot)
             boilParams.spread = sim.hotspotSpread()
             boilParams.shape = maxOf(o.bubbleShape, 0.5)
-            maps.update(coeffs, boilParams)
-            listOf(maps.liquidHi, maps.liquidLo, maps.boilHi, maps.boilLo).forEachIndexed { i, bytes -> bitmaps[i].copyPixelsFromBuffer(ByteBuffer.wrap(bytes)) }
+            val boilChanged = maps.update(coeffs, boilParams)
+            // The boil map goes up again only when it changed (it's flat while nothing boils).
+            val upload = if (boilChanged || !boilUploaded) 4 else 2
+            for (i in 0 until upload) bitmaps[i].copyPixelsFromBuffer((buffers[i] as java.nio.Buffer).rewind())
+            boilUploaded = true
             s.setInputShader("liquidHi", mapShaders[0])
             s.setInputShader("liquidLo", mapShaders[1])
             s.setInputShader("boilHi", mapShaders[2])
@@ -135,14 +158,14 @@ class OrbEngine(size: Double = 1.0) {
         s.setFloatUniform("p2", maxOf(o.bubbleShape, 0.5).toFloat(), if (dark) 1f else 0f, if (dark) 2f else 0f, 0f)
         s.setFloatUniform("res", w, h, 0f, 0f)
         s.setFloatUniform("outU", fade.toFloat(), 0f, 0f, 0f)
-        s.setFloatUniform("tint", cue.tint[0], cue.tint[1], cue.tint[2], cue.tintAmount)
-        val haloAmount = if (halo) (cue.haloAmount * drive.haloPulse(sim, realT)).toFloat() else 0f
-        s.setFloatUniform("halo", cue.halo[0], cue.halo[1], cue.halo[2], haloAmount)
+        s.setFloatUniform("tint", tint[0], tint[1], tint[2], tintAmount)
+        val h = if (halo) (haloAmount * drive.haloPulse(sim, realT)).toFloat() else 0f
+        s.setFloatUniform("halo", haloRgb[0], haloRgb[1], haloRgb[2], h)
     }
 
     // For the gradient orb: the cue's colours and the liquid's motion.
-    fun tintColor() = Color(cue.tint[0], cue.tint[1], cue.tint[2])
-    fun haloColor() = Color(cue.halo[0], cue.halo[1], cue.halo[2], (cue.haloAmount * drive.haloPulse(sim, realT)).toFloat().coerceIn(0f, 1f))
+    fun tintColor() = Color(tint[0], tint[1], tint[2])
+    fun haloColor() = Color(haloRgb[0], haloRgb[1], haloRgb[2], (haloAmount * drive.haloPulse(sim, realT)).toFloat().coerceIn(0f, 1f))
     fun alpha() = fade.toFloat()
     /** Where the cup's opening points (object +z in world space): the blobs follow it. */
     fun opening(): Offset = Offset(sim.rot[2].toFloat(), -sim.rot[5].toFloat())
@@ -183,12 +206,15 @@ fun TowerOrb(
     val report by OrbProbe.report.collectAsStateWithLifecycle()
     var frame by remember { mutableLongStateOf(0L) }
     LaunchedEffect(phase) { engine.enter(phase) }
+    // No motion: each phase is still shown, settled and drawn once.
+    LaunchedEffect(reduce, phase) {
+        if (!reduce) return@LaunchedEffect
+        engine.enter(phase)
+        engine.settle()
+        frame++
+    }
     LaunchedEffect(reduce) {
-        if (reduce) {
-            engine.settle()
-            frame++
-            return@LaunchedEffect
-        }
+        if (reduce) return@LaunchedEffect
         var last = 0L
         while (true) {
             withFrameNanos { now ->
@@ -203,8 +229,13 @@ fun TowerOrb(
         }
     }
 
+    val tap by androidx.compose.runtime.rememberUpdatedState(onTap)
     BoxWithConstraints(
-        modifier.then(if (description != null) Modifier.semantics { contentDescription = description } else Modifier),
+        modifier.semantics {
+            if (description != null) contentDescription = description
+            // The tap, for a screen reader too (a pointer gesture alone isn't an action).
+            if (interactive && onTap != null) onClick { tap?.invoke(); true }
+        },
         contentAlignment = Alignment.Center,
     ) {
         val density = LocalDensity.current
@@ -212,7 +243,6 @@ fun TowerOrb(
         val boxH = maxHeight
         val wPx = with(density) { maxWidth.toPx() }
         val hPx = with(density) { maxHeight.toPx() }
-        val tap by androidx.compose.runtime.rememberUpdatedState(onTap)
         val press = if (interactive) Modifier.pointerInput(Unit) {
             detectTapGestures(onTap = { tap?.invoke() }, onPress = { p ->
                 val per = OrbShader.CAM_Z / (OrbShader.FOCAL * engine.sim.o.size) / (min(size.width, size.height) * BLEED)
@@ -340,10 +370,13 @@ private fun GradientOrb(engine: OrbEngine, frame: () -> Long, dark: Boolean, mod
     }
 }
 
-/** A small static orb (chat avatars, the home greeting): the glow look's colours without the raymarch. */
+/**
+ * A small static orb (chat avatars, the home greeting): the glow look's
+ * colours without the raymarch. [muted]: dimmed, with a thin slash across.
+ */
 @Composable
-fun OrbGlyph(modifier: Modifier = Modifier, dark: Boolean = tc.dark) {
-    Canvas(modifier) {
+fun OrbGlyph(modifier: Modifier = Modifier, dark: Boolean = tc.dark, muted: Boolean = false) {
+    Canvas(modifier.graphicsLayer { alpha = if (muted) 0.45f else 1f }) {
         val r = min(size.width, size.height) / 2f
         val c = center
         drawCircle(
@@ -355,5 +388,9 @@ fun OrbGlyph(modifier: Modifier = Modifier, dark: Boolean = tc.dark) {
             r, c,
         )
         drawCircle(Color(0xFFECE4F0).copy(alpha = 0.8f), r * 0.96f, c, style = Stroke(r * 0.08f))
+        if (muted) {
+            val d = r * 0.62f
+            drawLine(Color(0xFFECE4F0), c + Offset(-d, -d), c + Offset(d, d), strokeWidth = r * 0.12f, cap = androidx.compose.ui.graphics.StrokeCap.Round)
+        }
     }
 }

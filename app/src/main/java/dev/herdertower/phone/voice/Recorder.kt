@@ -6,46 +6,72 @@ import android.media.AudioRecord
 import android.media.MediaRecorder
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.Deferred
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
 import java.io.ByteArrayOutputStream
+import java.util.concurrent.atomic.AtomicBoolean
 import kotlin.math.sqrt
+
+/** A take as the voice button and dictation use it (a fake one in the tests). */
+interface Mic {
+    /** 0..1, for the button's ring. */
+    val level: StateFlow<Float>
+    /** 0..1 through the pause that will end a tap take; 0 while talking. */
+    val pauseProgress: StateFlow<Float>
+    /** Completes when the take ended: by itself, or by [stop]. */
+    val ended: Deferred<Take.Reason>
+    /** Whether speech has been heard yet. */
+    val heardSpeech: Boolean
+    val durationMs: Long
+    /** Only [stop] ends it (still capped at the tower's limit). */
+    fun holdUntilStopped()
+    /** From now on a pause after speech ends it. */
+    fun endOnSilenceFromNow()
+    /** The take so far as a WAV, while it goes on. */
+    suspend fun snapshot(): ByteArray
+    /** Stops the microphone and returns the whole take as a WAV. Safe to call more than once. */
+    suspend fun stop(): ByteArray
+}
 
 /**
  * One take from the microphone: 16 kHz mono 16-bit PCM, as the tower prefers.
  * With [endOnSilence] (tap to talk) the take ends by itself after a pause
  * that follows speech; otherwise it runs until [stop] (hold to talk).
  */
-class Take private constructor(private val record: AudioRecord, @Volatile private var endOnSilence: Boolean, private val pauseFrames: Int) {
+class Take private constructor(private val record: AudioRecord, @Volatile private var endOnSilence: Boolean, private val pauseFrames: Int) : Mic {
     private val pcm = ByteArrayOutputStream()
     private val _level = MutableStateFlow(0f)
-    /** 0..1, for the button's ring. */
-    val level: StateFlow<Float> = _level
+    override val level: StateFlow<Float> = _level
 
     /** Whether speech has been heard yet (dictation asks for words only then: Whisper guesses at silence). */
-    @Volatile var heardSpeech = false
+    @Volatile override var heardSpeech = false
         private set
 
-    /** Completes when the take ended by itself (a pause after speech, nothing said, or too long). */
-    val ended = CompletableDeferred<Reason>()
+    /** Completes when the take ended: a pause after speech, nothing said, too long, the microphone failing, or [stop]. */
+    override val ended = CompletableDeferred<Reason>()
 
-    enum class Reason { Silence, NothingSaid, TooLong }
+    enum class Reason { Silence, NothingSaid, TooLong, MicFailed, Stopped }
 
     private var job: Job? = null
 
     /** 0..1 through the pause that will end a tap take (a countdown to sending); 0 while talking. */
     private val _pause = MutableStateFlow(0f)
-    val pauseProgress: StateFlow<Float> = _pause
+    override val pauseProgress: StateFlow<Float> = _pause
 
     @Volatile private var detector: SpeechEnd? = null
     @Volatile var endedBy: String = ""
         private set
     /** What the take is for, in the diagnostics: "voice", "dictation", "answer". */
     var what: String = ""
+
+    private val stopping = AtomicBoolean(false)
+    private val stopped = CompletableDeferred<ByteArray>()
 
     /** What this take did, for the diagnostics: length, why it ended, the input, the room. */
     fun info(): TakeInfo {
@@ -64,7 +90,9 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
             while (isActive) {
                 val n = record.read(frame, 0, frame.size)
                 if (n <= 0) {
+                    // Stopped from outside, or the microphone failed: the take is over either way.
                     if (endedBy.isEmpty()) endedBy = "the microphone stopped ($n)"
+                    if (!stopping.get()) ended.complete(Reason.MicFailed)
                     break
                 }
                 for (i in 0 until n) {
@@ -103,23 +131,24 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
     }
 
     /** Hold to talk, or "keep listening": only [stop] ends it (still capped at the tower's limit). */
-    fun holdUntilStopped() {
+    override fun holdUntilStopped() {
         endOnSilence = false
         _pause.value = 0f
     }
 
     /** A tap after all: from now on a pause after speech ends it. */
-    fun endOnSilenceFromNow() {
+    override fun endOnSilenceFromNow() {
         endOnSilence = true
     }
 
-    /** The take so far as a WAV, while it goes on (dictation shows its words as they come). */
-    fun snapshot(): ByteArray = Wav.encode(synchronized(pcm) { pcm.toByteArray() }, RATE, 1)
+    /** The take so far as a WAV, while it goes on (dictation shows its words as they come). Built off the main thread. */
+    override suspend fun snapshot(): ByteArray = withContext(Dispatchers.Default) { Wav.encode(synchronized(pcm) { pcm.toByteArray() }, RATE, 1) }
 
-    val durationMs: Long get() = synchronized(pcm) { pcm.size().toLong() * 1000 / (RATE * 2) }
+    override val durationMs: Long get() = synchronized(pcm) { pcm.size().toLong() * 1000 / (RATE * 2) }
 
-    /** Stops the microphone and returns the take as a WAV (16 kHz mono 16-bit). */
-    suspend fun stop(): ByteArray {
+    /** Stops the microphone and returns the take as a WAV (16 kHz mono 16-bit). A second call gets the same WAV. */
+    override suspend fun stop(): ByteArray {
+        if (!stopping.compareAndSet(false, true)) return stopped.await()
         if (endedBy.isEmpty()) endedBy = "stopped (sent or released)"
         job?.let {
             if (it.isActive) {
@@ -129,12 +158,15 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
             }
             it.join()
         }
+        ended.complete(Reason.Stopped)
         Takes.last.value = info()
         android.util.Log.i("Take", info().line())
         runCatching { record.stop() }
         record.release()
         _level.value = 0f
-        return Wav.encode(synchronized(pcm) { pcm.toByteArray() }, RATE, 1)
+        val wav = withContext(Dispatchers.Default) { Wav.encode(synchronized(pcm) { pcm.toByteArray() }, RATE, 1) }
+        stopped.complete(wav)
+        return wav
     }
 
     companion object {
@@ -163,7 +195,16 @@ class Take private constructor(private val record: AudioRecord, @Volatile privat
                 rec.release()
                 throw IllegalStateException("The microphone isn't available.")
             }
-            return Take(rec, endOnSilence, pauseMs / 20).also { it.start(scope) }
+            val take = Take(rec, endOnSilence, pauseMs / 20)
+            try {
+                take.start(scope)
+            } catch (e: Exception) {
+                // It didn't start: give the microphone back.
+                runCatching { rec.stop() }
+                rec.release()
+                throw IllegalStateException("The microphone isn't available.", e)
+            }
+            return take
         }
     }
 }

@@ -33,7 +33,12 @@ class MainActivity : ComponentActivity() {
         volumeControlStream = AudioManager.STREAM_MUSIC
         val app = tower
         theme = app.session.settings.theme
-        take(intent)
+        // Only a fresh start reads the launch intent: after a rotation it would bring back a link already used.
+        // A recreate gets back the link still being confirmed (and pairing again) from the saved state instead.
+        if (savedInstanceState == null) take(intent) else {
+            link = savedInstanceState.getString(SAVED_LINK)?.let { raw -> runCatching { PairLink.parse(raw) }.getOrNull() }
+            repairing = savedInstanceState.getBoolean(SAVED_REPAIRING)
+        }
         setContent {
             val creds by app.session.credentials.collectAsStateWithLifecycle()
             // Once paired (again), leave the pairing screen.
@@ -66,9 +71,16 @@ class MainActivity : ComponentActivity() {
         }
     }
 
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        link?.let { outState.putString(SAVED_LINK, it.toLink()) }
+        outState.putBoolean(SAVED_REPAIRING, repairing)
+    }
+
     private val hushKeys = dev.herdertower.phone.voice.HushKeys()
 
     /** Volume down twice (or held) while the tower talks stops it; the press still turns the volume down. */
+    @android.annotation.SuppressLint("RestrictedApi") // ComponentActivity marks this override restricted; it's the platform's own method.
     override fun dispatchKeyEvent(event: android.view.KeyEvent): Boolean {
         if (event.keyCode == android.view.KeyEvent.KEYCODE_VOLUME_DOWN && event.action == android.view.KeyEvent.ACTION_DOWN) {
             val app = tower
@@ -82,6 +94,8 @@ class MainActivity : ComponentActivity() {
     override fun onNewIntent(intent: Intent) {
         super.onNewIntent(intent)
         take(intent)
+        // Consumed: a recreate doesn't read it again.
+        setIntent(Intent(this, MainActivity::class.java))
     }
 
     override fun onStart() {
@@ -97,6 +111,15 @@ class MainActivity : ComponentActivity() {
         }
         val data = intent?.data?.toString() ?: return
         if (!data.startsWith(PairLink.SCHEME + "://", ignoreCase = true)) return
-        link = runCatching { PairLink.parse(data) }.getOrNull()
+        link = try {
+            PairLink.parse(data)
+        } catch (e: IllegalArgumentException) {
+            null // not a valid pairing link: nothing to show
+        }
+    }
+
+    private companion object {
+        const val SAVED_LINK = "pair_link"
+        const val SAVED_REPAIRING = "repairing"
     }
 }

@@ -81,4 +81,24 @@ class SpeechEndTest {
         v.run(5000.0, 60)
         assertFalse(v.spoke)
     }
+
+    @Test fun longTalkWithShallowDipsIsNotAPause() {
+        // Fluent speech doesn't always dip to the room between words: soft frames used to lift the floor until talking counted as quiet.
+        val v = SpeechEnd(pauseMs = 2000)
+        v.run(100.0, 400)
+        val speech = doubleArrayOf(3000.0, 4000.0, 2000.0, 3500.0, 1800.0, 4200.0, 2500.0, 1000.0)
+        for (t in 0 until 30 * 50) assertFalse("ended ${t * 20} ms into the talk", v.feed(speech[t % speech.size]))
+        assertEquals(2000, v.run(100.0, 3000)) // then real quiet still ends it
+    }
+
+    @Test fun scatteredClicksDontAddUpToSpeech() {
+        val v = SpeechEnd(pauseMs = 2000)
+        v.run(100.0, 400)
+        repeat(10) {
+            v.run(5000.0, 20) // a click, a key, a knock
+            v.run(100.0, 400)
+        }
+        assertFalse(v.spoke)
+        assertEquals(200, v.voicedMs) // still counted for the diagnostics
+    }
 }

@@ -44,17 +44,115 @@ class OrbMaps(val lw: Int = 128, val lh: Int = 64, val bw: Int = 128, val bh: In
         }
     }
 
-    /** Fills both maps for this frame. */
-    fun update(coeffs: FloatArray, boil: BoilParams) {
+    private val lattice = Lattice()
+    /** Whether the boil map holds the flat surface already (no boiling). */
+    private var boilFlat = false
+
+    /**
+     * Fills both maps for this frame, without allocating. Returns whether the
+     * boil map changed (it stays as it was while nothing boils).
+     */
+    fun update(coeffs: FloatArray, boil: BoilParams): Boolean {
         for (t in 0 until lw * lh) {
             val o = t * Modes.COUNT
             var h = 0f
             for (k in 0 until Modes.COUNT) h += basis[o + k] * coeffs[k]
             split(h.toDouble(), liquidHi, liquidLo, t)
         }
+        // Below this height every texel rounds to the same 16 bits as no boiling at all.
+        if (kotlin.math.abs(boil.height) < FLAT) {
+            if (boilFlat) return false
+            fill(0.0, boilHi, boilLo)
+            boilFlat = true
+            return true
+        }
+        boilFlat = false
+        lattice.newFrame()
         for (t in 0 until bw * bh) {
             val o = t * 3
-            split(boilAt(boilDirs[o], boilDirs[o + 1], boilDirs[o + 2], boil), boilHi, boilLo, t)
+            split(lattice.boilAt(boilDirs[o], boilDirs[o + 1], boilDirs[o + 2], boil), boilHi, boilLo, t)
+        }
+        return true
+    }
+
+    /**
+     * [boilAt] with the noise's lattice hashes kept for the frame: most
+     * texels share their lattice corners, and the hashes (three `sin` each)
+     * are most of the cost. The values are exactly those of [boilAt].
+     */
+    internal class Lattice(bits: Int = 12) {
+        private val mask = (1 shl bits) - 1
+        private val limit = (mask + 1) * 7 / 10
+        private val kx = DoubleArray(mask + 1)
+        private val ky = DoubleArray(mask + 1)
+        private val kz = DoubleArray(mask + 1)
+        private val stamp = IntArray(mask + 1)
+        private val hashes = DoubleArray((mask + 1) * 3)
+        private var frame = 1
+        private var used = 0
+        // The three hashes of the corner last looked up.
+        private var h0 = 0.0
+        private var h1 = 0.0
+        private var h2 = 0.0
+
+        /** Forgets the last frame's corners (the boil's phase moves them). */
+        fun newFrame() {
+            used = 0
+            if (++frame == Int.MAX_VALUE) {
+                stamp.fill(0)
+                frame = 1
+            }
+        }
+
+        /** Sets [h0], [h1], [h2] to the hashes of lattice point (px, py, pz). */
+        private fun hashesAt(px: Double, py: Double, pz: Double) {
+            var i = ((px.toLong() * 73856093L) xor (py.toLong() * 19349663L) xor (pz.toLong() * 83492791L)).toInt() and mask
+            while (stamp[i] == frame) {
+                if (kx[i] == px && ky[i] == py && kz[i] == pz) {
+                    h0 = hashes[i * 3]; h1 = hashes[i * 3 + 1]; h2 = hashes[i * 3 + 2]
+                    return
+                }
+                i = (i + 1) and mask
+            }
+            h0 = h(px, py, pz, 0); h1 = h(px, py, pz, 1); h2 = h(px, py, pz, 2)
+            if (used >= limit) return // full: computed, not kept
+            stamp[i] = frame
+            kx[i] = px; ky[i] = py; kz[i] = pz
+            hashes[i * 3] = h0; hashes[i * 3 + 1] = h1; hashes[i * 3 + 2] = h2
+            used++
+        }
+
+        private fun corner(ix: Double, iy: Double, iz: Double, cx: Int, cy: Int, cz: Int, fx: Double, fy: Double, fz: Double): Double {
+            hashesAt(ix + cx, iy + cy, iz + cz)
+            return h0 * (fx - cx) + h1 * (fy - cy) + h2 * (fz - cz)
+        }
+
+        fun gnoise(x: Double, y: Double, z: Double): Double {
+            val ix = floor(x); val iy = floor(y); val iz = floor(z)
+            val fx = x - ix; val fy = y - iy; val fz = z - iz
+            val ux = fx * fx * (3.0 - 2.0 * fx)
+            val uy = fy * fy * (3.0 - 2.0 * fy)
+            val uz = fz * fz * (3.0 - 2.0 * fz)
+            val c000 = corner(ix, iy, iz, 0, 0, 0, fx, fy, fz)
+            val c100 = corner(ix, iy, iz, 1, 0, 0, fx, fy, fz)
+            val c010 = corner(ix, iy, iz, 0, 1, 0, fx, fy, fz)
+            val c110 = corner(ix, iy, iz, 1, 1, 0, fx, fy, fz)
+            val c001 = corner(ix, iy, iz, 0, 0, 1, fx, fy, fz)
+            val c101 = corner(ix, iy, iz, 1, 0, 1, fx, fy, fz)
+            val c011 = corner(ix, iy, iz, 0, 1, 1, fx, fy, fz)
+            val c111 = corner(ix, iy, iz, 1, 1, 1, fx, fy, fz)
+            return mix(mix(mix(c000, c100, ux), mix(c010, c110, ux), uy), mix(mix(c001, c101, ux), mix(c011, c111, ux), uy), uz)
+        }
+
+        /** [OrbMaps.boilAt], line for line, on the kept hashes. */
+        fun boilAt(x: Double, y: Double, z: Double, b: BoilParams): Double {
+            val heat = exp(-(1.0 - (x * b.hot[0] + y * b.hot[1] + z * b.hot[2])) / (b.spread * b.spread))
+            if (heat < 0.01) return 0.0
+            val f = b.frequency
+            val t = b.phase
+            val a = min(max(gnoise(x * f, y * f, z * f + t), 0.0) / 0.6, 1.0)
+            val c = min(max(gnoise(x * f * 2.1 + t * 1.3, y * f * 2.1 - t * 0.7, z * f * 2.1 + 3.1), 0.0) / 0.6, 1.0)
+            return (a.pow(b.shape) + 0.6 * c.pow(b.shape)) * 1.44 * b.height * heat
         }
     }
 
@@ -103,10 +201,12 @@ class OrbMaps(val lw: Int = 128, val lh: Int = 64, val bw: Int = 128, val bh: In
             return (a.pow(b.shape) + 0.6 * c.pow(b.shape)) * 1.44 * b.height * heat
         }
 
+        private const val FLAT = 1e-6
+
         private fun fract(v: Double) = v - floor(v)
 
         /** `hash3` of the shader, one component at a time: -1 + 2 * fract(sin(dot(p, k)) * 43758.5453123). */
-        private fun h(px: Double, py: Double, pz: Double, k: Int): Double {
+        internal fun h(px: Double, py: Double, pz: Double, k: Int): Double {
             val d = when (k) {
                 0 -> px * 127.1 + py * 311.7 + pz * 74.7
                 1 -> px * 269.5 + py * 183.3 + pz * 246.1
@@ -123,7 +223,7 @@ class OrbMaps(val lw: Int = 128, val lh: Int = 64, val bw: Int = 128, val bh: In
             return h(px, py, pz, 0) * (fx - cx) + h(px, py, pz, 1) * (fy - cy) + h(px, py, pz, 2) * (fz - cz)
         }
 
-        private fun mix(a: Double, b: Double, t: Double) = a + (b - a) * t
+        internal fun mix(a: Double, b: Double, t: Double) = a + (b - a) * t
 
         /** `gnoise` of the shader: gradient noise. */
         fun gnoise(x: Double, y: Double, z: Double): Double {

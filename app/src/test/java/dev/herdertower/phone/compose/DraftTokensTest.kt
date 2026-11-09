@@ -55,4 +55,17 @@ class DraftTokensTest {
         assertEquals("image/gif", Composer.Images.sniff("GIF89a".toByteArray()))
         assertNull(Composer.Images.sniff("\u0000\u0000\u0000\u0018ftypheic".toByteArray(Charsets.ISO_8859_1))) // HEIC: re-encoded as JPEG
     }
+
+    @Test fun removingATokenLeavesTheRestsSpacingAlone() {
+        val code = "fix this:\n    if (a)  b\nsee [Image #1] here"
+        assertEquals("fix this:\n    if (a)  b\nsee here", DraftTokens.remove(code, 1))
+        assertEquals("first\nsecond", DraftTokens.remove("first [Image #2]\nsecond", 2))
+        assertEquals("first\nsecond", DraftTokens.remove("first\n[Image #2] second", 2))
+    }
+
+    @Test fun afterSendingWhatCameMeanwhileStays() {
+        assertEquals("", DraftTokens.afterSend("see [Image #1] ", "see [Image #1] ", listOf(1)))
+        assertEquals("and this [Image #2]", DraftTokens.afterSend("see [Image #1]", "see [Image #1] and this [Image #2] ", listOf(1)))
+        assertEquals("[Image #3]", DraftTokens.afterSend("hi", "hi [Image #3] ", emptyList()))
+    }
 }

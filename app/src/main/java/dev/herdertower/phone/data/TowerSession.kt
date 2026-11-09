@@ -37,14 +37,13 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
-import kotlinx.coroutines.flow.MutableSharedFlow
+import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
-import kotlinx.coroutines.flow.first
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -55,7 +54,8 @@ sealed interface Link {
     data object Unpaired : Link
     /** In the background and not the voice: the stream is closed on purpose. */
     data object Idle : Link
-    data class Connecting(val attempt: Int) : Link
+    /** Opening the stream; [failing] is why the last attempt failed (null on a first try), so a retry in flight still shows it. */
+    data class Connecting(val attempt: Int, val failing: String? = null) : Link
     data class Live(val voice: Boolean) : Link
     /** Dropped; trying again in [seconds]. */
     data class Retrying(val seconds: Int, val reason: String, val attempt: Int) : Link
@@ -118,7 +118,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     val screenshots: StateFlow<List<Screenshot>> = _screenshots.asStateFlow()
 
     /** Screenshot images, fetched with the token and cached. */
-    val images = Images(this)
+    val images = Images(this) { context.cacheDir?.let { java.io.File(it, "thumbs") } }
 
     private val _accounts = MutableStateFlow(AccountsResponse())
     val accounts: StateFlow<AccountsResponse> = _accounts.asStateFlow()
@@ -146,7 +146,14 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         }
 
     private val _foreground = MutableStateFlow(false)
-    private val retryNow = MutableSharedFlow<Unit>(extraBufferCapacity = 1)
+    /**
+     * Skip the backoff: conflated, so a tap (or the Wi-Fi coming back) while
+     * an attempt is still in flight isn't lost; it retries as soon as that
+     * attempt fails. Drained once the stream is live.
+     */
+    private val retryNow = Channel<Unit>(Channel.CONFLATED)
+    /** The token was refused or the certificate changed: no stream until this phone pairs again. */
+    private val _blocked = MutableStateFlow<Link?>(null)
     private var refreshJob: CoJob? = null
 
     val player = ClipPlayer(context, scope) { clip ->
@@ -156,7 +163,11 @@ class TowerSession(private val context: Context, private val store: CredentialSt
     init {
         _creds.value?.let { guessName(it.host) }
         scope.launch {
-            combine(_creds, _voiceOn, _foreground, _lingering) { c, v, fg, linger -> if (c == null) null else Want(c, v, fg || linger) }
+            // Keyed on the mode, not on each flag: with the phone as the voice, going to the background
+            // or back must not reopen the voice stream (the Mac would take over mid-reply).
+            combine(_creds, _voiceOn, _foreground, _lingering, _blocked) { c, v, fg, linger, blocked ->
+                if (c == null) null else Want(c, streamMode(v, fg, linger), blocked)
+            }
                 .distinctUntilChanged()
                 .collectLatest { want ->
                     when {
@@ -164,13 +175,17 @@ class TowerSession(private val context: Context, private val store: CredentialSt
                             player.hush()
                             _link.value = Link.Unpaired
                         }
-                        !want.voice && !want.foreground -> {
+                        want.blocked != null -> {
+                            player.hush()
+                            _link.value = want.blocked
+                        }
+                        want.mode == StreamMode.Idle -> {
                             player.hush()
                             _link.value = Link.Idle
                         }
                         else -> {
-                            if (!want.voice) player.hush()
-                            stream(want.voice)
+                            if (want.mode != StreamMode.Voice) player.hush()
+                            stream(want.mode == StreamMode.Voice)
                         }
                     }
                 }
@@ -189,7 +204,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         }
     }
 
-    private data class Want(val creds: Credentials, val voice: Boolean, val foreground: Boolean)
+    private data class Want(val creds: Credentials, val mode: StreamMode, val blocked: Link?)
+
+    /** Which stream to keep open: none, the panel's feed, or the voice stream (which also feeds the panel). */
+    enum class StreamMode { Idle, Panel, Voice }
 
     fun setForeground(fg: Boolean) {
         _foreground.value = fg
@@ -203,7 +221,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
 
     /** Skip the backoff wait and reconnect now. */
     fun reconnect() {
-        retryNow.tryEmit(Unit)
+        retryNow.trySend(Unit)
     }
 
     fun renameTower(name: String) {
@@ -230,13 +248,16 @@ class TowerSession(private val context: Context, private val store: CredentialSt
 
     private suspend fun stream(voice: Boolean) {
         var attempt = 0
+        var failing: String? = null
         while (true) {
             val c = client ?: return
-            _link.value = Link.Connecting(attempt)
+            _link.value = Link.Connecting(attempt, failing)
             val reason = try {
                 c.events(voice).collect { ev ->
                     if (ev is TowerEvent.Hello) {
                         attempt = 0
+                        failing = null
+                        retryNow.tryReceive() // a retry asked for before this connect is done
                         _link.value = Link.Live(voice)
                         refreshAll()
                     }
@@ -246,10 +267,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             } catch (e: CancellationException) {
                 throw e
             } catch (e: UnauthorizedException) {
-                _link.value = Link.Revoked(e.message)
+                block(Link.Revoked(e.message))
                 return
             } catch (e: SSLMismatch) {
-                _link.value = Link.CertificateChanged(e.mismatch.got)
+                block(Link.CertificateChanged(e.mismatch.got))
                 return
             } catch (e: Exception) {
                 e.message ?: "Connection lost."
@@ -258,9 +279,16 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             if (voice) player.hush()
             val wait = BACKOFF[minOf(attempt, BACKOFF.lastIndex)]
             attempt++
+            failing = reason
             _link.value = Link.Retrying(wait, reason, attempt)
-            withTimeoutOrNull(wait * 1000L) { retryNow.first() }
+            withTimeoutOrNull(wait * 1000L) { retryNow.receive() }
         }
+    }
+
+    /** Stops the stream for good (until pairing again) and says why. */
+    private fun block(l: Link) {
+        _link.value = l
+        _blocked.value = l
     }
 
     private fun handle(ev: TowerEvent) {
@@ -268,6 +296,8 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             is TowerEvent.State -> {
                 val before = _state.value
                 _state.value = ev.state
+                // While a mute this phone asked for is on its way (and just after), a state sent before it is stale.
+                if (ev.state.muted != _muted.value && !_muting.value && System.currentTimeMillis() >= muteHeldUntil) mutedIs(ev.state.muted)
                 if (ev.state.screenshots.isNotEmpty()) _screenshots.value = mergeShots(_screenshots.value, ev.state.screenshots)
                 ev.state.questionPolicy?.let {
                     _questionPolicy.value = it
@@ -350,9 +380,19 @@ class TowerSession(private val context: Context, private val store: CredentialSt
 
     private val notices = QuestionNotices(context)
 
+    /**
+     * What this phone did to a question the tower doesn't show yet (id to
+     * status and until when): a `state` sent before the answer landed would
+     * set it back to open, and the screen would offer Submit again.
+     */
+    private val localStatus = mutableMapOf<String, Pair<String, Long>>()
+
     private fun setQuestions(list: List<Question>) {
-        _questions.value = list
-        notices.follow(list, background = !_foreground.value)
+        val now = System.currentTimeMillis()
+        localStatus.entries.removeAll { it.value.second < now }
+        val shown = list.map { q -> localStatus[q.id]?.takeIf { q.status == "open" }?.let { q.copy(status = it.first) } ?: q }
+        _questions.value = shown
+        notices.follow(shown, background = !_foreground.value)
     }
 
     suspend fun setQuestionPolicy(policy: String): Result<String> =
@@ -360,10 +400,13 @@ class TowerSession(private val context: Context, private val store: CredentialSt
 
     /** Answers a question set; the tower types it into the session's dialog. */
     suspend fun answerQuestion(id: String, answers: List<TabAnswer>): Result<Unit> {
+        localStatus[id] = "answering" to Long.MAX_VALUE
         _questions.value = _questions.value.map { if (it.id == id) it.copy(status = "answering", error = null) else it }
         return act { it.answerQuestion(id, answers) }.onSuccess {
+            localStatus[id] = "answered" to System.currentTimeMillis() + ANSWERED_HOLD_MS
             _questions.value = _questions.value.map { if (it.id == id && it.status == "answering") it.copy(status = "answered") else it }
         }.onFailure { e ->
+            localStatus.remove(id)
             _questions.value = _questions.value.map { if (it.id == id) it.copy(status = "failed", error = describe(e)) else it }
         }
     }
@@ -472,7 +515,9 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         } catch (e: CancellationException) {
             throw e
         } catch (e: UnauthorizedException) {
-            _link.value = Link.Revoked(e.message)
+            block(Link.Revoked(e.message))
+        } catch (e: SSLMismatch) {
+            block(Link.CertificateChanged(e.mismatch.got))
         } catch (e: Exception) {
             Log.i(TAG, "refresh failed: ${e.javaClass.simpleName}")
         }
@@ -524,10 +569,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         } catch (e: CancellationException) {
             throw e
         } catch (e: UnauthorizedException) {
-            _link.value = Link.Revoked(e.message)
+            block(Link.Revoked(e.message))
             Result.failure(e)
         } catch (e: SSLMismatch) {
-            _link.value = Link.CertificateChanged(e.mismatch.got)
+            block(Link.CertificateChanged(e.mismatch.got))
             Result.failure(e)
         } catch (e: Exception) {
             Result.failure(e)
@@ -548,6 +593,39 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         scope.launch { act { it.hush() } }
     }
     private var lastHush = 0L
+
+    private val _muted = MutableStateFlow(false)
+    /** The tower-wide mute (`tower mute`), as the tower last said: it says nothing on the Mac or any phone. */
+    val muted: StateFlow<Boolean> = _muted.asStateFlow()
+
+    private val _muting = MutableStateFlow(false)
+    /** A mute or unmute this phone asked for is on its way. */
+    val muting: StateFlow<Boolean> = _muting.asStateFlow()
+    /** Until then, a `state` that disagrees with the mute just set is one sent before it. */
+    private var muteHeldUntil = 0L
+
+    private fun mutedIs(on: Boolean) {
+        _muted.value = on
+        // The tower sends nothing to say while muted; this keeps a clip already on its way quiet too.
+        player.silenced = on
+        // Quiet now, without arming the "rest of this reply" drop: unmuted, the next reply plays.
+        if (on) player.hush() else player.newTurn()
+    }
+
+    /** A tap on the orb: mutes the whole tower (it stops talking now), or lets it talk again. Ignored while one is on its way. */
+    suspend fun setMuted(on: Boolean): Result<Unit> {
+        if (_muting.value) return Result.success(Unit)
+        _muting.value = true
+        return try {
+            act { it.setMuted(on) }.map { r ->
+                muteHeldUntil = System.currentTimeMillis() + MUTE_HOLD_MS
+                _state.value = _state.value?.copy(muted = r.muted)
+                mutedIs(r.muted)
+            }
+        } finally {
+            _muting.value = false
+        }
+    }
 
     private val _hushWord = MutableStateFlow(settings.hushWord)
     /** Whether saying "stop" while it talks on the phone stops it. */
@@ -571,10 +649,22 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             throw SSLMismatch(CertificateMismatchException(endpoint.fingerprint, fp))
         }
         val c = Credentials(endpoint.host, endpoint.port, endpoint.fingerprint, r.token, r.device.id, r.device.name.ifBlank { name })
+        val before = _creds.value
         store.save(c)
         client = clientFor(c)
-        _history.value = emptyList()
-        _thread.value = emptyList()
+        val sameTower = before != null && before.host == c.host && before.fingerprint == c.fingerprint
+        // The old pairing's token is revoked on its tower (best effort, it may be off): another tower's always,
+        // the same tower's when this pairing is a new device there (pairing again over a revoked token is a no-op).
+        if (before != null && before.token != c.token && (!sameTower || before.deviceId != c.deviceId)) {
+            scope.launch {
+                withTimeoutOrNull(10_000) {
+                    runCatching { TowerClient(before.endpoint, { before.token }).unpair() }
+                        .onFailure { Log.i(TAG, "old pairing not revoked: ${it.javaClass.simpleName}") }
+                }
+            }
+        }
+        // Another tower (or the same one again): nothing from before carries over.
+        forgetTower(sameTower = sameTower)
         _creds.value = c
         guessName(c.host)
         Result.success(c)
@@ -592,14 +682,39 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         store.clear()
         client = null
         _creds.value = null
+        forgetTower(sameTower = false)
+    }
+
+    /** Drops everything learnt from the tower (on unpairing, or pairing again); [sameTower] keeps its name. */
+    private fun forgetTower(sameTower: Boolean) {
+        _blocked.value = null
         _state.value = null
         _history.value = emptyList()
         _spaces.value = SpacesResponse()
         _jobs.value = emptyList()
         _agents.value = emptyList()
+        _unreachable.value = emptyList()
         _screenshots.value = emptyList()
         _thread.value = emptyList()
         _threadSupported.value = null
+        _threadMore.value = true
+        _accounts.value = AccountsResponse()
+        _behaviors.value = null
+        _behaviorsSupported.value = false
+        _behaviorHistory.value = emptyList()
+        _lastBehaviorChange.value = null
+        localStatus.clear()
+        _questions.value = emptyList()
+        _questionsSupported.value = false
+        _questionPolicy.value = null
+        notices.forget()
+        images.clear() // another tower's pictures could share an id
+        lastClip = null
+        _route.value = null
+        settings.audioRoute = null
+        muteHeldUntil = 0
+        mutedIs(false)
+        if (!sameTower) renameTower("")
     }
 
     companion object {
@@ -610,6 +725,17 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         const val RECENT_MS = 60_000L
         /** How long the stream stays open after asking, with the app in the background. */
         const val LINGER_MS = 120_000L
+        /** How long a `state` that disagrees with a mute just set is taken as stale. */
+        private const val MUTE_HOLD_MS = 3_000L
+        /** How long an answer sent from here shows as answered while the tower still says open. */
+        private const val ANSWERED_HOLD_MS = 5_000L
+
+        /** The stream to keep open: the voice whenever this phone is it (on screen or not), else the feed while on screen or lingering. */
+        fun streamMode(voice: Boolean, foreground: Boolean, lingering: Boolean): StreamMode = when {
+            voice -> StreamMode.Voice
+            foreground || lingering -> StreamMode.Panel
+            else -> StreamMode.Idle
+        }
 
         fun defaultDeviceName(): String = Build.MODEL?.takeIf { it.isNotBlank() } ?: "Android phone"
 
@@ -624,7 +750,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         fun describe(e: Throwable): String = when (e) {
             is TowerApiException -> when (e.code) {
                 "wrong_code" -> "That isn't the code on the Mac." + (e.triesLeft?.let { " $it tries left." } ?: "")
-                "pairing_closed" -> "No pairing code is open on the Mac. Run `tower phone pair` there."
+                "pairing_closed" -> "No pairing code is open on the Mac. Run “tower phone pair” there."
                 "too_many_failures" -> "Too many failed tries. Wait a minute."
                 "too_many_images" -> "Six pictures at most in one message."
                 "image_too_large" -> "A picture is too large (15 MB at most)."

@@ -4,6 +4,7 @@ import kotlinx.serialization.SerialName
 import kotlinx.serialization.Serializable
 import kotlinx.serialization.json.Json
 import kotlinx.serialization.json.JsonElement
+import kotlinx.serialization.json.contentOrNull
 
 /**
  * The tower's JSON, as `docs/mobile-api.md` (v1) describes it. Unknown keys are
@@ -78,6 +79,8 @@ data class TowerState(
     val armed: Boolean = false,
     val transcribing: Boolean = false,
     val speaking: Boolean = false,
+    /** The tower-wide mute (`tower mute`): it says nothing, on the Mac or any phone. */
+    val muted: Boolean = false,
     val announcing: Boolean = false,
     val brain: String = "",
     @SerialName("brain_app") val brainApp: String = "",
@@ -242,6 +245,10 @@ data class FocusResponse(val focus: String? = null)
 @Serializable
 data class ModeRequest(val mode: String)
 
+/** `POST /v1/mute` and its answer. */
+@Serializable
+data class Mute(val muted: Boolean = false)
+
 @Serializable
 data class VoiceResult(val heard: String = "", val sent: Boolean = false)
 
@@ -326,14 +333,13 @@ data class ChatMessage(
 
     /** The attachments' paths on the Mac, in token order (`attachments[n-1]` is token `#n`). */
     fun attachmentPaths(): List<String> = attachments.mapIndexedNotNull { i, e ->
+        // A JSON null is no path (not the word "null"), but keeps its place in the token order.
+        fun text(v: JsonElement?) = (v as? kotlinx.serialization.json.JsonPrimitive)?.contentOrNull?.takeIf { it.isNotBlank() }
         when (e) {
-            is kotlinx.serialization.json.JsonPrimitive -> (i + 1) to e.content
+            is kotlinx.serialization.json.JsonPrimitive -> (i + 1) to text(e).orEmpty()
             is kotlinx.serialization.json.JsonObject -> {
-                val n = (e["n"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.toIntOrNull() ?: (i + 1)
-                val path = (e["path"] as? kotlinx.serialization.json.JsonPrimitive)?.content
-                    ?: (e["url"] as? kotlinx.serialization.json.JsonPrimitive)?.content?.takeIf { it != "null" }
-                    ?: ""
-                n to path
+                val n = text(e["n"])?.toIntOrNull() ?: (i + 1)
+                n to (text(e["path"]) ?: text(e["url"]) ?: "")
             }
             else -> null
         }
@@ -342,7 +348,7 @@ data class ChatMessage(
     /** The screenshots as objects the gallery and viewer can show. */
     fun shots(): List<Screenshot> = screenshots.mapNotNull { e ->
         when (e) {
-            is kotlinx.serialization.json.JsonPrimitive -> e.content.takeIf { it.isNotBlank() }?.let { Screenshot(id = it, at = at, url = "/v1/screenshots/$it") }
+            is kotlinx.serialization.json.JsonPrimitive -> e.contentOrNull?.takeIf { it.isNotBlank() }?.let { Screenshot(id = it, at = at, url = "/v1/screenshots/$it") }
             is kotlinx.serialization.json.JsonObject -> runCatching { TowerJson.decodeFromJsonElement(Screenshot.serializer(), e) }.getOrNull()
                 ?.let { if (it.url.isBlank()) it.copy(url = "/v1/screenshots/${it.id}") else it }
             else -> null

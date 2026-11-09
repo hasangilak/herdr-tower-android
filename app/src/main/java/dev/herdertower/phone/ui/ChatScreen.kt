@@ -45,7 +45,6 @@ import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.Image
 import androidx.compose.material.icons.filled.PlayCircle
 import androidx.compose.material.icons.filled.Description
-import androidx.compose.runtime.produceState
 import androidx.compose.material.icons.filled.Info
 import androidx.compose.material.icons.filled.PhotoLibrary
 import androidx.compose.material.icons.filled.Mic
@@ -114,16 +113,19 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
     // A tower from before `work`: the phone times the turn from when it saw it start.
     var since by remember { mutableLongStateOf(0L) }
     LaunchedEffect(thinking) { since = if (thinking) System.currentTimeMillis() else 0L }
+    val pendingSent by composer.pending.collectAsStateWithLifecycle()
+    // The clock moves each second only while something timed shows (the working line, a message on its way);
+    // otherwise once a minute is enough, and the whole screen isn't recomposed every second.
+    val ticking = thinking || state?.work != null || pendingSent.isNotEmpty()
     var now by remember { mutableLongStateOf(System.currentTimeMillis()) }
-    LaunchedEffect(Unit) {
+    LaunchedEffect(ticking) {
         while (true) {
             now = System.currentTimeMillis()
-            kotlinx.coroutines.delay(1000)
+            kotlinx.coroutines.delay(if (ticking) 1000 else 60_000)
         }
     }
     var viewing by remember { mutableStateOf<Pair<List<Pic>, Int>?>(null) }
 
-    val pendingSent by composer.pending.collectAsStateWithLifecycle()
     // The tower's thread when it has one (the same as the Mac panel's); otherwise the history.
     val useThread = threadOn == true
     val entries = remember(useThread, thread, history) { if (useThread) thread.map(ChatModel::entry) else history }
@@ -167,7 +169,7 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
         inputBar = {
             // Questions left to the user stay in view above the input, until answered.
             // A short screen (landscape, large text) keeps room for the input: the cards scroll in less.
-            val tall = androidx.compose.ui.platform.LocalConfiguration.current.screenHeightDp >= 560
+            val tall = with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.height.toDp() } >= 560.dp
             QuestionCards(QuestionModel.forUser(questions), onQuestion, Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp).heightIn(max = if (tall) 260.dp else 96.dp).verticalScroll(rememberScrollState()), compact = true)
             Column(
                 Modifier
@@ -209,7 +211,8 @@ private fun SentFiles(session: TowerSession, e: HistoryEntry, onOpen: (List<Pic>
         if (pictures.isNotEmpty()) {
             Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 pictures.forEachIndexed { i, path ->
-                    val img by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, path) { value = session.images.loadAttachment(path, 360) }
+                    // Tried again when the connection comes back, if it failed.
+                    val img = rememberPicture(session, "att:$path@360") { session.images.loadAttachment(path, 360) }
                     Box(
                         Modifier.size(if (pictures.size == 1) 180.dp else 88.dp).clip(RoundedCornerShape(14.dp)).background(Color.Black.copy(alpha = 0.18f))
                             .clickable(role = Role.Button, onClickLabel = "View picture ${i + 1}") { onOpen(pics, i) }
@@ -388,7 +391,8 @@ fun UserBubble(e: HistoryEntry, files: @Composable (HistoryEntry) -> Unit = {}) 
 fun ReplyBubble(e: HistoryEntry, shots: @Composable (List<ChatModel.ShotRef>, Modifier) -> Unit = { _, _ -> }) {
     val (text, refs) = remember(e.text) { ChatModel.shots(e.text) }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
-        OrbGlyph(Modifier.padding(top = 6.dp).size(28.dp).semantics { contentDescription = "Tower" })
+        // Not a switch: a stray tap on a reply mustn't mute the whole tower (the header's orb does that).
+        OrbGlyph(Modifier.padding(top = 6.dp).size(28.dp).semantics { contentDescription = "Tower" }, muted = LocalMute.current.muted)
         Spacer(Modifier.width(10.dp))
         Column(
             Modifier
@@ -417,7 +421,7 @@ private fun WorkingLine(work: dev.herdertower.phone.api.Work, now: Long) {
             .semantics { contentDescription = "The tower: ${if (detail.isEmpty()) word else "$word $detail"}, ${span(elapsed)}" },
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        OrbGlyph(Modifier.size(18.dp).alpha(a))
+        OrbGlyph(Modifier.size(18.dp).alpha(a), muted = LocalMute.current.muted)
         Spacer(Modifier.width(10.dp))
         Text(if (detail.isEmpty()) "$word…" else word, style = MaterialTheme.typography.bodyMedium, color = tc.text, fontWeight = androidx.compose.ui.text.font.FontWeight.Medium)
         if (detail.isNotEmpty()) Text(" $detail…", Modifier.weight(1f, fill = false), style = MaterialTheme.typography.bodyMedium, color = tc.text, maxLines = 1, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis)

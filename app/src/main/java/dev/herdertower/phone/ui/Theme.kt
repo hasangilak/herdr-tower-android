@@ -1,5 +1,9 @@
 package dev.herdertower.phone.ui
 
+import android.content.Context
+import android.database.ContentObserver
+import android.os.Handler
+import android.os.Looper
 import android.provider.Settings
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.tween
@@ -17,9 +21,12 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.Immutable
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.drawBehind
@@ -167,8 +174,18 @@ fun TowerTheme(mode: String = "system", content: @Composable () -> Unit) {
     }
     val t = if (dark) DarkTower else LightTower
     val context = LocalContext.current
-    val reduce = remember {
-        runCatching { Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f }.getOrDefault(false)
+    // Followed while the app runs: the setting can change from the quick settings.
+    var reduce by remember { mutableStateOf(animationsOff(context)) }
+    DisposableEffect(context) {
+        val watch = object : ContentObserver(Handler(Looper.getMainLooper())) {
+            override fun onChange(selfChange: Boolean) {
+                reduce = animationsOff(context)
+            }
+        }
+        val uri = Settings.Global.getUriFor(Settings.Global.ANIMATOR_DURATION_SCALE)
+        runCatching { context.contentResolver.registerContentObserver(uri, false, watch) }
+        reduce = animationsOff(context)
+        onDispose { runCatching { context.contentResolver.unregisterContentObserver(watch) } }
     }
     val scheme = if (dark) {
         darkColorScheme(
@@ -199,6 +216,9 @@ fun TowerTheme(mode: String = "system", content: @Composable () -> Unit) {
         MaterialTheme(colorScheme = scheme, typography = TowerType, content = content)
     }
 }
+
+private fun animationsOff(context: Context): Boolean =
+    runCatching { Settings.Global.getFloat(context.contentResolver, Settings.Global.ANIMATOR_DURATION_SCALE, 1f) == 0f }.getOrDefault(false)
 
 /** The backdrop's glow for the orb's phase: the Mac cue's colour, or copper when calm. */
 fun glowFor(phase: String, needsYou: Boolean): Color = when {

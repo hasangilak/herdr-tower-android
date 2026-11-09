@@ -42,6 +42,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import dev.herdertower.phone.api.HistoryEntry
 import dev.herdertower.phone.api.Job
 import dev.herdertower.phone.api.Screenshot
 import dev.herdertower.phone.data.TowerSession
@@ -123,13 +124,14 @@ fun ActivityScreen(session: TowerSession, onBack: () -> Unit, onOpen: (String) -
                     val lines = history.filter { it.kind != "request" && it.kind != "answer" && it.session != null && current.fits(it.space, it.session) }.asReversed()
                     if (lines.isEmpty()) item { Empty("No activity yet", "Jobs, session reports and alerts show up here as they happen.") }
                     var day = ""
+                    val keys = LazyKeys()
                     lines.forEach { e ->
                         val d = dayLabel(e.at)
                         if (d != day) {
                             day = d
-                            item(key = "day$d") { Text(d, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.labelSmall, color = tc.faint) }
+                            item(key = keys.unique("day$d")) { Text(d, Modifier.padding(top = 4.dp), style = MaterialTheme.typography.labelSmall, color = tc.faint) }
                         }
-                        item(key = "h${e.at}${e.kind}${e.text.hashCode()}") { EventLine(e, acc, onOpen) }
+                        item(key = keys.unique(historyKey(e))) { EventLine(e, acc, onOpen) }
                     }
                     if (history.isNotEmpty()) item {
                         Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -164,6 +166,21 @@ fun ActivityScreen(session: TowerSession, onBack: () -> Unit, onOpen: (String) -
 }
 
 private fun key(s: Scope) = "${s.space.orEmpty()}|${s.session.orEmpty()}"
+
+/** A history line's list key: what the history keeps it apart by (time, kind, session, words). */
+internal fun historyKey(e: HistoryEntry) = "h${e.at}|${e.kind}|${e.session.orEmpty()}|${e.text.hashCode()}"
+
+/** Keys for one lazy list, each used once: a repeat gets a suffix (a duplicate key crashes the list). */
+internal class LazyKeys {
+    private val seen = HashSet<String>()
+
+    fun unique(key: String): String {
+        if (seen.add(key)) return key
+        var n = 2
+        while (!seen.add("$key#$n")) n++
+        return "$key#$n"
+    }
+}
 
 @Composable
 private fun Empty(title: String, text: String) {

@@ -35,10 +35,35 @@ object DraftTokens {
         return before + piece + after to (before.length + piece.length)
     }
 
-    /** [text] without the token numbered [n] (and the space it leaves doubled). */
-    fun remove(text: String, n: Int): String =
-        TOKEN.replace(text) { m -> if (number(m) == n) "" else m.value }
-            .replace(Regex("""[ \t]{2,}"""), " ").replace(Regex("""^ | $"""), "").let { if (it.isBlank()) "" else it }
+    /** [text] without the token numbered [n], and the space it leaves doubled there (the rest of the text keeps its spacing). */
+    fun remove(text: String, n: Int): String {
+        val out = StringBuilder()
+        var i = 0
+        for (m in TOKEN.findAll(text)) {
+            if (number(m) != n) continue
+            out.append(text, i, m.range.first)
+            var j = m.range.last + 1
+            val before = out.lastOrNull()
+            val after = text.getOrNull(j)
+            // One space stays between words; none at the start or end of a line.
+            if (after == ' ' && (before == null || before == ' ' || before == '\n')) j++
+            else if (before == ' ' && (after == null || after == '\n')) out.setLength(out.length - 1)
+            i = j
+        }
+        out.append(text, i, text.length)
+        return out.toString().let { if (it.isBlank()) "" else it }
+    }
+
+    /**
+     * What stays in the box after [sent] went: the draft as it is [now], less
+     * the [sent] text it started with and the tokens of the files that went
+     * with it ([sentNumbers]). What was typed or attached meanwhile stays.
+     */
+    fun afterSend(sent: String, now: String, sentNumbers: Collection<Int>): String {
+        var rest = if (now.startsWith(sent)) now.substring(sent.length) else now
+        for (n in sentNumbers) rest = remove(rest, n)
+        return rest.trim()
+    }
 
     /** The next number for a new attachment: one past every number used in this message. */
     fun next(text: String, used: Collection<Int>): Int = ((numbers(text) + used).maxOrNull() ?: 0) + 1

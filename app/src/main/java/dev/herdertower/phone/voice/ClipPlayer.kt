@@ -102,10 +102,13 @@ class ClipPlayer(
     private var underrunsAtStart = 0
     private var stretchGeneration = 0
 
-    private val attributes = AudioAttributes.Builder()
-        .setUsage(AudioAttributes.USAGE_MEDIA)
-        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-        .build()
+    // Lazy: made when the first clip plays (and not at all in the JVM tests, where Android's classes are stubs).
+    private val attributes by lazy {
+        AudioAttributes.Builder()
+            .setUsage(AudioAttributes.USAGE_MEDIA)
+            .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+            .build()
+    }
 
     init {
         scope.launch(audioThread) {
@@ -137,6 +140,7 @@ class ClipPlayer(
      * the rest of that reply (its later sentences) is ignored too. Alerts and
      * cues still play.
      */
+    @OptIn(kotlinx.coroutines.ExperimentalCoroutinesApi::class) // Channel.isEmpty
     fun stop() {
         if (_now.value != null || !queue.isEmpty) mutedUntil = System.currentTimeMillis() + MUTE_MS
         hush()
@@ -147,7 +151,11 @@ class ClipPlayer(
         mutedUntil = 0
     }
 
+    /** The tower is muted (`tower mute`): nothing plays until it is unmuted. */
+    @Volatile var silenced = false
+
     fun enqueue(clip: AudioClip) {
+        if (silenced) return
         if (clip.kind == "ack") mutedUntil = 0 // a new turn began
         if (clip.kind == "reply" && muted) return
         val g = generation
@@ -215,6 +223,11 @@ class ClipPlayer(
         silentMs = 0
         clipsInStretch++
         _now.value = item.clip
+        // Hushed between the check above and now: don't leave this clip showing as playing.
+        if (item.generation != generation) {
+            _now.value = null
+            return
+        }
         if (!streaming || stretchGeneration != generation) {
             streaming = true
             stretchGeneration = generation

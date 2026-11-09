@@ -9,13 +9,18 @@ package dev.herdertower.phone.voice
  * room, so starting to talk straight away made later, softer words count
  * as silence). Speech must rise well above the floor to start, but only a
  * little to go on, so trailing soft words don't count as a pause. It ends
- * after [pauseMs] of real quiet that follows at least 100 ms of speech.
+ * after [pauseMs] of real quiet that follows at least 100 ms of speech in
+ * one stretch (clicks here and there don't add up to speech).
+ *
+ * Once someone has spoken, a soft frame lifts the floor only as far as the
+ * quietest frame of the last second: soft words can't push the floor up
+ * until the talking itself counts as quiet.
  */
 class SpeechEnd(private val pauseMs: Int, private val minLevel: Double = 300.0) {
     private val frameMs = 20
     var floor = -1.0
         private set
-    /** Speech was heard (at least 100 ms of it). */
+    /** Speech was heard (at least 100 ms of it in one stretch). */
     var spoke = false
         private set
     var voicedMs = 0
@@ -25,10 +30,17 @@ class SpeechEnd(private val pauseMs: Int, private val minLevel: Double = 300.0) 
         private set
     private var speaking = false
     private var frames = 0
+    /** Loud time in the stretch going on now (short dips between syllables don't end it). */
+    private var stretchMs = 0
+    private var gapMs = 0
+    /** The last second of frames, for its quietest. */
+    private val recent = ArrayDeque<Double>()
 
     /** One frame's RMS; true when the pause after speech is long enough to stop. */
     fun feed(rms: Double): Boolean {
         frames++
+        recent.addLast(rms)
+        if (recent.size > WINDOW) recent.removeFirst()
         // The first 200 ms: the room is the quietest frame (speech dips between syllables, a fan doesn't).
         if (frames <= WARMUP) {
             floor = if (floor < 0) rms else minOf(floor, rms)
@@ -40,14 +52,23 @@ class SpeechEnd(private val pauseMs: Int, private val minLevel: Double = 300.0) 
         if (loud) {
             speaking = true
             voicedMs += frameMs
-            if (voicedMs >= 100) spoke = true
+            stretchMs += frameMs
+            gapMs = 0
+            if (stretchMs >= 100) spoke = true
             silentMs = 0
             // A steady new noise (a fan, the tower talking) slowly becomes the room, over ~10 s.
             floor += (rms - floor) * 0.002
         } else {
             speaking = false
+            gapMs += frameMs
+            if (gapMs > MAX_GAP_MS) stretchMs = 0
             if (spoke) silentMs += frameMs
-            floor += (rms - floor) * if (rms < floor) 0.3 else 0.03
+            floor += when {
+                rms < floor -> (rms - floor) * 0.3
+                // After speech: no higher than the quietest of the last second, so soft words can't lift it.
+                spoke -> (minOf(rms, recent.min()) - floor).coerceAtLeast(0.0) * 0.03
+                else -> (rms - floor) * 0.03
+            }
         }
         return spoke && silentMs >= pauseMs
     }
@@ -60,6 +81,10 @@ class SpeechEnd(private val pauseMs: Int, private val minLevel: Double = 300.0) 
 
     private companion object {
         const val WARMUP = 10
+        /** One second of frames. */
+        const val WINDOW = 50
+        /** A dip longer than this ends a stretch of speech. */
+        const val MAX_GAP_MS = 100
     }
 }
 

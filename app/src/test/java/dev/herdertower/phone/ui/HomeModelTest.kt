@@ -7,7 +7,9 @@ import dev.herdertower.phone.api.Space
 import dev.herdertower.phone.api.SpaceSession
 import dev.herdertower.phone.api.SpacesResponse
 import dev.herdertower.phone.api.StateAgent
+import dev.herdertower.phone.data.Link
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Test
 
@@ -64,5 +66,18 @@ class HomeModelTest {
         assertEquals("blocked", HomeModel.orbPhase(true, "blocked", false, false, null))
         assertTrue(HomeModel.needsYou(true, "idle", 1))
         assertTrue(!HomeModel.needsYou(false, "blocked", 1))
+    }
+
+    @Test fun aRetryInFlightKeepsTheSameCard() {
+        val reason = "Can't reach the tower."
+        // Away: fail, retry, fail again. The card must not drop out while the retry is in flight.
+        val seq = listOf<Link>(Link.Connecting(0), Link.Retrying(1, reason, 1), Link.Connecting(1, reason), Link.Retrying(2, reason, 2), Link.Connecting(2, reason))
+        val shown = seq.map { HomeModel.connectionNotice(it) }
+        assertNull(shown[0]) // a first try says nothing yet
+        assertTrue(shown.drop(1).all { it?.action == NoticeAction.Retry && it.message.startsWith(reason) })
+        assertEquals("$reason Trying again in 2 s.", shown[3]!!.message)
+        assertEquals("$reason Trying again now.", shown[4]!!.message)
+        assertNull(HomeModel.connectionNotice(Link.Live(false)))
+        assertEquals(NoticeAction.Repair, HomeModel.connectionNotice(Link.Revoked("gone"))!!.action)
     }
 }

@@ -54,6 +54,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -88,6 +89,7 @@ import dev.herdertower.phone.data.TowerSession
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.io.File
 
 /**
  * The draft's text field: several lines, Send on the keyboard sends, on a
@@ -98,14 +100,17 @@ import kotlinx.coroutines.withContext
 @Composable
 fun DraftField(composer: Composer, placeholder: String, minLines: Int, onSend: () -> Unit, onPictures: (List<Uri>) -> Unit, modifier: Modifier = Modifier) {
     val empty = composer.input.text.isEmpty()
+    // While it sends, the text stays as it went: what's sent is taken out of the box afterwards.
+    val sending by composer.sending.collectAsStateWithLifecycle()
     BasicTextField(
         state = composer.input,
+        readOnly = sending,
         modifier = modifier
             .semantics { contentDescription = placeholder }
             .onPreviewKeyEvent { ev ->
                 if (ev.type != KeyEventType.KeyDown || (ev.key != Key.Enter && ev.key != Key.NumPadEnter)) return@onPreviewKeyEvent false
                 if (ev.isShiftPressed) {
-                    composer.input.edit {
+                    if (!sending) composer.input.edit {
                         val at = selection.min
                         replace(selection.min, selection.max, "\n")
                         selection = TextRange(at + 1)
@@ -159,24 +164,30 @@ fun rememberComposerActions(composer: Composer, onTalk: () -> Unit, onSent: () -
     val scope = rememberCoroutineScope()
     val snack = LocalSnack.current
     val perms = rememberPermissions()
-    var cameraFile by remember { mutableStateOf<java.io.File?>(null) }
+    // Saved: the activity may be recreated while the camera app is in front.
+    var cameraPath by rememberSaveable { mutableStateOf<String?>(null) }
     val add: (List<Uri>) -> Unit = { uris -> scope.launch { composer.add(uris)?.let(snack) } }
     val pick = rememberLauncherForActivityResult(ActivityResultContracts.PickMultipleVisualMedia(Composer.MAX_FILES)) { if (it.isNotEmpty()) add(it) }
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { if (it.isNotEmpty()) add(it) }
     val shoot = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { ok ->
-        val f = cameraFile
-        cameraFile = null
+        val f = cameraPath?.let(::File)
+        cameraPath = null
         if (ok && f != null) scope.launch { composer.addCameraFile(f)?.let(snack) } else f?.delete()
     }
     val engine by composer.dictation.collectAsStateWithLifecycle()
     val error by engine.error.collectAsStateWithLifecycle()
-    LaunchedEffect(error) { error?.let(snack) }
+    LaunchedEffect(error) {
+        error?.let {
+            snack(it)
+            engine.clearError() // shown once, not again on the next screen
+        }
+    }
     return remember(composer) {
         ComposerActions(
             send = {
                 scope.launch {
                     composer.send()
-                        .onSuccess { onSent() }
+                        .onSuccess { if (it) onSent() }
                         .onFailure { snack("Couldn't send: ${TowerSession.describe(it)}") }
                 }
             },
@@ -186,7 +197,7 @@ fun rememberComposerActions(composer: Composer, onTalk: () -> Unit, onSent: () -
             camera = {
                 perms.withCamera {
                     val f = composer.cameraFile()
-                    cameraFile = f
+                    cameraPath = f.path
                     shoot.launch(FileProvider.getUriForFile(context, context.packageName + ".files", f))
                 }
             },
@@ -300,7 +311,7 @@ fun DictationHint(composer: Composer) {
     val active by engine.active.collectAsStateWithLifecycle()
     AnimatedVisibility(active) {
         Row(Modifier.padding(bottom = 6.dp), verticalAlignment = Alignment.CenterVertically) {
-            Dot(tc.blocked, 7.dp)
+            Dot(tc.blocked, size = 7.dp)
             Spacer(Modifier.width(8.dp))
             Text("Listening… the words go into your message to edit. Tap stop when done.", style = MaterialTheme.typography.labelMedium, color = tc.muted)
         }

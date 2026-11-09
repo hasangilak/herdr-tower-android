@@ -18,6 +18,8 @@ class CertificateMismatchException(val expected: String, val got: String) :
  * SHA-256. There is no CA; the fingerprint came out of band (the pairing QR,
  * or the user comparing it with what the Mac printed).
  */
+// Pins the one certificate the tower makes for itself (self-signed, so the system CAs can never vouch for it); tested in TowerClientTest.
+@android.annotation.SuppressLint("CustomX509TrustManager")
 class PinnedTrustManager(fingerprint: String) : X509TrustManager {
     private val pin = requireNotNull(Fingerprint.normalize(fingerprint)) { "not a SHA-256 fingerprint" }
 
@@ -52,6 +54,8 @@ class PinnedTrustManager(fingerprint: String) : X509TrustManager {
 object CertificateProbe {
     fun fingerprint(host: String, port: Int, timeoutMs: Int = 5000): String {
         var seen: X509Certificate? = null
+        // Accepts any certificate on purpose: it only reads the fingerprint for the user to compare; nothing is sent.
+        @android.annotation.SuppressLint("CustomX509TrustManager")
         val capture = object : X509TrustManager {
             override fun checkServerTrusted(chain: Array<out X509Certificate>?, authType: String?) {
                 seen = chain?.firstOrNull() ?: throw CertificateException("no certificate")
@@ -61,9 +65,14 @@ object CertificateProbe {
         }
         val ctx = SSLContext.getInstance("TLS").apply { init(null, arrayOf(capture), SecureRandom()) }
         val raw = java.net.Socket()
-        raw.connect(InetSocketAddress(host, port), timeoutMs)
-        raw.soTimeout = timeoutMs
-        (ctx.socketFactory.createSocket(raw, host, port, true) as SSLSocket).use { it.startHandshake() }
+        try {
+            raw.connect(InetSocketAddress(host, port), timeoutMs)
+            raw.soTimeout = timeoutMs
+            (ctx.socketFactory.createSocket(raw, host, port, true) as SSLSocket).use { it.startHandshake() }
+        } finally {
+            // Closed on every path, also when the connect or the handshake fails.
+            runCatching { raw.close() }
+        }
         return Fingerprint.of(seen ?: throw CertificateException("The tower sent no certificate"))
     }
 }

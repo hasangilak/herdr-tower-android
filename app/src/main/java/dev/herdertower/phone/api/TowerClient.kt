@@ -1,6 +1,7 @@
 package dev.herdertower.phone.api
 
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.asExecutor
 import kotlinx.coroutines.channels.Channel
 import kotlinx.coroutines.channels.awaitClose
 import kotlinx.coroutines.flow.Flow
@@ -8,12 +9,15 @@ import kotlinx.coroutines.flow.buffer
 import kotlinx.coroutines.flow.callbackFlow
 import kotlinx.coroutines.flow.flowOn
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.suspendCancellableCoroutine
+import kotlin.coroutines.resumeWithException
 import kotlinx.coroutines.withContext
 import kotlinx.serialization.KSerializer
 import kotlinx.serialization.json.JsonNull
 import kotlinx.serialization.json.JsonPrimitive
 import kotlinx.serialization.json.buildJsonObject
 import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.HttpUrl
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
@@ -49,6 +53,9 @@ class TowerClient(
     private val trust = PinnedTrustManager(endpoint.fingerprint)
 
     private val http: OkHttpClient = base.newBuilder()
+        // Calls are queued on OkHttp's dispatcher (so they can be cancelled); the tower serves one request per
+        // connection, and a reconnect asks for several things at once: don't hold them to OkHttp's 5 per host.
+        .dispatcher(okhttp3.Dispatcher().apply { maxRequests = 32; maxRequestsPerHost = 16 })
         .sslSocketFactory(trust.sslContext().socketFactory, trust)
         .hostnameVerifier(PinnedTrustManager.ANY_HOST)
         // The tower speaks HTTP/1.1 only.
@@ -91,24 +98,36 @@ class TowerClient(
     private fun <T> json(serializer: KSerializer<T>, value: T): RequestBody =
         TowerJson.encodeToString(serializer, value).toRequestBody(JSON)
 
-    private suspend fun execute(call: Call): Response = withContext(Dispatchers.IO) {
-        try {
-            call.execute()
-        } catch (e: IOException) {
-            throw translate(e)
-        }
+    /**
+     * Runs [call] and waits for its response. Cancelling the coroutine cancels
+     * the call: a blocking `execute()` would carry on, so an upload the screen
+     * gave up on would still reach the tower.
+     */
+    private suspend fun execute(call: Call): Response = suspendCancellableCoroutine { cont ->
+        cont.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                cont.resumeWithException(translate(e))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                // Cancelled as it came: close it off the main thread (closing a TLS socket there throws).
+                cont.resume(response) { _, r, _ -> closeOffMain(r) }
+            }
+        })
     }
 
-    private suspend fun <T> call(client: OkHttpClient, req: Request, serializer: KSerializer<T>): T {
-        val resp = execute(client.newCall(req))
-        return withContext(Dispatchers.IO) {
-            resp.use {
-                val body = it.body.string()
-                if (!it.isSuccessful) throw error(it.code, body)
-                TowerJson.decodeFromString(serializer, body.ifBlank { "{}" })
-            }
-        }
+    /** Runs [call] and reads its response, both on the IO threads; the response is always closed. */
+    private suspend fun <T> fetch(call: Call, read: (Response) -> T): T = withContext(Dispatchers.IO) {
+        execute(call).use(read)
     }
+
+    private suspend fun <T> call(client: OkHttpClient, req: Request, serializer: KSerializer<T>): T =
+        fetch(client.newCall(req)) {
+            val body = it.body.string()
+            if (!it.isSuccessful) throw error(it.code, body)
+            TowerJson.decodeFromString(serializer, body.ifBlank { "{}" })
+        }
 
     private suspend fun <T> get(serializer: KSerializer<T>, vararg segments: String, query: Map<String, String?> = emptyMap(), client: OkHttpClient = http): T =
         call(client, request(url(*segments, query = query)).get().build(), serializer)
@@ -148,13 +167,10 @@ class TowerClient(
     /** `GET /v1/chat?before=&limit=`: a page of the main chat thread (the latest, or before message [before]). */
     suspend fun chat(before: String? = null, limit: Int = 50): ChatPage {
         val req = request(url("chat", query = mapOf("before" to before, "limit" to limit.toString()))).get().build()
-        val resp = execute(http.newCall(req))
-        return withContext(Dispatchers.IO) {
-            resp.use {
-                val body = it.body.string()
-                if (!it.isSuccessful) throw error(it.code, body)
-                ChatApi.page(body)
-            }
+        return fetch(http.newCall(req)) {
+            val body = it.body.string()
+            if (!it.isSuccessful) throw error(it.code, body)
+            ChatApi.page(body)
         }
     }
 
@@ -303,6 +319,9 @@ class TowerClient(
         post(Ignored.serializer(), ByteArray(0).toRequestBody(null), "hush")
     }
 
+    /** The tower-wide mute: the tower stops talking now and says nothing, anywhere, until unmuted. */
+    suspend fun setMuted(on: Boolean): Mute = post(Mute.serializer(), json(Mute.serializer(), Mute(on)), "mute")
+
     suspend fun mode(mode: String) {
         post(Ignored.serializer(), json(ModeRequest.serializer(), ModeRequest(mode)), "mode")
     }
@@ -318,12 +337,9 @@ class TowerClient(
         val u = path.takeIf { it.startsWith("/v1/") }?.let { p ->
             HttpUrl.Builder().scheme("https").host(endpoint.host).port(endpoint.port).encodedPath(p).build()
         } ?: url(*segments.toTypedArray())
-        val resp = execute(http.newCall(request(u).header("Accept", accept).get().build()))
-        return withContext(Dispatchers.IO) {
-            resp.use {
-                if (!it.isSuccessful) throw error(it.code, it.body.string())
-                it.body.bytes()
-            }
+        return fetch(http.newCall(request(u).header("Accept", accept).get().build())) {
+            if (!it.isSuccessful) throw error(it.code, it.body.string())
+            it.body.bytes()
         }
     }
 
@@ -374,6 +390,11 @@ class TowerClient(
     private class Ignored
 
     companion object {
+        /** Closes a response on an IO thread: a cancellation can run on the main thread, where network calls throw. */
+        private fun closeOffMain(r: Response) {
+            Dispatchers.IO.asExecutor().execute { runCatching { r.close() } }
+        }
+
         val JSON = "application/json; charset=utf-8".toMediaType()
         val WAV = "audio/wav".toMediaType()
 
@@ -400,7 +421,7 @@ class TowerClient(
             return when (e) {
                 is TowerApiException, is UnreachableException, is SSLMismatch -> e
                 is SocketTimeoutException -> UnreachableException("The tower didn't answer in time.", e)
-                is ConnectException, is NoRouteToHostException -> UnreachableException("Can't reach the tower. Is the Mac on this network and `tower phone enable` on?", e)
+                is ConnectException, is NoRouteToHostException -> UnreachableException("Can't reach the tower. Is the Mac on this network and “tower phone enable” on?", e)
                 is UnknownHostException -> UnreachableException("Unknown address.", e)
                 is SSLException -> UnreachableException("Secure connection failed: ${e.message}", e)
                 else -> UnreachableException(e.message ?: "Connection failed.", e)

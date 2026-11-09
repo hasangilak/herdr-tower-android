@@ -1,6 +1,7 @@
 package dev.herdertower.phone.ui
 
 import android.content.Context
+import androidx.core.content.edit
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -54,7 +55,7 @@ fun SpaceScreen(session: TowerSession, name: String, onBack: () -> Unit, onOpen:
     val focused = spaces.focus == name
     // What was held here counts as delivered once you've looked (when you leave).
     val prevRead = remember(name) { readPrefs(context).getLong(name, 0L) }
-    DisposableEffect(name) { onDispose { readPrefs(context).edit().putLong(name, System.currentTimeMillis()).apply() } }
+    DisposableEffect(name) { onDispose { readPrefs(context).edit { putLong(name, System.currentTimeMillis()) } } }
     val now = System.currentTimeMillis()
 
     val section: @Composable (String) -> Unit = { t ->
@@ -89,7 +90,7 @@ fun SpaceScreen(session: TowerSession, name: String, onBack: () -> Unit, onOpen:
                             verticalAlignment = Alignment.CenterVertically,
                             horizontalArrangement = Arrangement.spacedBy(6.dp),
                         ) {
-                            Dot(tc.status(s.status), 7.dp)
+                            Dot(tc.status(s.status), size = 7.dp)
                             Text(s.label, style = MaterialTheme.typography.labelLarge, color = tc.text)
                             if (s.status.isNotEmpty()) Text(s.status, style = MaterialTheme.typography.labelMedium, color = tc.muted)
                             (s.account ?: acc.of(s.address))?.let { AccountBadge(it, it == acc.default) }

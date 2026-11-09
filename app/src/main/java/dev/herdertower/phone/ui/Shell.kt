@@ -17,13 +17,7 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.heightIn
-import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.material.icons.filled.Stop
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.draw.shadow
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -78,6 +72,7 @@ import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
+import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.herdertower.phone.data.Link
 import dev.herdertower.phone.data.TowerSession
@@ -115,7 +110,8 @@ sealed interface Route {
             Activity -> "activity"
             is Session -> "session:${r.address}"
             is Space -> "space:${r.name}"
-            is Screenshots -> "shots:${r.session.orEmpty()}:${r.open.orEmpty()}"
+            // \u0002 between the two: a session's address or a file name may hold a colon.
+            is Screenshots -> "shots:${r.session.orEmpty()}\u0002${r.open.orEmpty()}"
             is Question -> "question:${r.id}"
             Behaviors -> "behaviors"
             is Behavior -> "behavior:${r.id.orEmpty()}"
@@ -131,7 +127,8 @@ sealed interface Route {
             s.startsWith("question:") -> Question(s.removePrefix("question:"))
             s == "behaviors" -> Behaviors
             s.startsWith("behavior:") -> Behavior(s.removePrefix("behavior:").ifEmpty { null })
-            s.startsWith("shots:") -> s.removePrefix("shots:").split(":", limit = 2).let { Screenshots(it[0].ifEmpty { null }, it.getOrNull(1)?.ifEmpty { null }) }
+            s.startsWith("shots:") -> s.removePrefix("shots:").let { rest -> if ('\u0002' in rest) rest.split('\u0002', limit = 2) else rest.split(":", limit = 2) }
+                .let { Screenshots(it[0].ifEmpty { null }, it.getOrNull(1)?.ifEmpty { null }) }
             else -> Home
         }
 
@@ -143,7 +140,7 @@ sealed interface Route {
 }
 
 /** Microphone (and, for the voice service, notifications): asks when needed, then runs [then]. */
-class Permissions(private val context: Context, private val ask: (Array<String>, () -> Unit) -> Unit) {
+class Permissions(private val context: Context, val ask: (Array<String>, () -> Unit) -> Unit) {
     fun has(p: String) = ContextCompat.checkSelfPermission(context, p) == PackageManager.PERMISSION_GRANTED
     val mic get() = has(Manifest.permission.RECORD_AUDIO)
 
@@ -249,9 +246,36 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
     val orbPhase = HomeModel.orbPhase(connected, state?.phase, phase is VoiceController.Phase.Recording, phase is VoiceController.Phase.Sending, playing)
     val needsYou = HomeModel.needsYou(connected, state?.phase, blocked)
 
-    // The headers' Stop: shown the moment the tower talks, here or on the Mac.
-    val stop = StopState(talking = connected && (playing != null || state?.speaking == true || state?.announcing == true), onStop = { session.hush() })
-    CompositionLocalProvider(LocalSnack provides show, LocalStop provides stop) {
+    // The header's orb: a tap mutes the whole tower (here and on the Mac), another lets it talk again.
+    val muted by session.muted.collectAsStateWithLifecycle()
+    val muting by session.muting.collectAsStateWithLifecycle()
+    val mute = remember(muted, muting, connected) {
+        MuteState(muted, enabled = connected && !muting) {
+            val on = !muted
+            scope.launch {
+                session.setMuted(on)
+                    .onSuccess { show(if (on) "Tower muted: it says nothing, here or on the Mac. Tap the orb to hear it again." else "Tower unmuted") }
+                    .onFailure { show("Couldn't ${if (on) "mute" else "unmute"} the tower: ${TowerSession.describe(it)}") }
+            }
+        }
+    }
+    // The headers' Stop: this reply only, shown the moment the tower talks, here or on the Mac.
+    val talking = connected && (playing != null || state?.speaking == true || state?.announcing == true)
+    val stop = remember(talking) { StopState(talking) { session.hush() } }
+
+    // Android 17+: no connection to the tower without the local network permission; asked as the app opens.
+    rememberLocalNetwork(askNow = true) { session.reconnect() }
+
+    // Questions can wait for you while the app is closed: on Android 13+ their notifications need asking once.
+    val questionsOn by session.questionsSupported.collectAsStateWithLifecycle()
+    val perms = rememberPermissions()
+    LaunchedEffect(questionsOn) {
+        if (questionsOn && Build.VERSION.SDK_INT >= 33 && !perms.has(Manifest.permission.POST_NOTIFICATIONS) && !session.settings.askedNotifications) {
+            session.settings.askedNotifications = true
+            perms.ask(arrayOf(Manifest.permission.POST_NOTIFICATIONS)) {}
+        }
+    }
+    CompositionLocalProvider(LocalSnack provides show, LocalMute provides mute, LocalStop provides stop) {
         Backdrop(orbPhase, needsYou) {
             AnimatedContent(
                 targetState = stack.last(),
@@ -343,17 +367,19 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
                 }
                 Switch(voiceOn, { setVoice(it, session, perms, context) }, colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent))
             }
-            // Phones (Samsung especially) stop background services to save battery: offer the exemption.
+            // Phones (Samsung especially) stop background services to save battery: point to the exemption.
+            // The app's own settings page (Battery, then Unrestricted), not the direct exemption request,
+            // which needs a permission app stores only allow for a few kinds of app.
             val power = context.getSystemService(android.os.PowerManager::class.java)
             if (voiceOn && power != null && !power.isIgnoringBatteryOptimizations(context.packageName)) {
                 TextButton(onClick = {
                     runCatching {
                         context.startActivity(
-                            android.content.Intent(android.provider.Settings.ACTION_REQUEST_IGNORE_BATTERY_OPTIMIZATIONS)
-                                .setData(android.net.Uri.parse("package:" + context.packageName)),
+                            android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
+                                .setData("package:${context.packageName}".toUri()),
                         )
                     }
-                }) { Text("Keep the voice running in the background (battery setting)", color = tc.text) }
+                }) { Text("Keep the voice running in the background: Battery, then Unrestricted", color = tc.text) }
             }
             if (voiceOn) {
                 val hushWord by session.hushWord.collectAsStateWithLifecycle()
@@ -451,7 +477,7 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
         AlertDialog(
             onDismissRequest = { confirmUnpair = false },
             title = { Text("Unpair this phone?") },
-            text = { Text("The tower revokes this phone's token, and the app forgets it. You can pair again with `tower phone pair`.") },
+            text = { Text("The tower revokes this phone's token, and the app forgets it. You can pair again with “tower phone pair”.") },
             confirmButton = {
                 TextButton(onClick = {
                     confirmUnpair = false
@@ -483,18 +509,19 @@ private fun SheetRow(icon: ImageVector, title: String, detail: String, onClick: 
 /** Says clearly what's wrong with the connection, and what to do. */
 @Composable
 fun ConnectionNotice(link: Link, session: TowerSession, onRepair: () -> Unit, modifier: Modifier = Modifier) {
-    val (msg, action) = when (link) {
-        is Link.Retrying -> "${link.reason} Trying again in ${link.seconds} s." to ("Retry now" to { session.reconnect() })
-        is Link.Revoked -> "This phone isn't paired any more. Run `tower phone pair` on the Mac and pair again." to ("Pair again" to onRepair)
-        is Link.CertificateChanged -> "The tower's certificate isn't the one this phone paired with. If you remade it, pair again; otherwise someone may be in between." to ("Pair again" to onRepair)
-        else -> return
-    }
+    // Without the local network permission (Android 17+) retrying can't help: say what's missing instead.
+    val localNet = rememberLocalNetwork { session.reconnect() }
+    if (localNet.needed) return LocalNetworkNotice(localNet, modifier)
+    val notice = HomeModel.connectionNotice(link) ?: return
+    val retry = notice.action == NoticeAction.Retry
     GlassCard(modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Dot(if (link is Link.Retrying) tc.accentHi else tc.blocked)
+            Dot(if (retry) tc.accentHi else tc.blocked)
             Spacer(Modifier.size(10.dp))
-            Text(msg, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = tc.text)
-            TextButton(onClick = action.second) { Text(action.first, color = tc.text, fontWeight = FontWeight.Medium) }
+            Text(notice.message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = tc.text)
+            TextButton(onClick = if (retry) session::reconnect else onRepair) {
+                Text(if (retry) "Retry now" else "Pair again", color = tc.text, fontWeight = FontWeight.Medium)
+            }
         }
     }
 }

@@ -33,24 +33,26 @@ object Wav {
         var fmt: IntArray? = null
         while (pos + 8 <= bytes.size) {
             val id = tag(bytes, pos)
-            val size = b.getInt(pos + 4)
+            // Sizes are unsigned 32-bit: as a Long so a huge one can't wrap around.
+            val size = b.getInt(pos + 4).toLong() and 0xFFFFFFFFL
             val body = pos + 8
             when (id) {
                 "fmt " -> {
                     require(size >= 16 && body + 16 <= bytes.size) { "bad fmt chunk" }
                     var format = b.getShort(body).toInt() and 0xffff
-                    if (format == 0xFFFE && size >= 40) format = b.getShort(body + 24).toInt() and 0xffff // WAVE_FORMAT_EXTENSIBLE
+                    if (format == 0xFFFE && size >= 40 && body + 26 <= bytes.size) format = b.getShort(body + 24).toInt() and 0xffff // WAVE_FORMAT_EXTENSIBLE
                     fmt = intArrayOf(format, b.getShort(body + 2).toInt(), b.getInt(body + 4), b.getShort(body + 14).toInt())
                 }
                 "data" -> {
                     val f = fmt ?: throw IllegalArgumentException("data before fmt")
                     // Streams written before their length is known say 0 or 0xFFFFFFFF: take the rest.
-                    val len = if (size <= 0 || body + size > bytes.size) bytes.size - body else size
+                    val len = if (size == 0L || body + size > bytes.size) bytes.size - body else size.toInt()
                     return Info(f[0], f[1], f[2], f[3], body, len)
                 }
             }
-            if (size < 0) break
-            pos = body + size + (size and 1)
+            val next = body + size + (size and 1)
+            if (next > bytes.size) break
+            pos = next.toInt()
         }
         throw IllegalArgumentException("no data chunk")
     }
@@ -60,7 +62,7 @@ object Wav {
         info.format == 1 && info.bitsPerSample == 16 -> bytes.copyOfRange(info.dataOffset, info.dataOffset + info.dataLength)
         info.format == 3 && info.bitsPerSample == 32 -> {
             val src = ByteBuffer.wrap(bytes, info.dataOffset, info.dataLength).order(ByteOrder.LITTLE_ENDIAN)
-            val out = ByteBuffer.allocate(info.dataLength / 2).order(ByteOrder.LITTLE_ENDIAN)
+            val out = ByteBuffer.allocate(info.dataLength / 4 * 2).order(ByteOrder.LITTLE_ENDIAN)
             while (src.remaining() >= 4) out.putShort((src.float.coerceIn(-1f, 1f) * 32767f).toInt().toShort())
             out.array()
         }

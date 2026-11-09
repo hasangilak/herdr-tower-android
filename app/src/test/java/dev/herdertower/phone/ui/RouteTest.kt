@@ -10,6 +10,9 @@ class RouteTest {
     @Test fun routesSurviveSaveAndRestore() {
         val routes = listOf(Route.Home, Route.Chat, Route.Spaces, Route.Activity, Route.Session("vps/t3"), Route.Screenshots(), Route.Screenshots("t22", "1794160000000-login.png"))
         routes.forEach { assertEquals(it, Route.decode(Route.encode(it))) }
+        // A colon in a session's address or a file's name doesn't split it.
+        val colon = Route.Screenshots("mac:t3", "12:30-shot.png")
+        assertEquals(colon, Route.decode(Route.encode(colon)))
         // The voice screen comes back without listening again.
         assertEquals(Route.Voice(false), Route.decode(Route.encode(Route.Voice(true))))
     }

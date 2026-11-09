@@ -47,6 +47,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.runtime.collectAsState
 import dev.herdertower.phone.data.Link
 import dev.herdertower.phone.data.TowerSession
 import kotlinx.coroutines.delay
@@ -80,9 +81,14 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, on
     var answering by remember { mutableStateOf(false) }
     var answered by remember { mutableStateOf<String?>(null) }
 
-    // The live screen: re-read every 2 s while this is open.
-    LaunchedEffect(address, link is Link.Live) {
-        if (link !is Link.Live) return@LaunchedEffect
+    // The live screen: re-read every 2 s while this is open and on screen (with the phone as the voice,
+    // the stream stays live in the background; the terminal needn't be fetched then).
+    val lifecycle = androidx.lifecycle.compose.LocalLifecycleOwner.current.lifecycle
+    // collectAsState, not ...WithLifecycle: that one stops collecting below STARTED and would never see it stop.
+    val started by lifecycle.currentStateFlow.collectAsState()
+    val visible = started.isAtLeast(androidx.lifecycle.Lifecycle.State.STARTED)
+    LaunchedEffect(address, link is Link.Live, visible) {
+        if (link !is Link.Live || !visible) return@LaunchedEffect
         while (true) {
             session.act { it.screen(address, lines = 80) }
                 .onSuccess { screen = it.screen; screenError = null }
@@ -109,7 +115,7 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, on
         SubHeader(name, null, onBack)
         Column(Modifier.padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
                 Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-                    Dot(tc.status(status), 7.dp)
+                    Dot(tc.status(status), size = 7.dp)
                     Text(
                         listOfNotNull(status.ifEmpty { null }, address, spaceSession?.first, agent?.machine?.takeIf { it != "this mac" }).joinToString(" · "),
                         style = MaterialTheme.typography.bodyMedium, color = tc.muted,

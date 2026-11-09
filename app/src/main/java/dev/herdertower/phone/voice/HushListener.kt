@@ -7,6 +7,7 @@ import android.media.MediaRecorder
 import android.util.Log
 import dev.herdertower.phone.api.AudioClip
 import dev.herdertower.phone.data.TowerSession
+import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.channels.Channel
@@ -32,9 +33,6 @@ class HushListener(private val session: TowerSession, private val onHush: () -> 
     /** What it said lately (this sentence and the one before). */
     private val recent = ArrayDeque<String>()
 
-    @Volatile var listening = false
-        private set
-
     /** Follows the player: listen while [playing] is a clip and [enabled]; a moment after it ends, stop. Main thread. */
     fun follow(playing: AudioClip?, enabled: Boolean) {
         playing?.text?.let {
@@ -56,51 +54,59 @@ class HushListener(private val session: TowerSession, private val onHush: () -> 
         }
     }
 
-    @SuppressLint("MissingPermission")
     private fun start() {
         if (job?.isActive == true) return
-        val rate = 16_000
-        val min = AudioRecord.getMinBufferSize(rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
-        val rec = runCatching {
-            AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, rate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, rate))
-        }.getOrNull()?.takeIf { it.state == AudioRecord.STATE_INITIALIZED }
-        if (rec == null) {
-            Log.w(TAG, "no microphone")
-            return // the Stop button still works
-        }
         val bursts = Channel<ByteArray>(Channel.CONFLATED)
-        listening = true
-        Log.i(TAG, "listening while it talks")
         job = session.scope.launch {
-            val checker = launch { for (pcm in bursts) check(Wav.encode(pcm, rate, 1)) }
-            launch(Dispatchers.IO) {
-                val cut = Bursts(rate)
-                val frame = ShortArray(rate / 50)
-                rec.startRecording()
-                try {
-                    while (isActive) {
-                        val n = rec.read(frame, 0, frame.size)
-                        if (n <= 0) break
-                        val bytes = ByteArray(n * 2)
-                        var sum = 0.0
-                        for (i in 0 until n) {
-                            val v = frame[i].toInt()
-                            bytes[2 * i] = (v and 0xff).toByte()
-                            bytes[2 * i + 1] = (v shr 8).toByte()
-                            sum += v.toDouble() * v
-                        }
-                        cut.feed(bytes, sqrt(sum / n))?.let {
-                            Log.i(TAG, "burst ${it.size / 32} ms")
-                            bursts.trySend(it)
-                        }
-                    }
-                } finally {
-                    runCatching { rec.stop() }
-                    rec.release()
-                    bursts.close()
-                }
-            }.join()
+            val checker = launch { for (pcm in bursts) check(Wav.encode(pcm, RATE, 1)) }
+            // The recording is opened and released in the same place: stopped before it began, it never opens.
+            launch(Dispatchers.IO) { record(bursts) }.join()
             checker.join()
+        }
+    }
+
+    /** Records until cancelled, cutting bursts of speech out of it. */
+    @SuppressLint("MissingPermission")
+    private fun CoroutineScope.record(bursts: Channel<ByteArray>) {
+        try {
+            val min = AudioRecord.getMinBufferSize(RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT)
+            val rec = runCatching {
+                AudioRecord(MediaRecorder.AudioSource.VOICE_RECOGNITION, RATE, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, maxOf(min, RATE))
+            }.getOrNull()
+            if (rec == null || rec.state != AudioRecord.STATE_INITIALIZED) {
+                rec?.release()
+                Log.w(TAG, "no microphone")
+                return // the Stop button still works
+            }
+            try {
+                rec.startRecording()
+                Log.i(TAG, "listening while it talks")
+                val cut = Bursts(RATE)
+                val frame = ShortArray(RATE / 50)
+                while (isActive) {
+                    val n = rec.read(frame, 0, frame.size)
+                    if (n <= 0) break
+                    val bytes = ByteArray(n * 2)
+                    var sum = 0.0
+                    for (i in 0 until n) {
+                        val v = frame[i].toInt()
+                        bytes[2 * i] = (v and 0xff).toByte()
+                        bytes[2 * i + 1] = (v shr 8).toByte()
+                        sum += v.toDouble() * v
+                    }
+                    cut.feed(bytes, sqrt(sum / n))?.let {
+                        Log.i(TAG, "burst ${it.size / 32} ms")
+                        bursts.trySend(it)
+                    }
+                }
+            } catch (e: IllegalStateException) {
+                Log.w(TAG, "the microphone stopped")
+            } finally {
+                runCatching { rec.stop() }
+                rec.release()
+            }
+        } finally {
+            bursts.close()
         }
     }
 
@@ -119,14 +125,14 @@ class HushListener(private val session: TowerSession, private val onHush: () -> 
     fun stop() {
         stopping?.cancel()
         stopping = null
+        if (job != null) Log.i(TAG, "stopped listening")
         job?.cancel()
         job = null
-        if (listening) Log.i(TAG, "stopped listening")
-        listening = false
     }
 
     companion object {
         private const val TAG = "HushListener"
+        private const val RATE = 16_000
 
         /** English and German words for "be quiet". */
         val WORDS = setOf("hush", "stop", "quiet", "shush", "silence", "enough", "ruhe", "stopp", "halt", "still", "schweig", "aufhören")

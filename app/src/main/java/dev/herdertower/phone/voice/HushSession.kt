@@ -22,7 +22,8 @@ class HushSession(context: Context, private val onHush: () -> Unit) {
     private val session = MediaSession(context, "tower").apply {
         setCallback(object : MediaSession.Callback() {
             override fun onMediaButtonEvent(intent: Intent): Boolean {
-                val ev = intent.getParcelableExtra(Intent.EXTRA_KEY_EVENT, KeyEvent::class.java) ?: return false
+                // IntentCompat: the typed getParcelableExtra needs Android 13 (API 33).
+                val ev = androidx.core.content.IntentCompat.getParcelableExtra(intent, Intent.EXTRA_KEY_EVENT, KeyEvent::class.java) ?: return false
                 if (ev.action != KeyEvent.ACTION_DOWN || !speaking) return super.onMediaButtonEvent(intent)
                 return when (ev.keyCode) {
                     KeyEvent.KEYCODE_MEDIA_PLAY_PAUSE, KeyEvent.KEYCODE_MEDIA_PAUSE, KeyEvent.KEYCODE_MEDIA_STOP, KeyEvent.KEYCODE_HEADSETHOOK -> {

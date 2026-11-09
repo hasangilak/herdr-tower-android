@@ -29,6 +29,8 @@ class TowerApplication : Application() {
         composer = dev.herdertower.phone.compose.Composer(this, session)
         // One microphone at a time: a voice take stops dictation into the draft.
         voice.beforeTake = { if (composer.dictation.value.active.value) composer.stopDictation() }
+        // And the other way: dictation starting ends a voice take still running (left hands-free, or from the notification).
+        composer.beforeDictation = { if (voice.phase.value is VoiceController.Phase.Recording) voice.cancel() }
         // How this device can draw the orb: found once, off the main thread, by drawing it.
         dev.herdertower.phone.orb.OrbProbe.override = dev.herdertower.phone.orb.OrbTier.entries.firstOrNull { it.name == session.settings.orbTier }
         Thread({ dev.herdertower.phone.orb.OrbProbe.run() }, "orb-probe").start()

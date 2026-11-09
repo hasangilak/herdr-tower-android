@@ -47,6 +47,7 @@ import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -59,6 +60,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
@@ -70,7 +73,6 @@ import dev.herdertower.phone.api.BehaviorPatch
 import dev.herdertower.phone.api.BehaviorsApi
 import dev.herdertower.phone.api.DiffLine
 import dev.herdertower.phone.data.TowerSession
-import dev.herdertower.phone.voice.Take
 import kotlinx.coroutines.launch
 
 private val fieldColors @Composable get() = OutlinedTextFieldDefaults.colors(
@@ -174,7 +176,10 @@ private fun BehaviorCard(b: Behavior, onClick: () -> Unit, onToggle: (Boolean) -
                 if (b.summary.isNotBlank()) Text(b.summary, style = MaterialTheme.typography.bodyMedium, color = if (b.enabled) tc.muted else tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
             Spacer(Modifier.width(10.dp))
-            Switch(b.enabled, onToggle, colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent))
+            Switch(
+                b.enabled, onToggle, Modifier.semantics { contentDescription = b.title.ifBlank { "This behavior" } },
+                colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent),
+            )
         }
     }
 }
@@ -219,7 +224,7 @@ private fun ChangeRow(c: BehaviorChange, onClick: () -> Unit) {
 @Composable
 private fun ActionChip(icon: androidx.compose.ui.graphics.vector.ImageVector, label: String, primary: Boolean = false, enabled: Boolean = true, onClick: () -> Unit) {
     Row(
-        Modifier.heightIn(min = 44.dp).clip(CircleShape)
+        Modifier.heightIn(min = 48.dp).clip(CircleShape)
             .then(if (primary) Modifier.background(tc.accentBrush) else Modifier.border(1.dp, tc.edge, CircleShape))
             .clickable(enabled = enabled, role = Role.Button, onClick = onClick).padding(horizontal = 16.dp, vertical = 10.dp),
         verticalAlignment = Alignment.CenterVertically,
@@ -291,8 +296,10 @@ private fun TellTheTower(session: TowerSession) {
     val snack = LocalSnack.current
     val perms = rememberPermissions()
     var text by rememberSaveable { mutableStateOf("") }
-    var take by remember { mutableStateOf<Take?>(null) }
+    var take by remember { mutableStateOf<ScreenTake?>(null) }
     var busy by remember { mutableStateOf(false) }
+    // Leaving mid-take ends it: the microphone is stopped and let go.
+    DisposableEffect(Unit) { onDispose { take?.stop() } }
     val last by session.lastBehaviorChange.collectAsStateWithLifecycle()
     var sentAt by remember { mutableStateOf(0L) }
 
@@ -312,13 +319,12 @@ private fun TellTheTower(session: TowerSession) {
         }
     }
     fun dictate() {
-        take?.let { running -> scope.launch { running.stop() }; return }
+        take?.let { running -> running.stop(); return }
         perms.withMic {
-            val tk = runCatching { Take.start(session.scope, endOnSilence = true) }.getOrElse { snack("The microphone isn't available."); return@withMic }
+            val tk = ScreenTake.start(session) ?: return@withMic snack("The microphone isn't available.")
             take = tk
             scope.launch {
-                runCatching { tk.ended.await() }
-                val wav = tk.stop()
+                val wav = tk.finish(session)
                 take = null
                 if (!tk.heardSpeech) return@launch
                 busy = true
@@ -368,10 +374,14 @@ fun BehaviorScreen(session: TowerSession, id: String?, onBack: () -> Unit) {
     val categories = data?.categories?.ifEmpty { null } ?: BehaviorsApi.CATEGORIES
 
     var editing by rememberSaveable(id) { mutableStateOf(id == null) }
-    var title by rememberSaveable(id, b?.updatedMs) { mutableStateOf(b?.title.orEmpty()) }
-    var category by rememberSaveable(id, b?.updatedMs) { mutableStateOf(b?.category ?: "Misc") }
-    var summary by rememberSaveable(id, b?.updatedMs) { mutableStateOf(b?.summary.orEmpty()) }
-    var text by rememberSaveable(id, b?.updatedMs) { mutableStateOf(b?.text.orEmpty()) }
+    // The version being edited: a change from elsewhere meanwhile doesn't wipe the edits (it's pointed out instead).
+    var editedMs by rememberSaveable(id) { mutableStateOf<Long?>(null) }
+    val base = if (editing && editedMs != null) editedMs else b?.updatedMs
+    var title by rememberSaveable(id, base) { mutableStateOf(b?.title.orEmpty()) }
+    var category by rememberSaveable(id, base) { mutableStateOf(b?.category ?: "Misc") }
+    var summary by rememberSaveable(id, base) { mutableStateOf(b?.summary.orEmpty()) }
+    var text by rememberSaveable(id, base) { mutableStateOf(b?.text.orEmpty()) }
+    val changedMeanwhile = editing && b != null && editedMs != null && b.updatedMs != editedMs
     var preview by remember { mutableStateOf<String?>(null) }
     var confirmDelete by remember { mutableStateOf(false) }
     var busy by remember { mutableStateOf(false) }
@@ -404,6 +414,7 @@ fun BehaviorScreen(session: TowerSession, id: String?, onBack: () -> Unit) {
             r.onSuccess {
                 preview = null
                 editing = false
+                editedMs = null
                 snack(if (b == null) "Added: ${title.trim()}" else "Saved")
                 if (b == null) onBack()
             }.onFailure { snack(TowerSession.describe(it)) }
@@ -424,14 +435,21 @@ fun BehaviorScreen(session: TowerSession, id: String?, onBack: () -> Unit) {
                     Spacer(Modifier.weight(1f))
                     Text(if (b.enabled) "On" else "Off", style = MaterialTheme.typography.labelLarge, color = tc.muted)
                     Spacer(Modifier.width(8.dp))
-                    Switch(b.enabled, { on -> scope.launch { session.changeBehavior { it.updateBehavior(b.id, BehaviorPatch(enabled = on)) }.onFailure { e -> snack(TowerSession.describe(e)) } } }, colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent))
+                    Switch(
+                    b.enabled, { on -> scope.launch { session.changeBehavior { it.updateBehavior(b.id, BehaviorPatch(enabled = on)) }.onFailure { e -> snack(TowerSession.describe(e)) } } },
+                    Modifier.semantics { contentDescription = b.title.ifBlank { "This behavior" } },
+                    colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent),
+                )
                 }
                 if (b.summary.isNotBlank()) Text(b.summary, style = MaterialTheme.typography.titleMedium, color = tc.text)
                 Text("The rule, as the tower reads it", style = MaterialTheme.typography.labelLarge, color = tc.faint)
                 Text(b.text.trim(), Modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(tc.card).border(1.dp, tc.edge, RoundedCornerShape(16.dp)).padding(14.dp), style = MaterialTheme.typography.bodyMedium, color = tc.text)
                 Text("Changed ${ago(b.updatedMs)}", style = MaterialTheme.typography.bodySmall, color = tc.faint)
                 Row(horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                    ActionChip(Icons.Filled.Tune, "Edit", primary = true) { editing = true }
+                    ActionChip(Icons.Filled.Tune, "Edit", primary = true) {
+                        editedMs = b.updatedMs
+                        editing = true
+                    }
                     ActionChip(Icons.Filled.Stop, if (b.enabled) "Disable" else "Enable") {
                         scope.launch { session.changeBehavior { it.updateBehavior(b.id, BehaviorPatch(enabled = !b.enabled)) }.onFailure { e -> snack(TowerSession.describe(e)) } }
                     }
@@ -443,6 +461,15 @@ fun BehaviorScreen(session: TowerSession, id: String?, onBack: () -> Unit) {
                     }) { Text("Undo the last change", color = tc.text) }
                 }
             } else {
+                if (changedMeanwhile) {
+                    Text("It changed while you were editing. Saving puts your version in its place.", style = MaterialTheme.typography.bodySmall, color = tc.failed)
+                    TextButton(onClick = {
+                        // Drops these edits for the new version.
+                        preview = null
+                        editedMs = b.updatedMs
+                        title = b.title; category = b.category; summary = b.summary; text = b.text
+                    }) { Text("Use the new version", color = tc.text) }
+                }
                 OutlinedTextField(title, { title = it }, Modifier.fillMaxWidth(), label = { Text("Title") }, singleLine = true, colors = fieldColors, shape = RoundedCornerShape(16.dp))
                 CategoryPicker(category, categories) { category = it }
                 OutlinedTextField(summary, { summary = it }, Modifier.fillMaxWidth(), label = { Text("In one line (for you)") }, maxLines = 3, colors = fieldColors, shape = RoundedCornerShape(16.dp))
@@ -459,6 +486,7 @@ fun BehaviorScreen(session: TowerSession, id: String?, onBack: () -> Unit) {
                 preview = null
                 if (b == null) onBack() else {
                     editing = false
+                    editedMs = null
                     title = b.title; category = b.category; summary = b.summary; text = b.text
                 }
             }) { Text("Cancel", color = tc.text) }

@@ -46,20 +46,35 @@ class VoiceService : Service() {
     override fun onCreate() {
         super.onCreate()
         channel(this)
-        val types = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK or
-            (if (micGranted(this)) ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE else 0)
-        ServiceCompat.startForeground(this, NOTIFICATION, build("Connecting…", null), types)
+        if (!promote()) {
+            // Not even as media playback (restarted by the system with the app in the background on a recent Android):
+            // the app starts it again when it next comes on screen.
+            stopSelf()
+            return
+        }
+        running = true
 
         wifi = getSystemService(WifiManager::class.java)
             .createWifiLock(WifiManager.WIFI_MODE_FULL_LOW_LATENCY, "tower:voice")
             .apply { setReferenceCounted(false); acquire() }
+        // Held with a timeout and renewed while the service runs: if it's ever left behind, it still ends.
         wake = getSystemService(PowerManager::class.java)
             .newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "tower:voice")
-            .apply { setReferenceCounted(false); acquire() }
+            .apply { setReferenceCounted(false); acquire(WAKE_MS) }
+        scope.launch {
+            while (true) {
+                kotlinx.coroutines.delay(WAKE_MS - 60_000L)
+                wake?.acquire(WAKE_MS)
+            }
+        }
 
         val app = tower
         scope.launch {
             app.session.voiceOn.collect { if (!it) stopSelf() }
+        }
+        scope.launch {
+            // Muted (tower-wide), the notification says so and offers the way back.
+            app.session.muted.collect { mutedNow = it; refresh() }
         }
         // Headset / Bluetooth pause and volume down twice stop the tower while it talks.
         val hushSession = HushSession(this) { app.session.hush() }.also { media = it }
@@ -75,19 +90,50 @@ class VoiceService : Service() {
                 }
                 Triple(line, phase is VoiceController.Phase.Recording, playing != null)
             }.distinctUntilChanged().collect { (line, rec, talking) ->
-                getSystemService(NotificationManager::class.java).notify(NOTIFICATION, build(line, rec, talking))
+                last = Triple(line, rec, talking)
+                refresh()
             }
         }
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+        if (!running) return START_NOT_STICKY
         val app = tower
+        // The microphone was allowed after the service started: take it on now (the app is on screen when it asks).
+        if (!withMic && micGranted(this)) promote()
         when (intent?.action) {
-            ACTION_TALK -> if (micGranted(this)) app.voice.toggle()
+            ACTION_TALK -> if (micGranted(this) && withMic) app.voice.toggle()
             ACTION_HUSH -> app.session.hush()
+            ACTION_UNMUTE -> scope.launch { app.session.setMuted(false) }
             ACTION_STOP -> app.session.setVoice(false)
         }
         return START_STICKY
+    }
+
+    /** Whether the service runs with the microphone type (only then can a take record with the screen off). */
+    private var withMic = false
+    /** It made it to the foreground (onCreate may have given up). */
+    private var running = false
+    private var mutedNow = false
+    private var last: Triple<String, Boolean, Boolean>? = null
+
+    /**
+     * Runs the service in the foreground: with the microphone when it's
+     * allowed and Android lets it start now, else as media playback only.
+     * False when neither is allowed (a background restart on Android 12+).
+     */
+    private fun promote(): Boolean {
+        val note = last?.let { (line, rec, talking) -> build(line, rec, talking) } ?: build("Connecting…", null)
+        val how = startForegroundAs(micGranted(this), android.os.Build.VERSION.SDK_INT) { types ->
+            ServiceCompat.startForeground(this, NOTIFICATION, note, types)
+        }
+        withMic = how == Started.WithMic || how == Started.MediaMayRecord
+        return how != Started.No
+    }
+
+    private fun refresh() {
+        val (line, rec, talking) = last ?: return
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION, build(line, rec, talking))
     }
 
     override fun onDestroy() {
@@ -100,7 +146,7 @@ class VoiceService : Service() {
 
     private fun describe(link: Link): String = when (link) {
         is Link.Live -> if (link.voice) "The phone is the tower's voice" else "Connected"
-        is Link.Connecting -> "Connecting…"
+        is Link.Connecting -> link.failing?.let { "Reconnecting…" } ?: "Connecting…"
         is Link.Retrying -> "Reconnecting in ${link.seconds} s"
         is Link.Revoked -> "Not paired any more. Open the app to pair again."
         is Link.CertificateChanged -> "The tower's certificate changed. Open the app."
@@ -112,8 +158,14 @@ class VoiceService : Service() {
         fun action(a: String, req: Int) = PendingIntent.getService(this, req, Intent(this, VoiceService::class.java).setAction(a), PendingIntent.FLAG_IMMUTABLE)
         return NotificationCompat.Builder(this, CHANNEL)
             .setSmallIcon(R.drawable.ic_tower)
-            .setContentTitle("Tower voice")
+            .setContentTitle(if (mutedNow) "Tower voice · muted" else "Tower voice")
             .setContentText(text)
+            // On a locked screen: not what the tower is saying (it can be about private work).
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setPublicVersion(
+                NotificationCompat.Builder(this, CHANNEL).setSmallIcon(R.drawable.ic_tower).setContentTitle("Tower voice")
+                    .setContentText("The phone is the tower's voice").setSilent(true).build(),
+            )
             .setOngoing(true)
             .setOnlyAlertOnce(true)
             .setSilent(true)
@@ -122,18 +174,60 @@ class VoiceService : Service() {
             .apply {
                 // While it talks, Stop comes first (it's what the collapsed notification shows).
                 if (talking) addAction(R.drawable.ic_stop, "Stop", action(ACTION_HUSH, 2))
+                if (mutedNow) addAction(0, "Unmute", action(ACTION_UNMUTE, 4))
                 addAction(0, if (recording == true) "Send" else "Talk", action(ACTION_TALK, 1))
                 addAction(0, "End voice", action(ACTION_STOP, 3))
             }
             .build()
     }
 
+    /** How the service went to the foreground. */
+    enum class Started {
+        /** With the microphone type: takes may record with the screen off. */
+        WithMic,
+        /** As media playback only: Android refused the microphone (a background restart). */
+        MediaOnly,
+        /** Before Android 11, where there's no microphone type: a media service may record. */
+        MediaMayRecord,
+        /** Not at all. */
+        No,
+    }
+
     companion object {
+        /**
+         * Starts the foreground with the microphone when it's allowed and
+         * Android lets it start now, else as media playback only. [start]
+         * throws when Android refuses (SecurityException, or
+         * ForegroundServiceStartNotAllowedException, both runtime exceptions).
+         */
+        @android.annotation.SuppressLint("InlinedApi") // the microphone type (API 30) is only used from [sdk] 30 on
+        internal fun startForegroundAs(micGranted: Boolean, sdk: Int, start: (types: Int) -> Unit): Started {
+            val media = ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PLAYBACK
+            if (micGranted && sdk >= 30) {
+                try {
+                    start(media or ServiceInfo.FOREGROUND_SERVICE_TYPE_MICROPHONE)
+                    return Started.WithMic
+                } catch (e: RuntimeException) {
+                    android.util.Log.i("VoiceService", "no microphone type: ${e.javaClass.simpleName}")
+                }
+            }
+            return try {
+                start(media)
+                if (micGranted && sdk < 30) Started.MediaMayRecord else Started.MediaOnly
+            } catch (e: RuntimeException) {
+                android.util.Log.i("VoiceService", "can't start: ${e.javaClass.simpleName}")
+                Started.No
+            }
+        }
+
         private const val CHANNEL = "voice"
         private const val NOTIFICATION = 1
+        /** How long the wake lock holds at a time; renewed a minute before it runs out. */
+        private const val WAKE_MS = 15 * 60_000L
         const val ACTION_TALK = "dev.herdertower.phone.TALK"
         const val ACTION_HUSH = "dev.herdertower.phone.HUSH"
         const val ACTION_STOP = "dev.herdertower.phone.STOP"
+        const val ACTION_UNMUTE = "dev.herdertower.phone.UNMUTE"
 
         fun micGranted(c: Context) = ContextCompat.checkSelfPermission(c, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
 

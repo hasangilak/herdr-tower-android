@@ -57,4 +57,12 @@ class PairLinkTest {
         // SHA-256 of "abc"
         assertEquals("ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad", Fingerprint.of("abc".toByteArray()))
     }
+
+    @Test fun aLinkSurvivesBeingWrittenBack() {
+        // Kept across a recreate as a link: IPv6, odd ports and the code come back the same.
+        val fp = "3fa9c2e1".repeat(8)
+        listOf(PairLink("192.168.1.20", 7843, "48213907", fp), PairLink("fe80::1%wlan0", 8443, "00012345", fp)).forEach {
+            assertEquals(it, PairLink.parse(it.toLink()))
+        }
+    }
 }

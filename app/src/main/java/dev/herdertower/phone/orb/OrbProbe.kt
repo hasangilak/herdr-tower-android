@@ -1,6 +1,7 @@
 package dev.herdertower.phone.orb
 
 import android.graphics.Bitmap
+import androidx.core.graphics.createBitmap
 import android.graphics.BitmapShader
 import android.graphics.HardwareRenderer
 import android.graphics.Paint
@@ -167,7 +168,7 @@ object OrbProbe {
     }.getOrElse { "lookup probe failed: ${it.javaClass.simpleName}" }
 
     fun alphaMap(bytes: ByteArray, w: Int, h: Int): BitmapShader {
-        val b = Bitmap.createBitmap(w, h, Bitmap.Config.ALPHA_8)
+        val b = createBitmap(w, h, Bitmap.Config.ALPHA_8)
         b.copyPixelsFromBuffer(ByteBuffer.wrap(bytes))
         return BitmapShader(b, Shader.TileMode.REPEAT, Shader.TileMode.CLAMP).apply {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) filterMode = BitmapShader.FILTER_MODE_LINEAR
@@ -192,7 +193,6 @@ object OrbProbe {
     }
 
     /** Renders [shader] into a w x h offscreen surface on the GPU and returns its pixels (ARGB). */
-    @RequiresApi(Build.VERSION_CODES.Q)
     fun render(shader: Shader, w: Int, h: Int): IntArray? {
         val reader = ImageReader.newInstance(w, h, PixelFormat.RGBA_8888, 1, HardwareBuffer.USAGE_GPU_COLOR_OUTPUT or HardwareBuffer.USAGE_CPU_READ_OFTEN)
         val renderer = HardwareRenderer()

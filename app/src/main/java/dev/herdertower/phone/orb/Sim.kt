@@ -84,6 +84,36 @@ class Sim(val o: Opts = Opts()) {
     private var echoAt = 0.0
     private val gestureRand = Rng(o.seed + 1)
 
+    // Kept between steps so a step allocates nothing (at 120 steps a second).
+    private val axis = DoubleArray(3)
+    private val spin = DoubleArray(3)
+    private val facing = DoubleArray(3)
+    private val turn = DoubleArray(3)
+    private val turnRot = DoubleArray(9)
+    private val turned = DoubleArray(9)
+    private val rest = RestShape()
+
+    /** The surface's resting shape this step: sag under acceleration, bulge from the spin. */
+    private class RestShape : Shape {
+        var sag = 0.0
+        var gx = 0.0
+        var gy = 0.0
+        var sx = 0.0
+        var sy = 0.0
+        var sz = 0.0
+        var swirl = 0.0
+
+        override fun at(x: Double, y: Double, z: Double): Double {
+            var s = 0.0
+            if (sag > 1e-4) {
+                val u = x * gx + y * gy
+                s += sag * (0.75 * (1.5 * u * u - 0.5) + 0.25 * (2.5 * u * u * u - 1.5 * u))
+            }
+            val v = x * sx + y * sy + z * sz
+            return s + swirl * (1.0 / 3.0 - v * v)
+        }
+    }
+
     private fun lively(low: Double, high: Double) = boost(energy, low, high, o.moodStrength)
 
     /** Runs the physics up to time [to] in fixed steps. */
@@ -129,52 +159,53 @@ class Sim(val o: Opts = Opts()) {
         // The orb hangs on a damped spring to its home.
         val k = o.follow * o.follow
         val c = 2.0 * 0.45 * o.follow
-        val acc = doubleArrayOf(k * (0.0 - pos[0]) - c * vel[0], k * (0.0 - pos[1]) - c * vel[1], 0.0)
-        for (i in 0..2) {
-            vel[i] += acc[i] * dt
-            pos[i] += vel[i] * dt
-        }
+        val ax = k * (0.0 - pos[0]) - c * vel[0]
+        val ay = k * (0.0 - pos[1]) - c * vel[1]
+        vel[0] += ax * dt
+        pos[0] += vel[0] * dt
+        vel[1] += ay * dt
+        pos[1] += vel[1] * dt
+        vel[2] += 0.0 * dt
+        pos[2] += vel[2] * dt
         val fade = exp(-dt / 1.2)
         for (i in 0..2) extraSpin[i] *= fade
 
         val looking = if (lookDir != null && t < lookUntil) 1.0 else 0.0
         lookWeight += (looking - lookWeight) * (1.0 - exp(-dt / 0.6))
         if (looking == 0.0 && lookWeight < 1e-3) lookDir = null
-        val axis = normalize(o.spinAxis)
+        normalizeInto(o.spinAxis, axis)
         val base = 2.0 * PI * o.spin * lively(0.4, 2.0) * (1.0 - lookWeight)
-        val spin = DoubleArray(3) { axis[it] * base + extraSpin[it] }
+        for (i in 0..2) spin[i] = axis[i] * base + extraSpin[i]
         lookDir?.let { dir ->
-            val facing = doubleArrayOf(rot[2], rot[5], rot[8])
-            var turn = cross(facing, dir)
+            facing[0] = rot[2]; facing[1] = rot[5]; facing[2] = rot[8]
+            crossInto(facing, dir, turn)
             val sn = len(turn)
             val cs = dot(facing, dir)
-            if (sn < 1e-6) turn = if (cs < 0.0) cross(facing, doubleArrayOf(0.0, 1.0, 0.0)) else DoubleArray(3)
+            if (sn < 1e-6) {
+                if (cs < 0.0) crossInto(facing, UP, turn) else turn.fill(0.0)
+            }
             val l = len(turn)
             val gain = (2.5 * lookWeight * atan2(sn, cs)) / if (l == 0.0) 1.0 else l
             for (i in 0..2) spin[i] += turn[i] * gain
         }
         val rate = len(spin)
-        if (rate > 1e-6) rot = orthonormalize(mul(axisAngle(spin, rate * dt), rot))
-
-        val g = hypot(acc[0], acc[1])
-        val gn = if (g == 0.0) 1.0 else g
-        val gx = -acc[0] / gn
-        val gy = -acc[1] / gn
-        val sag = min(g * o.sag, o.maxDeform)
-        val rn = if (rate == 0.0) 1.0 else rate
-        val sx = spin[0] / rn
-        val sy = spin[1] / rn
-        val sz = spin[2] / rn
-        val swirl = o.swirl * rate * rate
-        liquid.step(dt, flow) { x, y, z ->
-            var s = 0.0
-            if (sag > 1e-4) {
-                val u = x * gx + y * gy
-                s += sag * (0.75 * (1.5 * u * u - 0.5) + 0.25 * (2.5 * u * u * u - 1.5 * u))
-            }
-            val v = x * sx + y * sy + z * sz
-            s + swirl * (1.0 / 3.0 - v * v)
+        if (rate > 1e-6) {
+            axisAngleInto(spin, rate * dt, turnRot)
+            mulInto(turnRot, rot, turned)
+            orthonormalizeInto(turned, rot)
         }
+
+        val g = hypot(ax, ay)
+        val gn = if (g == 0.0) 1.0 else g
+        val rn = if (rate == 0.0) 1.0 else rate
+        rest.gx = -ax / gn
+        rest.gy = -ay / gn
+        rest.sag = min(g * o.sag, o.maxDeform)
+        rest.sx = spin[0] / rn
+        rest.sy = spin[1] / rn
+        rest.sz = spin[2] / rn
+        rest.swirl = o.swirl * rate * rate
+        liquid.step(dt, flow, rest)
     }
 
     // Moves
@@ -249,13 +280,17 @@ class Sim(val o: Opts = Opts()) {
 
     // What the shader needs
 
-    fun hotspotDir(): DoubleArray {
+    /** Where the boiling is, into [out]. */
+    fun hotspotDir(out: DoubleArray = DoubleArray(3)): DoubleArray {
         val w = wander
         val deg = hotAngle + 35.0 * sin(w * 2.1) + 20.0 * sin(w * 3.7 + 1.0)
         val depth = (o.hotspotDepth + 0.15 * sin(w * 2.9 + 2.0)).coerceIn(0.0, 1.0)
         val a = Math.toRadians(deg)
         val ring = cos(depth * PI / 2.0)
-        return doubleArrayOf(cos(a) * ring, sin(a) * ring, sin(depth * PI / 2.0))
+        out[0] = cos(a) * ring
+        out[1] = sin(a) * ring
+        out[2] = sin(depth * PI / 2.0)
+        return out
     }
 
     fun hotspotSpread(): Double = o.hotspotSpread * lively(0.85, 1.2)
@@ -289,6 +324,62 @@ class Sim(val o: Opts = Opts()) {
             val axis = cross(doubleArrayOf(0.0, 0.0, 1.0), d)
             if (len(axis) < 1e-6) axis[0] = 1.0
             return axisAngle(axis, acos(d[2].coerceIn(-1.0, 1.0)))
+        }
+
+        private val UP = doubleArrayOf(0.0, 1.0, 0.0)
+
+        /** [normalize], into [out]. */
+        fun normalizeInto(v: DoubleArray, out: DoubleArray) {
+            val l = len(v)
+            val x = v[0] / l
+            val y = v[1] / l
+            val z = v[2] / l
+            out[0] = x; out[1] = y; out[2] = z
+        }
+
+        /** [cross], into [out] (not one of the inputs). */
+        fun crossInto(a: DoubleArray, b: DoubleArray, out: DoubleArray) {
+            out[0] = a[1] * b[2] - a[2] * b[1]
+            out[1] = a[2] * b[0] - a[0] * b[2]
+            out[2] = a[0] * b[1] - a[1] * b[0]
+        }
+
+        /** [axisAngle], into [out]. */
+        fun axisAngleInto(axis: DoubleArray, a: Double, out: DoubleArray) {
+            val l = len(axis)
+            val x = axis[0] / l
+            val y = axis[1] / l
+            val z = axis[2] / l
+            val c = cos(a)
+            val s = sin(a)
+            val k = 1.0 - c
+            out[0] = c + x * x * k; out[1] = x * y * k - z * s; out[2] = x * z * k + y * s
+            out[3] = y * x * k + z * s; out[4] = c + y * y * k; out[5] = y * z * k - x * s
+            out[6] = z * x * k - y * s; out[7] = z * y * k + x * s; out[8] = c + z * z * k
+        }
+
+        /** [mul], into [out] (not one of the inputs). */
+        fun mulInto(a: DoubleArray, b: DoubleArray, out: DoubleArray) {
+            for (i in 0..2) for (j in 0..2) out[i * 3 + j] = a[i * 3] * b[j] + a[i * 3 + 1] * b[3 + j] + a[i * 3 + 2] * b[6 + j]
+        }
+
+        /** [orthonormalize], into [out] (not the input). */
+        fun orthonormalizeInto(m: DoubleArray, out: DoubleArray) {
+            val xl = sqrt(m[0] * m[0] + m[3] * m[3] + m[6] * m[6])
+            val x0 = m[0] / xl
+            val x1 = m[3] / xl
+            val x2 = m[6] / xl
+            val d = x0 * m[1] + x1 * m[4] + x2 * m[7]
+            val y0r = m[1] - d * x0
+            val y1r = m[4] - d * x1
+            val y2r = m[7] - d * x2
+            val yl = sqrt(y0r * y0r + y1r * y1r + y2r * y2r)
+            val y0 = y0r / yl
+            val y1 = y1r / yl
+            val y2 = y2r / yl
+            out[0] = x0; out[1] = y0; out[2] = x1 * y2 - x2 * y1
+            out[3] = x1; out[4] = y1; out[5] = x2 * y0 - x0 * y2
+            out[6] = x2; out[7] = y2; out[8] = x0 * y1 - x1 * y0
         }
 
         fun dot(a: DoubleArray, b: DoubleArray) = a[0] * b[0] + a[1] * b[1] + a[2] * b[2]

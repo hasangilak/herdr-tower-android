@@ -51,4 +51,30 @@ class WavTest {
     @Test fun rejectsNonWav() {
         assertThrows(IllegalArgumentException::class.java) { Wav.parse("not a wav file at all".toByteArray()) }
     }
+
+    @Test fun aHugeChunkSizeIsNotAWav() {
+        val plain = Wav.encode(ByteArray(64))
+        // A LIST chunk claiming ~4 GB before the data: it can't wrap around into the file.
+        val list = ByteBuffer.allocate(8).order(ByteOrder.LITTLE_ENDIAN).put("LIST".toByteArray()).putInt(0x7FFFFFF8).array()
+        val wav = plain.copyOfRange(0, 36) + list + plain.copyOfRange(36, plain.size)
+        assertThrows(IllegalArgumentException::class.java) { Wav.parse(wav) }
+    }
+
+    @Test fun aTruncatedExtensibleHeaderIsNotACrash() {
+        // Says extensible (40 bytes of fmt) but the file ends after the first 20.
+        val h = ByteBuffer.allocate(40).order(ByteOrder.LITTLE_ENDIAN)
+            .put("RIFF".toByteArray()).putInt(32).put("WAVE".toByteArray())
+            .put("fmt ".toByteArray()).putInt(40).putShort(0xFFFE.toShort()).putShort(1).putInt(16_000).putInt(32_000).putShort(2).putShort(16).array()
+        assertThrows(IllegalArgumentException::class.java) { Wav.parse(h) }
+    }
+
+    @Test fun floatSamplesThatDontFillAFrameAreDropped() {
+        val data = ByteBuffer.allocate(6).order(ByteOrder.LITTLE_ENDIAN).putFloat(0.5f).put(0).put(0).array()
+        val h = ByteBuffer.allocate(44).order(ByteOrder.LITTLE_ENDIAN)
+            .put("RIFF".toByteArray()).putInt(36 + 6).put("WAVE".toByteArray())
+            .put("fmt ".toByteArray()).putInt(16).putShort(3).putShort(1).putInt(24_000).putInt(96_000).putShort(4).putShort(32)
+            .put("data".toByteArray()).putInt(6).array()
+        val wav = h + data
+        assertEquals(2, Wav.pcm16(wav, Wav.parse(wav)).size)
+    }
 }

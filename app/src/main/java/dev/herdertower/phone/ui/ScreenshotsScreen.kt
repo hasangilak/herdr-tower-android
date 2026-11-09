@@ -45,15 +45,17 @@ import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.pulltorefresh.PullToRefreshBox
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.produceState
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -61,6 +63,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.geometry.Offset
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
 import androidx.compose.ui.graphics.graphicsLayer
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChanged
@@ -75,6 +78,7 @@ import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.herdertower.phone.api.Screenshot
+import dev.herdertower.phone.data.Link
 import dev.herdertower.phone.data.TowerSession
 import kotlinx.coroutines.launch
 
@@ -133,10 +137,24 @@ private fun ShotCard(session: TowerSession, s: Screenshot, acc: AccountLookup, o
     }
 }
 
+/**
+ * A picture loaded with the token, for [key]. One that couldn't be had
+ * (offline, the tower away) is tried again when the link comes back.
+ */
+@Composable
+fun rememberPicture(session: TowerSession, key: String, load: suspend () -> ImageBitmap?): ImageBitmap? {
+    val link by session.link.collectAsStateWithLifecycle()
+    val live = link is Link.Live
+    var img by remember(key) { mutableStateOf<ImageBitmap?>(null) }
+    val current by rememberUpdatedState(load)
+    LaunchedEffect(key, live) { if (img == null) img = current() }
+    return img
+}
+
 /** A rounded thumbnail, loaded with the token. */
 @Composable
 fun Thumb(session: TowerSession, s: Screenshot, modifier: Modifier = Modifier, maxSide: Int = 720) {
-    val img by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, s.id) { value = session.images.load(s, maxSide) }
+    val img = rememberPicture(session, "${s.id}@$maxSide") { session.images.load(s, maxSide) }
     Box(
         modifier.clip(RoundedCornerShape(18.dp)).background(tc.card).border(1.dp, tc.edge, RoundedCornerShape(18.dp))
             .semantics { contentDescription = s.caption.ifBlank { "Screenshot" } },
@@ -222,7 +240,15 @@ fun PicViewer(shots: List<Pic>, start: Int, onClose: () -> Unit) {
 @Composable
 private fun ZoomableShot(s: Pic, onZoom: (Boolean) -> Unit) {
     val maxSide = with(LocalDensity.current) { 2400.dp.toPx().toInt().coerceAtMost(3200) }
-    val img by produceState<androidx.compose.ui.graphics.ImageBitmap?>(null, s.key) { value = s.load(maxSide) }
+    // Loaded, or null while loading; a failed load waits for Try again.
+    var img by remember(s.key) { mutableStateOf<ImageBitmap?>(null) }
+    var failed by remember(s.key) { mutableStateOf(false) }
+    var attempt by remember(s.key) { mutableIntStateOf(0) }
+    LaunchedEffect(s.key, attempt) {
+        failed = false
+        img = s.load(maxSide)
+        failed = img == null
+    }
     var scale by remember { mutableFloatStateOf(1f) }
     var offset by remember { mutableStateOf(Offset.Zero) }
     var size by remember { mutableStateOf(IntSize.Zero) }
@@ -263,7 +289,12 @@ private fun ZoomableShot(s: Pic, onZoom: (Boolean) -> Unit) {
         contentAlignment = Alignment.Center,
     ) {
         val i = img
-        if (i == null) {
+        if (i == null && failed) {
+            Column(horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Text("Couldn't load it.", style = MaterialTheme.typography.bodyMedium, color = Color.White)
+                TextButton(onClick = { attempt++ }) { Text("Try again", color = Color.White) }
+            }
+        } else if (i == null) {
             CircularProgressIndicator(color = Color.White)
         } else {
             Image(

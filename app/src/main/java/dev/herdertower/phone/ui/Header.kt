@@ -1,8 +1,6 @@
 package dev.herdertower.phone.ui
 
 import android.os.Build
-import androidx.compose.animation.core.animateFloatAsState
-import androidx.compose.animation.core.tween
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
@@ -30,12 +28,18 @@ import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
+import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
 import androidx.compose.runtime.getValue
+import androidx.compose.runtime.remember
+import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.core.tween
+import androidx.compose.foundation.selection.toggleable
+import androidx.compose.ui.draw.alpha
+import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.draw.drawWithContent
 import androidx.compose.ui.geometry.Offset
@@ -54,8 +58,19 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import dev.herdertower.phone.orb.OrbGlyph
+import androidx.compose.ui.unit.sp
 
-/** Whether the tower is talking (here or on the Mac), and how to stop it: the header's Stop reads this. */
+/**
+ * The tower-wide mute (`tower mute`: it says nothing, on the Mac or any
+ * phone) and how to flip it; [enabled] is false while not connected or while
+ * a change is on its way. The header's orb reads this.
+ */
+data class MuteState(val muted: Boolean = false, val enabled: Boolean = true, val toggle: () -> Unit = {})
+
+val LocalMute = compositionLocalOf { MuteState() }
+
+/** Whether the tower is talking (here or on the Mac), and how to stop this reply: the header's Stop reads this. */
 data class StopState(val talking: Boolean = false, val onStop: () -> Unit = {})
 
 val LocalStop = compositionLocalOf { StopState() }
@@ -83,6 +98,9 @@ fun GlassScaffold(
     content: @Composable BoxScope.() -> Unit,
 ) {
     val blurred = rememberGraphicsLayer()
+    // Made once, not on every draw.
+    val radius = with(androidx.compose.ui.platform.LocalDensity.current) { 18.dp.toPx() }
+    val blur = remember(radius) { BlurEffect(radius, radius, TileMode.Clamp) }
     val top = headerTop() + belowHeight
     val tint = tc.bgTop
     val edge = tc.edge
@@ -95,7 +113,7 @@ fun GlassScaffold(
                 clipRect(top = h) { this@drawWithContent.drawContent() }
                 clipRect(bottom = h) {
                     if (canBlur) {
-                        blurred.renderEffect = BlurEffect(18.dp.toPx(), 18.dp.toPx(), TileMode.Clamp)
+                        if (blurred.renderEffect !== blur) blurred.renderEffect = blur
                         blurred.record { this@drawWithContent.drawContent() }
                         drawLayer(blurred)
                     } else {
@@ -121,18 +139,27 @@ fun GlassScaffold(
 /** A round header button: 40dp to see, 48dp to touch. */
 @Composable
 fun HeaderButton(icon: ImageVector, label: String, badge: Int = 0, onClick: () -> Unit) {
+    // Not clipped: the badge sits on the circle's corner and must show whole; the ripple stays round on its own.
     Box(
-        Modifier.size(48.dp).clip(CircleShape).clickable(role = Role.Button, onClickLabel = label, onClick = onClick)
+        Modifier.size(48.dp)
+            .clickable(interactionSource = null, indication = ripple(bounded = false, radius = 24.dp), role = Role.Button, onClickLabel = label, onClick = onClick)
             .semantics { contentDescription = if (badge > 0) "$label, $badge" else label },
         contentAlignment = Alignment.Center,
     ) {
         Box(Modifier.size(40.dp).clip(CircleShape).background(tc.card).border(1.dp, tc.edge, CircleShape), contentAlignment = Alignment.Center) {
             Icon(icon, null, Modifier.size(20.dp), tint = tc.text)
         }
+        // A pill (round for one digit, wider for "9+"), ringed in the header's colour so it reads apart from the circle.
         if (badge > 0) Box(
-            Modifier.align(Alignment.TopEnd).padding(top = 2.dp, end = 2.dp).size(18.dp).clip(CircleShape).background(tc.blocked),
+            Modifier.align(Alignment.TopEnd).heightIn(min = 18.dp).widthIn(min = 18.dp)
+                .border(1.5.dp, tc.bgTop, CircleShape).padding(1.5.dp).clip(CircleShape).background(tc.blocked).padding(horizontal = 4.dp),
             contentAlignment = Alignment.Center,
-        ) { Text(if (badge > 9) "9+" else "$badge", style = MaterialTheme.typography.labelSmall, color = Color.White, fontWeight = FontWeight.Bold) }
+        ) {
+            Text(
+                if (badge > 9) "9+" else "$badge", style = MaterialTheme.typography.labelSmall.copy(fontSize = 10.sp, lineHeight = 14.sp),
+                color = Color.White, fontWeight = FontWeight.Bold, maxLines = 1,
+            )
+        }
     }
 }
 
@@ -150,8 +177,33 @@ fun RowScope.HeaderTitle(text: String) {
 }
 
 /**
+ * The tower's orb, as a switch: on, the whole tower is muted (it stops
+ * talking now and says nothing, here or on the Mac, until switched off).
+ * Muted, the orb is dimmed with a slash. [size] is the orb; the touch target
+ * is at least 48dp. To stop only this reply, there's [StopSlot].
+ */
+@Composable
+fun MuteOrb(size: Dp, modifier: Modifier = Modifier, status: String = "") {
+    val mute = LocalMute.current
+    Box(
+        modifier.size(maxOf(size, 48.dp))
+            .toggleable(
+                value = mute.muted, enabled = mute.enabled, role = Role.Switch,
+                interactionSource = null, indication = ripple(bounded = false, radius = size / 2 + 6.dp),
+                onValueChange = { mute.toggle() },
+            )
+            .semantics {
+                contentDescription = status + "Mute the tower, here and on the Mac"
+                stateDescription = if (mute.muted) "Muted" else "Talking allowed"
+            },
+        contentAlignment = Alignment.Center,
+    ) { OrbGlyph(Modifier.size(size), muted = mute.muted) }
+}
+
+/**
  * Stop, always last in the header: shown while the tower talks (here or on
  * the Mac), invisible otherwise but still taking its place, so nothing moves.
+ * It stops this reply only; the orb mutes the tower.
  */
 @Composable
 fun StopSlot() {

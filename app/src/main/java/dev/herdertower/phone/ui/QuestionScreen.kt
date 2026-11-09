@@ -45,11 +45,13 @@ import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
@@ -60,6 +62,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.selected
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontFamily
 import androidx.compose.ui.text.font.FontWeight
@@ -72,9 +75,12 @@ import dev.herdertower.phone.api.QuestionTab
 import dev.herdertower.phone.api.Recommendation
 import dev.herdertower.phone.data.TowerSession
 import dev.herdertower.phone.voice.Take
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 
 /** A question a session asks, as a card: who asks, what, the tower's pick, its state. Opens the stepper. */
@@ -151,11 +157,21 @@ fun QuestionScreen(session: TowerSession, id: String, onClose: () -> Unit, onSes
 
     var drafts by remember(id) { mutableStateOf(mapOf<Int, TabDraft>()) }
     val effective = QuestionModel.withDefaults(q, drafts)
+    // The question as it is now, for what finishes later (a take, files being read).
+    val latest by rememberUpdatedState(q)
+    fun current(t: Int): TabDraft = QuestionModel.withDefaults(latest, drafts)[t] ?: TabDraft()
+    // From the drafts as they are when it's set, not as they were when the work began.
     fun setDraft(t: Int, d: TabDraft) {
-        drafts = effective + (t to d)
+        if (t !in latest.tabs.indices) return
+        drafts = QuestionModel.withDefaults(latest, drafts) + (t to d)
     }
     val steps = QuestionModel.steps(q)
-    var step by rememberSaveable(id) { mutableStateOf(0) }
+    var stepSaved by rememberSaveable(id) { mutableStateOf(0) }
+    // Kept within the set: it can change (fewer questions) while it's open.
+    val step = QuestionModel.clampStep(q, stepSaved)
+    fun go(to: Int) {
+        stepSaved = QuestionModel.clampStep(q, to)
+    }
     val reviewing = steps > 1 && step >= q.tabs.size
     val answers = QuestionModel.answers(q, effective)
     val busy = q.status == "answering"
@@ -169,30 +185,27 @@ fun QuestionScreen(session: TowerSession, id: String, onClose: () -> Unit, onSes
     }
 
     // Saying an answer: a take, then the Mac transcribes and reads it as a choice, shown before it's sent.
-    var take by remember { mutableStateOf<Take?>(null) }
+    var take by remember { mutableStateOf<ScreenTake?>(null) }
     var interpreting by remember { mutableStateOf(false) }
+    // Leaving mid-take ends it: the microphone is stopped and let go.
+    DisposableEffect(Unit) { onDispose { take?.stop() } }
     fun say(t: Int) {
         take?.let { running ->
-            scope.launch { running.stop() }
+            running.stop()
             return
         }
         perms.withMic {
-            val tk = runCatching { Take.start(session.scope, endOnSilence = true) }.getOrElse {
-                snack("The microphone isn't available.")
-                return@withMic
-            }
+            val tk = ScreenTake.start(session) ?: return@withMic snack("The microphone isn't available.")
             take = tk
             scope.launch {
-                runCatching { tk.ended.await() }
-                val wav = tk.stop()
+                val wav = tk.finish(session)
                 take = null
                 if (!tk.heardSpeech) return@launch snack("Didn't hear anything.")
                 interpreting = true
-                session.act { it.questionVoice(q.id, t, wav) }
+                session.act { it.questionVoice(latest.id, t, wav) }
                     .onSuccess { r ->
                         heard = t to r.heard
-                        val now = effective[t] ?: TabDraft()
-                        setDraft(t, QuestionModel.draftOf(r.parsed, q.tabs[t], touched = true, files = now.files))
+                        latest.tabs.getOrNull(t)?.let { tab -> setDraft(t, QuestionModel.draftOf(r.parsed, tab, touched = true, files = current(t).files)) }
                     }
                     .onFailure { snack("Couldn't understand it: ${TowerSession.describe(it)}") }
                 interpreting = false
@@ -202,10 +215,14 @@ fun QuestionScreen(session: TowerSession, id: String, onClose: () -> Unit, onSes
 
     val pickFiles = rememberLauncherForActivityResult(ActivityResultContracts.GetMultipleContents()) { uris ->
         val t = step.coerceAtMost(q.tabs.lastIndex)
+        if (t < 0) return@rememberLauncherForActivityResult
         scope.launch {
-            val parts = withContext(Dispatchers.IO) { uris.take(6).mapNotNull { readPart(context, it) } }
-            val d = effective[t] ?: TabDraft()
-            setDraft(t, d.copy(files = (d.files + parts).take(6), touched = true))
+            val read = withContext(Dispatchers.IO) { uris.take(MAX_FILES).map { readPart(context, it) } }
+            read.mapNotNull { it.exceptionOrNull() }.firstOrNull()?.let { e ->
+                snack(if (e is TooBig) "${e.name} is over 50 MB: it can't go with an answer." else "Couldn't read a file.")
+            }
+            val d = current(t)
+            setDraft(t, d.copy(files = (d.files + read.mapNotNull { it.getOrNull() }).take(MAX_FILES), touched = true))
         }
     }
 
@@ -219,15 +236,18 @@ fun QuestionScreen(session: TowerSession, id: String, onClose: () -> Unit, onSes
         Column(Modifier.weight(1f).verticalScroll(rememberScrollState()).padding(horizontal = 20.dp), verticalArrangement = Arrangement.spacedBy(14.dp)) {
             Spacer(Modifier.height(4.dp))
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text("${q.who} asks", Modifier.weight(1f).clickable { onSession(q.session) }, style = MaterialTheme.typography.titleMedium, color = tc.accentHi.takeIf { tc.dark } ?: tc.accent, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                Box(Modifier.weight(1f).heightIn(min = 48.dp).clickable(role = Role.Button, onClickLabel = "Open ${q.who}") { onSession(q.session) }, contentAlignment = Alignment.CenterStart) {
+                    Text("${q.who} asks", style = MaterialTheme.typography.titleMedium, color = tc.accentHi.takeIf { tc.dark } ?: tc.accent, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
                 Text(QuestionModel.kindWord(q), style = MaterialTheme.typography.labelLarge, color = tc.faint)
             }
             if (q.context.isNotBlank()) Text("Working on: ${q.context}", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
-            if (steps > 1) Progress(q, step, effective) { step = it }
+            if (steps > 1) Progress(q, step, effective) { go(it) }
 
             when {
                 done -> Done()
-                reviewing -> Review(q, effective) { step = it }
+                reviewing -> Review(q, effective) { go(it) }
+                q.tabs.isEmpty() -> NoTabs(q) { onSession(q.session) }
                 else -> {
                     val t = step.coerceAtMost(q.tabs.lastIndex)
                     TabPage(
@@ -237,7 +257,7 @@ fun QuestionScreen(session: TowerSession, id: String, onClose: () -> Unit, onSes
                         listening = take != null, interpreting = interpreting,
                         onSay = { say(t) }, onFiles = { pickFiles.launch("*/*") },
                     )
-                    if (steps == 1) answers?.let { a -> Text("Your answer: " + a.first().choice.words(q.tabs.first()), style = MaterialTheme.typography.bodyMedium, color = tc.muted) }
+                    if (steps == 1) answers?.firstOrNull()?.let { a -> Text("Your answer: " + a.choice.words(q.tabs.firstOrNull()), style = MaterialTheme.typography.bodyMedium, color = tc.muted) }
                 }
             }
             QuestionModel.statusWords(q)?.takeIf { !done }?.let { words ->
@@ -247,11 +267,13 @@ fun QuestionScreen(session: TowerSession, id: String, onClose: () -> Unit, onSes
             Spacer(Modifier.height(8.dp))
         }
         if (!done) Row(Modifier.fillMaxWidth().padding(horizontal = 20.dp, vertical = 12.dp), verticalAlignment = Alignment.CenterVertically) {
-            if (step > 0) BigButton("Back", primary = false) { step-- }
+            if (step > 0) BigButton("Back", primary = false) { go(step - 1) }
             Spacer(Modifier.weight(1f))
             val last = steps == 1 || reviewing
-            if (last) BigButton(if (q.status == "failed") "Try again" else "Submit", enabled = answers != null && !busy) { submit() }
-            else BigButton(if (step == q.tabs.lastIndex) "Review" else "Next") { step++ }
+            if (q.tabs.isNotEmpty()) {
+                if (last) BigButton(if (q.status == "failed") "Try again" else "Submit", enabled = answers != null && !busy) { submit() }
+                else BigButton(if (step == q.tabs.lastIndex) "Review" else "Next") { go(step + 1) }
+            }
         }
     }
 }
@@ -259,15 +281,23 @@ fun QuestionScreen(session: TowerSession, id: String, onClose: () -> Unit, onSes
 /** The steps as segments: each question, then the review; tap one to go there. */
 @Composable
 private fun Progress(q: Question, step: Int, drafts: Map<Int, TabDraft>, onGo: (Int) -> Unit) {
-    Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+    Column {
         Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
             for (i in 0..q.tabs.size) {
                 val answered = i < q.tabs.size && QuestionModel.choice(q.tabs[i], drafts[i] ?: TabDraft()) != null
+                val name = if (i == q.tabs.size) "Review" else q.tabs[i].title.ifBlank { "Question ${i + 1}" }
+                // A 48 dp tall target round the thin segment.
                 Box(
-                    Modifier.weight(1f).height(6.dp).clip(CircleShape)
-                        .background(if (i == step) tc.accent else if (answered) tc.accent.copy(alpha = 0.45f) else tc.edge)
-                        .clickable(role = Role.Tab, onClickLabel = if (i == q.tabs.size) "Review" else q.tabs[i].title) { onGo(i) },
-                )
+                    Modifier.weight(1f).heightIn(min = 48.dp)
+                        .clickable(role = Role.Tab, onClickLabel = "Go to $name") { onGo(i) }
+                        .semantics {
+                            contentDescription = name + if (answered) ", answered" else ""
+                            selected = i == step
+                        },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Box(Modifier.fillMaxWidth().height(6.dp).clip(CircleShape).background(if (i == step) tc.accent else if (answered) tc.accent.copy(alpha = 0.45f) else tc.edge))
+                }
             }
         }
         Text(
@@ -352,7 +382,12 @@ private fun TabPage(
                 Icon(Icons.Filled.AttachFile, null, Modifier.size(16.dp), tint = tc.muted)
                 Spacer(Modifier.width(6.dp))
                 Text(f.name, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = tc.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Icon(Icons.Filled.Close, "Remove ${f.name}", Modifier.size(20.dp).clickable { onDraft(d.copy(files = d.files.filterIndexed { j, _ -> j != i }, touched = true)) }, tint = tc.muted)
+                Box(
+                    Modifier.size(48.dp).clip(CircleShape).clickable(role = Role.Button, onClickLabel = "Remove ${f.name}") { onDraft(d.copy(files = d.files.filterIndexed { j, _ -> j != i }, touched = true)) },
+                    contentAlignment = Alignment.Center,
+                ) {
+                    Icon(Icons.Filled.Close, "Remove ${f.name}", Modifier.size(20.dp), tint = tc.muted)
+                }
             }
         }
         if (d.files.isNotEmpty() && d.other.isBlank()) Text("Files go with your own words: type a line about them.", style = MaterialTheme.typography.bodySmall, color = tc.faint)
@@ -401,6 +436,15 @@ private fun Review(q: Question, drafts: Map<Int, TabDraft>, onEdit: (Int) -> Uni
             }
         }
     }
+}
+
+/** A set with no questions the phone can show: its words, and the way to the terminal. */
+@Composable
+private fun NoTabs(q: Question, onSession: () -> Unit) {
+    Text(q.title.ifBlank { "${q.who} is waiting for an answer." }, style = MaterialTheme.typography.headlineSmall, color = tc.text)
+    if (q.detail.isNotBlank()) Text(q.detail, style = MaterialTheme.typography.bodyMedium, color = tc.muted)
+    Text("There's nothing to pick here: answer it in the session.", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
+    TextButton(onClick = onSession) { Text("Open ${q.who} to answer in the terminal", color = tc.text) }
 }
 
 @Composable
@@ -453,12 +497,95 @@ private fun SmallAction(icon: ImageVector, label: String, active: Boolean = fals
     }
 }
 
-/** A picked file as a part to send (up to 50 MB). */
-private fun readPart(context: android.content.Context, uri: Uri): FilePart? = runCatching {
+/** How many files go with one answer. */
+private const val MAX_FILES = 6
+
+/** The most a file for an answer may be. */
+internal const val MAX_FILE_BYTES = 50L * 1024 * 1024
+
+/** A picked file over [MAX_FILE_BYTES]. */
+internal class TooBig(val name: String) : Exception("$name is too big")
+
+/**
+ * A picked file as a part to send (up to 50 MB): copied to a file in the
+ * cache, so it isn't held in memory, and refused as [TooBig] before
+ * reading when the provider says its size.
+ */
+private fun readPart(context: android.content.Context, uri: Uri): Result<FilePart> = runCatching {
     val cr = context.contentResolver
-    val name = cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME), null, null, null)?.use { c -> if (c.moveToFirst()) c.getString(0) else null } ?: "file"
+    var name = "file"
+    var size = -1L
+    cr.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { c ->
+        if (c.moveToFirst()) {
+            if (!c.isNull(0)) name = c.getString(0)
+            if (!c.isNull(1)) size = c.getLong(1)
+        }
+    }
+    if (size > MAX_FILE_BYTES) throw TooBig(name) // the size the picker says: refused before reading a byte
     val mime = cr.getType(uri) ?: "application/octet-stream"
-    val bytes = cr.openInputStream(uri)?.use { it.readBytes() } ?: return null
-    if (bytes.size > 50 * 1024 * 1024) return null
-    FilePart(name, mime, bytes)
-}.getOrNull()
+    val dir = java.io.File(context.cacheDir, "answer-files").apply { mkdirs() }
+    // Those from earlier answers (a day old) go.
+    dir.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 24 * 3600_000L }?.forEach { it.delete() }
+    val out = java.io.File(dir, "${java.util.UUID.randomUUID()}-${name.replace(Regex("[^A-Za-z0-9._-]"), "_").takeLast(80)}")
+    val input = cr.openInputStream(uri) ?: throw java.io.IOException("can't open $name")
+    copyCapped(name, input, out)
+    FilePart(name, mime, file = out)
+}
+
+/**
+ * Streams [from] into [out] (never the whole file in memory), refusing it as
+ * [TooBig] once it passes [max] (a picker may not know the size); on any
+ * failure the partial copy is deleted.
+ */
+internal fun copyCapped(name: String, from: java.io.InputStream, out: java.io.File, max: Long = MAX_FILE_BYTES) {
+    try {
+        from.use { input ->
+            out.outputStream().use { to ->
+                val buf = ByteArray(64 * 1024)
+                var total = 0L
+                while (true) {
+                    val n = input.read(buf)
+                    if (n < 0) break
+                    total += n
+                    if (total > max) throw TooBig(name)
+                    to.write(buf, 0, n)
+                }
+            }
+        }
+    } catch (e: Exception) {
+        out.delete()
+        throw e
+    }
+}
+
+/**
+ * A take from the microphone for a screen (a question's answer, words for
+ * the tower): it ends by itself after a pause, or with [stop]. [finish]
+ * runs in the session's scope, so the microphone is stopped and let go even
+ * when the screen goes away mid-take; the screen calls [stop] then.
+ */
+internal class ScreenTake private constructor(private val take: Take) {
+    private val asked = CompletableDeferred<Unit>()
+
+    val heardSpeech: Boolean get() = take.heardSpeech
+
+    /** Ends the take now (a tap on Stop, or leaving the screen). */
+    fun stop() {
+        asked.complete(Unit)
+    }
+
+    /** Waits for the take to end (by itself or [stop]), then stops the microphone: the take as a WAV. */
+    suspend fun finish(session: TowerSession): ByteArray = session.scope.async {
+        select {
+            take.ended.onAwait {}
+            asked.onAwait {}
+        }
+        take.stop()
+    }.await()
+
+    companion object {
+        /** Starts one, or null when the microphone can't be had. */
+        fun start(session: TowerSession): ScreenTake? =
+            runCatching { Take.start(session.scope, endOnSilence = true) }.getOrNull()?.let { ScreenTake(it) }
+    }
+}
