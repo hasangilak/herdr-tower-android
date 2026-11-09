@@ -31,12 +31,16 @@ import androidx.compose.material3.Text
 import androidx.compose.material3.ripple
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.compositionLocalOf
-import androidx.compose.runtime.getValue
 import androidx.compose.runtime.remember
-import androidx.compose.animation.core.animateFloatAsState
+import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.EnterTransition
+import androidx.compose.animation.ExitTransition
+import androidx.compose.animation.expandHorizontally
+import androidx.compose.animation.fadeIn
+import androidx.compose.animation.fadeOut
+import androidx.compose.animation.shrinkHorizontally
 import androidx.compose.animation.core.tween
 import androidx.compose.foundation.selection.toggleable
-import androidx.compose.ui.draw.alpha
 import androidx.compose.ui.semantics.stateDescription
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -51,7 +55,6 @@ import androidx.compose.ui.graphics.layer.drawLayer
 import androidx.compose.ui.graphics.rememberGraphicsLayer
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.clearAndSetSemantics
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -201,20 +204,25 @@ fun MuteOrb(size: Dp, modifier: Modifier = Modifier, status: String = "") {
 }
 
 /**
- * Stop, always last in the header: shown while the tower talks (here or on
- * the Mac), invisible otherwise but still taking its place, so nothing moves.
- * It stops this reply only; the orb mutes the tower.
+ * Stop, last in the header while the tower talks (here or on the Mac): it
+ * slides in at the right edge then and takes no room otherwise, so the
+ * header's own buttons sit flush at the right edge. It stops this reply
+ * only; the orb mutes the tower.
  */
 @Composable
 fun StopSlot() {
     val stop = LocalStop.current
     val reduce = LocalReduceMotion.current
-    val a by animateFloatAsState(if (stop.talking) 1f else 0f, if (reduce) tween(0) else tween(180), label = "stop")
+    AnimatedVisibility(
+        visible = stop.talking,
+        enter = if (reduce) EnterTransition.None else fadeIn(tween(180)) + expandHorizontally(tween(180), expandFrom = Alignment.Start),
+        exit = if (reduce) ExitTransition.None else fadeOut(tween(180)) + shrinkHorizontally(tween(180), shrinkTowards = Alignment.Start),
+    ) {
     Box(Modifier.heightIn(min = 48.dp).padding(start = 4.dp), contentAlignment = Alignment.Center) {
         Row(
-            Modifier.alpha(a).heightIn(min = 40.dp).widthIn(min = 84.dp).clip(CircleShape).background(tc.text)
-                .clickable(enabled = stop.talking, role = Role.Button, onClickLabel = "Stop the tower talking", onClick = stop.onStop)
-                .then(if (stop.talking) Modifier.semantics { contentDescription = "Stop the tower talking" } else Modifier.clearAndSetSemantics {})
+            Modifier.heightIn(min = 40.dp).widthIn(min = 84.dp).clip(CircleShape).background(tc.text)
+                .clickable(role = Role.Button, onClickLabel = "Stop the tower talking", onClick = stop.onStop)
+                .semantics { contentDescription = "Stop the tower talking" }
                 .padding(start = 12.dp, end = 16.dp, top = 8.dp, bottom = 8.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
@@ -222,5 +230,6 @@ fun StopSlot() {
             Spacer(Modifier.width(6.dp))
             Text("Stop", style = MaterialTheme.typography.titleSmall, color = tc.bgTop, fontWeight = FontWeight.SemiBold, maxLines = 1)
         }
+    }
     }
 }
