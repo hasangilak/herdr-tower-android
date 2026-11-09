@@ -49,6 +49,8 @@ class TowerClient(
     val endpoint: Endpoint,
     private val token: () -> String?,
     base: OkHttpClient = OkHttpClient(),
+    /** How long a connection may take: short when trying one address of several (the LAN, before Tailscale). */
+    connectTimeoutMs: Long = 5_000,
 ) {
     private val trust = PinnedTrustManager(endpoint.fingerprint)
 
@@ -60,7 +62,7 @@ class TowerClient(
         .hostnameVerifier(PinnedTrustManager.ANY_HOST)
         // The tower speaks HTTP/1.1 only.
         .protocols(listOf(Protocol.HTTP_1_1))
-        .connectTimeout(5, TimeUnit.SECONDS)
+        .connectTimeout(connectTimeoutMs, TimeUnit.MILLISECONDS)
         .readTimeout(20, TimeUnit.SECONDS)
         .writeTimeout(20, TimeUnit.SECONDS)
         // The tower serves one request per connection.

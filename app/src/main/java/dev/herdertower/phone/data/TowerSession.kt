@@ -19,7 +19,11 @@ import dev.herdertower.phone.api.MergeResult
 import dev.herdertower.phone.api.Pr
 import dev.herdertower.phone.api.PrRef
 import dev.herdertower.phone.api.PrsApi
+import dev.herdertower.phone.api.ActiveRoute
 import dev.herdertower.phone.api.Endpoint
+import dev.herdertower.phone.api.Hosts
+import dev.herdertower.phone.api.TowerHost
+import dev.herdertower.phone.api.UnreachableException
 import dev.herdertower.phone.api.Fingerprint
 import dev.herdertower.phone.api.HistoryEntry
 import dev.herdertower.phone.api.Job
@@ -77,13 +81,24 @@ sealed interface Link {
  * on or off (kept alive by [dev.herdertower.phone.voice.VoiceService]).
  */
 @OptIn(ExperimentalCoroutinesApi::class)
-class TowerSession(private val context: Context, private val store: CredentialStore, val settings: Settings) {
+class TowerSession(
+    private val context: Context,
+    private val store: CredentialStore,
+    val settings: Settings,
+    /** The phone's side of Tailscale (whether its VPN is up), for saying why the Mac can't be reached. */
+    private val net: PhoneNet = SystemPhoneNet(context),
+) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
     private val _creds = MutableStateFlow(store.load())
     val credentials: StateFlow<Credentials?> = _creds.asStateFlow()
 
-    @Volatile private var client: TowerClient? = _creds.value?.let(::clientFor)
+    /** The client for the route in use (the last that worked, until a connect picks again). */
+    @Volatile private var client: TowerClient? = _creds.value?.let { c -> clientAt(c, c.hosts.firstOrNull { it.id == settings.lastRoute } ?: c.hosts.first()) }
+
+    private val _activeRoute = MutableStateFlow<ActiveRoute?>(null)
+    /** How the phone reaches the tower now (Wi-Fi or Tailscale), once a connect got through; shown while live. */
+    val activeRoute: StateFlow<ActiveRoute?> = _activeRoute.asStateFlow()
 
     private val _link = MutableStateFlow<Link>(if (_creds.value == null) Link.Unpaired else Link.Idle)
     val link: StateFlow<Link> = _link.asStateFlow()
@@ -171,7 +186,8 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             // Keyed on the mode, not on each flag: with the phone as the voice, going to the background
             // or back must not reopen the voice stream (the Mac would take over mid-reply).
             combine(_creds, _voiceOn, _foreground, _lingering, _blocked) { c, v, fg, linger, blocked ->
-                if (c == null) null else Want(c, streamMode(v, fg, linger), blocked)
+                // The pairing, not its address list: the tower sending its current addresses mustn't reopen the stream.
+                if (c == null) null else Want("${c.deviceId}|${c.fingerprint}|${c.token.hashCode()}", streamMode(v, fg, linger), blocked)
             }
                 .distinctUntilChanged()
                 .collectLatest { want ->
@@ -209,7 +225,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         }
     }
 
-    private data class Want(val creds: Credentials, val mode: StreamMode, val blocked: Link?)
+    private data class Want(val pairing: String, val mode: StreamMode, val blocked: Link?)
 
     /** Which stream to keep open: none, the panel's feed, or the voice stream (which also feeds the panel). */
     enum class StreamMode { Idle, Panel, Voice }
@@ -250,7 +266,71 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         }
     }
 
-    private fun clientFor(c: Credentials) = TowerClient(c.endpoint, { _creds.value?.token })
+    private fun clientAt(c: Credentials, h: TowerHost) = TowerClient(c.endpointAt(h), { _creds.value?.token })
+
+    // Routes: the LAN, then Tailscale
+
+    private sealed interface Pick {
+        data class Found(val host: TowerHost) : Pick
+        /** Every address answered with another certificate. */
+        data class Mismatch(val got: String) : Pick
+        data class Nowhere(val message: String) : Pick
+    }
+
+    /** Why nothing answered, in words that say what to do on this phone. */
+    private fun unreachable(c: Credentials): String =
+        RouteWords.unreachable(Hosts.candidates(c.hosts, c.magicDns, null).any { it.tailscale }, net.vpnOn(), net.tailscaleInstalled())
+
+    /**
+     * Where the tower answers now: each address in turn (the LAN first, with
+     * a short connect timeout), the same pinned certificate for all. One
+     * address only: no probe, the stream's own connect says.
+     */
+    private suspend fun pick(c: Credentials): Pick {
+        val all = Hosts.candidates(c.hosts, c.magicDns, settings.lastRoute)
+        if (all.size <= 1) return Pick.Found(all.firstOrNull() ?: c.hosts.first())
+        var mismatched = 0
+        var got = ""
+        for (h in all) {
+            val probe = TowerClient(c.endpointAt(h), { _creds.value?.token }, connectTimeoutMs = PROBE_CONNECT_MS)
+            val answered = try {
+                withTimeoutOrNull(PROBE_TOTAL_MS) { probe.hello(); true } ?: false
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: UnauthorizedException) {
+                true // it's there; the stream then says the token was refused
+            } catch (e: SSLMismatch) {
+                // Another machine at this address (another network's 192.168.x): not the tower, try the next.
+                mismatched++
+                got = e.mismatch.got
+                false
+            } catch (e: TowerApiException) {
+                true
+            } catch (e: Exception) {
+                false
+            }
+            if (answered) return Pick.Found(h)
+        }
+        return if (mismatched == all.size) Pick.Mismatch(got) else Pick.Nowhere(unreachable(c))
+    }
+
+    /** The client for [h], kept while the route stays the same. */
+    private fun useRoute(c: Credentials, h: TowerHost): TowerClient {
+        val current = client
+        if (current != null && current.endpoint == c.endpointAt(h)) return current
+        return clientAt(c, h).also { client = it }
+    }
+
+    /** The tower's current addresses (state `lan_hosts`): stored, so the next connect tries them; the stream stays. */
+    private fun learnHosts(fresh: List<TowerHost>, dns: String?) {
+        val c = _creds.value ?: return
+        val hosts = Hosts.refresh(c.hosts, fresh)
+        val magic = dns?.trim()?.trimEnd('.')?.takeIf { it.isNotEmpty() } ?: hosts.firstNotNullOfOrNull { it.dnsName } ?: c.magicDns
+        if (hosts == c.hosts && magic == c.magicDns) return
+        val next = c.copy(hosts = hosts, magicDns = magic)
+        store.save(next)
+        _creds.value = next
+    }
 
     // The stream
 
@@ -258,11 +338,26 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         var attempt = 0
         var failing: String? = null
         while (true) {
-            val c = client ?: return
+            val creds = _creds.value ?: return
             _link.value = Link.Connecting(attempt, failing)
+            var route: TowerHost? = null
+            var live = false
             val reason = try {
+                val c = when (val p = pick(creds)) {
+                    is Pick.Found -> useRoute(creds, p.host).also { route = p.host }
+                    is Pick.Mismatch -> {
+                        block(Link.CertificateChanged(p.got))
+                        return
+                    }
+                    is Pick.Nowhere -> throw UnreachableException(p.message, null)
+                }
                 c.events(voice).collect { ev ->
                     if (ev is TowerEvent.Hello) {
+                        live = true
+                        route?.let {
+                            _activeRoute.value = ActiveRoute(it)
+                            settings.lastRoute = it.id
+                        }
                         attempt = 0
                         failing = null
                         retryNow.tryReceive() // a retry asked for before this connect is done
@@ -280,6 +375,9 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             } catch (e: SSLMismatch) {
                 block(Link.CertificateChanged(e.mismatch.got))
                 return
+            } catch (e: UnreachableException) {
+                // Never got through this time: say what the phone can do about it (Tailscale off, another network).
+                if (live) e.message ?: "Connection lost." else e.message?.takeIf { it.startsWith("Can't reach the Mac") || it.startsWith("Secure connection failed") } ?: unreachable(creds)
             } catch (e: Exception) {
                 e.message ?: "Connection lost."
             }
@@ -304,6 +402,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             is TowerEvent.State -> {
                 val before = _state.value
                 _state.value = ev.state
+                if (ev.state.lanHosts.isNotEmpty()) learnHosts(ev.state.lanHosts, ev.state.tailscale?.dnsName?.takeIf { ev.state.tailscale?.running == true })
                 // While a mute this phone asked for is on its way (and just after), a state sent before it is stale.
                 if (ev.state.muted != _muted.value && !_muting.value && System.currentTimeMillis() >= muteHeldUntil) mutedIs(ev.state.muted)
                 if (ev.state.screenshots.isNotEmpty()) _screenshots.value = mergeShots(_screenshots.value, ev.state.screenshots)
@@ -702,17 +801,42 @@ class TowerSession(private val context: Context, private val store: CredentialSt
      * Pairs with the code shown on the Mac, pinning [endpoint]'s fingerprint.
      * The token is stored encrypted and only here.
      */
-    suspend fun pair(endpoint: Endpoint, code: String, name: String): Result<Credentials> = try {
-        val r = TowerClient(endpoint, { null }).pair(code, name)
-        val fp = Fingerprint.normalize(r.fingerprint)
-        if (fp != null && !Fingerprint.matches(fp, endpoint.fingerprint)) {
-            throw SSLMismatch(CertificateMismatchException(endpoint.fingerprint, fp))
+    suspend fun pair(endpoint: Endpoint, code: String, name: String): Result<Credentials> =
+        pair(listOf(TowerHost(Hosts.kindOf(endpoint.host), endpoint.host, endpoint.port)), null, endpoint.fingerprint, code, name)
+
+    /**
+     * Pairs over the first of [hosts] that answers (in order: the LAN, then
+     * Tailscale), pinning [fingerprint] on each, and keeps every address and
+     * [magicDns] for connecting later.
+     */
+    suspend fun pair(hosts: List<TowerHost>, magicDns: String?, fingerprint: String, code: String, name: String): Result<Credentials> = try {
+        require(hosts.isNotEmpty()) { "No address to pair with." }
+        val tries = Hosts.candidates(hosts, magicDns, null)
+        var answered: Pair<TowerHost, dev.herdertower.phone.api.PairResponse>? = null
+        var lastError: Exception? = null
+        for ((i, h) in tries.withIndex()) {
+            val last = i == tries.lastIndex
+            try {
+                val r = TowerClient(Endpoint(h.host, h.port, fingerprint), { null }, connectTimeoutMs = if (last) 5_000 else PROBE_CONNECT_MS).pair(code, name)
+                answered = h to r
+                break
+            } catch (e: UnreachableException) {
+                lastError = e // not there from here: the next address
+            } catch (e: SSLMismatch) {
+                lastError = e // another machine at this address
+            }
         }
-        val c = Credentials(endpoint.host, endpoint.port, endpoint.fingerprint, r.token, r.device.id, r.device.name.ifBlank { name })
+        val (via, r) = answered ?: throw (lastError ?: UnreachableException("Can't reach the tower.", null))
+        val fp = Fingerprint.normalize(r.fingerprint)
+        if (fp != null && !Fingerprint.matches(fp, fingerprint)) {
+            throw SSLMismatch(CertificateMismatchException(fingerprint, fp))
+        }
+        val first = hosts.first()
+        val c = Credentials(first.host, first.port, fingerprint, r.token, r.device.id, r.device.name.ifBlank { name }, hosts, magicDns)
         val before = _creds.value
         store.save(c)
-        client = clientFor(c)
-        val sameTower = before != null && before.host == c.host && before.fingerprint == c.fingerprint
+        client = clientAt(c, via)
+        val sameTower = before != null && before.fingerprint == c.fingerprint && before.hosts.any { b -> c.hosts.any { it.id == b.id } }
         // The old pairing's token is revoked on its tower (best effort, it may be off): another tower's always,
         // the same tower's when this pairing is a new device there (pairing again over a revoked token is a no-op).
         if (before != null && before.token != c.token && (!sameTower || before.deviceId != c.deviceId)) {
@@ -725,6 +849,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         }
         // Another tower (or the same one again): nothing from before carries over.
         forgetTower(sameTower = sameTower)
+        settings.lastRoute = via.id
         _creds.value = c
         guessName(c.host)
         Result.success(c)
@@ -777,10 +902,16 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         settings.audioRoute = null
         muteHeldUntil = 0
         mutedIs(false)
+        _activeRoute.value = null
+        settings.lastRoute = null
         if (!sameTower) renameTower("")
     }
 
     companion object {
+        /** Trying one address of several: a LAN that isn't there gives up in this long, then Tailscale is tried. */
+        const val PROBE_CONNECT_MS = 2_500L
+        /** And the whole look at one address (connect, TLS, hello). */
+        const val PROBE_TOTAL_MS = 6_000L
         private const val TAG = "TowerSession"
         /** Seconds between reconnects, as the contract asks: 1, 2, 5, 10, then every 10. */
         val BACKOFF = intArrayOf(1, 2, 5, 10)

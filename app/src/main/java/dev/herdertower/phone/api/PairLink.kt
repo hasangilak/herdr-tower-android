@@ -2,12 +2,26 @@ package dev.herdertower.phone.api
 
 import java.net.URLDecoder
 
-/** What the pairing QR (`herdertower://pair?h=&p=&c=&fp=`) carries. */
-data class PairLink(val host: String, val port: Int, val code: String, val fingerprint: String) {
+/**
+ * What the pairing QR carries: `herdertower://pair?h=&p=&c=&fp=`, and from
+ * a tower with Tailscale `&hosts=lan:<ip>:<port>,tailscale:<ip>:<port>&dns=<MagicDNS name>`.
+ * [host]/[port] are the first address (an old link's only one); [hosts] is
+ * every address in the order to try them, never empty.
+ */
+data class PairLink(
+    val host: String,
+    val port: Int,
+    val code: String,
+    val fingerprint: String,
+    val hosts: List<TowerHost> = listOf(TowerHost(Hosts.kindOf(host), host, port)),
+    val magicDns: String? = null,
+) {
     /** Back to a `herdertower://pair` link that [parse] reads (to keep it across a recreate). */
     fun toLink(): String {
         fun enc(v: String) = java.net.URLEncoder.encode(v, "UTF-8")
-        return "$SCHEME://pair?h=${enc(host)}&p=$port&c=$code&fp=$fingerprint"
+        val more = if (hosts.size > 1 || hosts.any { it.tailscale }) "&hosts=${enc(Hosts.encode(hosts))}" else ""
+        val dns = magicDns?.let { "&dns=${enc(it)}" }.orEmpty()
+        return "$SCHEME://pair?h=${enc(host)}&p=$port&c=$code&fp=$fingerprint$more$dns"
     }
 
     companion object {
@@ -31,7 +45,11 @@ data class PairLink(val host: String, val port: Int, val code: String, val finge
                 ?: DEFAULT_PORT
             val code = validCode(params["c"]) ?: throw PairLinkException("The pairing code should be 8 digits.")
             val fp = params["fp"]?.let { Fingerprint.normalize(it) } ?: throw PairLinkException("The certificate fingerprint in the pairing link isn't valid.")
-            return PairLink(host, port, code, fp)
+            val magicDns = params["dns"]?.trim()?.trimEnd('.')?.let { validHost(it) }
+            // Every address, in order; an older tower's link (or a hosts list this app can't read) is its one address.
+            val listed = Hosts.parse(params["hosts"], magicDns)
+            val hosts = listed.ifEmpty { listOf(TowerHost(Hosts.kindOf(host), host, port, magicDns?.takeIf { Hosts.isTailnet(host) })) }
+            return PairLink(host, port, code, fp, hosts, magicDns)
         }
 
         fun validHost(raw: String?): String? {

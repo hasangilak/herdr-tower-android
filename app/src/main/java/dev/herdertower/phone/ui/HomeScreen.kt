@@ -129,8 +129,11 @@ fun HomeScreen(
     val blocked = HomeModel.blocked(s?.agents.orEmpty(), jobs)
     val busy = s?.agents?.count { it.status == "working" } ?: 0
     val (word, _) = phaseWord(if (connected) s?.phase else null)
+    val via by session.activeRoute.collectAsStateWithLifecycle()
     val status = buildList {
         add(word)
+        // How the phone reaches the Mac: on its Wi-Fi, or from anywhere over Tailscale.
+        if (connected) via?.let { add(if (it.tailscale) "via Tailscale" else "on Wi-Fi") }
         if (connected && spaces.focus != null) add("Focus: ${spaces.focus}")
     }.joinToString(" · ")
     val ui = HomeUi(

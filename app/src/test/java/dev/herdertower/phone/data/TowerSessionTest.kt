@@ -325,4 +325,100 @@ class TowerSessionTest {
         assertFalse(s.prsSupported.value)
         assertTrue(s.prs.value.isEmpty())
     }
+
+    // Routes: the LAN, then Tailscale
+
+    private class FakeNet(val vpn: Boolean?, val installed: Boolean?) : PhoneNet {
+        override fun vpnOn() = vpn
+        override fun tailscaleInstalled() = installed
+    }
+
+    /** A port nothing listens on: a connect there is refused at once (a LAN address that isn't this network's). */
+    private fun closedPort(): Int = java.net.ServerSocket(0).use { it.localPort }
+
+    /** The same fake tower under its other name (127.0.0.1 or localhost): a second address that answers. */
+    private val otherName get() = if (server.hostName == "localhost") "127.0.0.1" else "localhost"
+
+    private fun sessionAt(hosts: List<dev.herdertower.phone.api.TowerHost>, net: PhoneNet = FakeNet(true, true)): TowerSession {
+        val first = hosts.first()
+        val creds = Credentials(first.host, first.port, fp, "htk_test", "d_test", "test phone", hosts, null)
+        val s = TowerSession(FakeContext(), FakeStore(creds), Settings(FakeContext()).also { it.towerName = "Test Mac" }, net)
+        sessions += s
+        return s
+    }
+
+    @Test fun aLanThatIsntThereFallsBackToTailscaleAndIsRemembered() {
+        val s = sessionAt(listOf(
+            dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort()),
+            dev.herdertower.phone.api.TowerHost("tailscale", server.hostName, server.port),
+        ))
+        s.setForeground(true)
+        until(what = "live") { s.link.value == Link.Live(false) }
+        assertEquals("tailscale", s.activeRoute.value?.host?.kind)
+        assertEquals("${server.hostName}:${server.port}", s.settings.lastRoute)
+    }
+
+    @Test fun theLanWinsWhenBothAnswer() {
+        val s = sessionAt(listOf(
+            dev.herdertower.phone.api.TowerHost("lan", server.hostName, server.port),
+            dev.herdertower.phone.api.TowerHost("tailscale", otherName, server.port),
+        ))
+        s.setForeground(true)
+        until(what = "live") { s.link.value == Link.Live(false) }
+        assertEquals(dev.herdertower.phone.api.TowerHost("lan", server.hostName, server.port), s.activeRoute.value?.host)
+        assertEquals("Wi-Fi", s.activeRoute.value?.label)
+    }
+
+    @Test fun anotherMachineAtTheLanAddressIsPassedOverNotAChangedCertificate() {
+        // Away from home, another network's router sits at the Mac's LAN address and answers TLS with its own certificate.
+        val stranger = MockWebServer()
+        stranger.useHttps(HandshakeCertificates.Builder().heldCertificate(HeldCertificate.Builder().commonName("router").ecdsa256().build()).build().sslSocketFactory())
+        stranger.start()
+        try {
+            val s = sessionAt(listOf(
+                dev.herdertower.phone.api.TowerHost("lan", stranger.hostName, stranger.port),
+                dev.herdertower.phone.api.TowerHost("tailscale", server.hostName, server.port),
+            ))
+            s.setForeground(true)
+            until(what = "live over tailscale") { s.link.value == Link.Live(false) }
+            assertTrue(s.activeRoute.value!!.tailscale)
+        } finally {
+            stranger.close()
+        }
+    }
+
+    @Test fun nothingAnswersAndTailscaleIsOffOnThePhone() {
+        val s = sessionAt(
+            listOf(
+                dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort()),
+                dev.herdertower.phone.api.TowerHost("tailscale", "127.0.0.1", closedPort()),
+            ),
+            FakeNet(vpn = false, installed = true),
+        )
+        s.setForeground(true)
+        until(what = "retrying") { s.link.value is Link.Retrying }
+        val reason = (s.link.value as Link.Retrying).reason
+        assertTrue(reason, "Tailscale is off on this phone" in reason)
+        assertEquals(null, s.activeRoute.value)
+    }
+
+    @Test fun anOldOneAddressPairingThatCantConnectSaysSo() {
+        val s = sessionAt(listOf(dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort())), FakeNet(false, false))
+        s.setForeground(true)
+        until(what = "retrying") { s.link.value is Link.Retrying }
+        val reason = (s.link.value as Link.Retrying).reason
+        assertTrue(reason, reason.startsWith("Can't reach the Mac. Is the phone on the Mac's Wi-Fi"))
+    }
+
+    @Test fun theTowersAddressesAreLearntWithoutReopeningTheStream() {
+        val hostsState = "event: state\ndata: {\"phase\":\"idle\",\"muted\":false,\"lan_hosts\":[{\"kind\":\"lan\",\"host\":\"${server.hostName}\",\"port\":${server.port}},{\"kind\":\"tailscale\",\"host\":\"100.68.110.33\",\"port\":${server.port},\"dns_name\":\"mac.tailnet.ts.net\"}],\"tailscale\":{\"installed\":true,\"running\":true,\"dns_name\":\"mac.tailnet.ts.net\"}}\n\n"
+        answers = listOf({ stream(hello(), hostsState) })
+        val s = sessionAt(listOf(dev.herdertower.phone.api.TowerHost("lan", server.hostName, server.port)))
+        s.setForeground(true)
+        until(what = "hosts learnt") { s.credentials.value?.hosts?.size == 2 }
+        assertEquals("mac.tailnet.ts.net", s.credentials.value?.magicDns)
+        Thread.sleep(500)
+        assertEquals("the stream stays", 1, streams.size)
+        assertEquals(Link.Live(false), s.link.value)
+    }
 }

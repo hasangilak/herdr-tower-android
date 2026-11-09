@@ -1,0 +1,148 @@
+package dev.herdertower.phone.api
+
+import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
+import org.junit.Assert.assertNull
+import org.junit.Assert.assertTrue
+import org.junit.Test
+
+/** The tower's addresses over the LAN and Tailscale (herder-tower docs/mobile-api.md, "Pairing flow"). */
+class HostsTest {
+    private val fp = "5d8e798d".repeat(8)
+    private val lan = TowerHost("lan", "192.168.1.20", 7843)
+    private val ts = TowerHost("tailscale", "100.68.110.33", 7843, "mac.tailnet.ts.net")
+
+    // The QR
+
+    @Test fun theNewLinkCarriesEveryAddressInOrderAndTheMagicDnsName() {
+        val l = PairLink.parse(
+            "herdertower://pair?h=192.168.1.20&p=7843&c=12345678&fp=$fp&hosts=lan:192.168.1.20:7843,tailscale:100.68.110.33:7843&dns=mac.tailnet.ts.net",
+        )
+        assertEquals("192.168.1.20", l.host)
+        assertEquals(7843, l.port)
+        assertEquals(listOf(lan, ts), l.hosts)
+        assertEquals("mac.tailnet.ts.net", l.magicDns)
+    }
+
+    @Test fun anOldLinkIsItsOneAddress() {
+        val l = PairLink.parse("herdertower://pair?h=192.168.1.20&p=7843&c=12345678&fp=$fp")
+        assertEquals(listOf(lan.copy(dnsName = null)), l.hosts)
+        assertNull(l.magicDns)
+        // And equal to what an older app made of it.
+        assertEquals(PairLink("192.168.1.20", 7843, "12345678", fp), l)
+    }
+
+    @Test fun aLinkWithOnlyTheTailnetAddress() {
+        // Wi-Fi off on the Mac, Tailscale up: one address, the tailnet's.
+        val l = PairLink.parse("herdertower://pair?h=100.68.110.33&p=7843&c=12345678&fp=$fp&hosts=tailscale:100.68.110.33:7843&dns=mac.tailnet.ts.net")
+        assertEquals(listOf(ts), l.hosts)
+        // An old-style link to a tailnet IP: still known as Tailscale.
+        assertEquals("tailscale", PairLink.parse("herdertower://pair?h=100.68.110.33&c=12345678&fp=$fp").hosts.single().kind)
+    }
+
+    @Test fun unknownKindsAndBrokenEntriesAreSkippedAndAnUnreadableListFallsBack() {
+        val l = PairLink.parse(
+            "herdertower://pair?h=192.168.1.20&c=12345678&fp=$fp&hosts=" +
+                java.net.URLEncoder.encode("wireguard:10.0.0.1:7843,lan:192.168.1.20:7843,lan:bad host:1,tailscale:100.68.110.33:99999,tailscale:100.68.110.33:7843", "UTF-8"),
+        )
+        assertEquals(listOf("192.168.1.20", "100.68.110.33"), l.hosts.map { it.host })
+        val nothing = PairLink.parse("herdertower://pair?h=192.168.1.20&p=7843&c=12345678&fp=$fp&hosts=junk")
+        assertEquals(listOf(TowerHost("lan", "192.168.1.20", 7843)), nothing.hosts)
+    }
+
+    @Test fun theLinkSurvivesARoundTrip() {
+        val l = PairLink("192.168.1.20", 7843, "12345678", fp, listOf(lan, ts), "mac.tailnet.ts.net")
+        assertEquals(l, PairLink.parse(l.toLink()))
+        // An old one stays an old one.
+        val old = PairLink("192.168.1.20", 7843, "12345678", fp)
+        assertFalse("hosts" in old.toLink())
+        assertEquals(old, PairLink.parse(old.toLink()))
+    }
+
+    // Which addresses are Tailscale's
+
+    @Test fun theTailnetRange() {
+        assertTrue(Hosts.isTailnet("100.64.0.1"))
+        assertTrue(Hosts.isTailnet("100.127.255.254"))
+        assertTrue(Hosts.isTailnet("mac.tailnet.ts.net"))
+        assertTrue(Hosts.isTailnet("MAC.TAILNET.TS.NET."))
+        assertFalse(Hosts.isTailnet("100.63.255.255"))
+        assertFalse(Hosts.isTailnet("100.128.0.1"))
+        assertFalse(Hosts.isTailnet("192.168.1.20"))
+        assertFalse(Hosts.isTailnet("mac.local"))
+    }
+
+    // The order to try them
+
+    @Test fun theLanFirstThenTailscaleThenItsName() {
+        assertEquals(
+            listOf("192.168.1.20", "100.68.110.33", "mac.tailnet.ts.net"),
+            Hosts.candidates(listOf(lan, ts), "mac.tailnet.ts.net", null).map { it.host },
+        )
+    }
+
+    @Test fun theRouteThatWorkedLastComesRightAfterTheLan() {
+        // Last time only the MagicDNS name answered (the tailnet IP had changed): it's tried before the old IP.
+        assertEquals(
+            listOf("192.168.1.20", "mac.tailnet.ts.net", "100.68.110.33"),
+            Hosts.candidates(listOf(lan, ts), "mac.tailnet.ts.net", "mac.tailnet.ts.net:7843").map { it.host },
+        )
+        // The LAN worked last: it's first anyway.
+        assertEquals("192.168.1.20", Hosts.candidates(listOf(lan, ts), null, "192.168.1.20:7843").first().host)
+        // A route that's no longer listed is ignored.
+        assertEquals(
+            listOf("192.168.1.20", "100.68.110.33", "mac.tailnet.ts.net"),
+            Hosts.candidates(listOf(lan, ts), null, "10.9.9.9:7843").map { it.host },
+        )
+    }
+
+    @Test fun theMagicDnsNameStandsInWhenTheEntryHasNone() {
+        val bare = ts.copy(dnsName = null)
+        assertEquals(listOf("100.68.110.33", "mac.tailnet.ts.net"), Hosts.candidates(listOf(bare), "mac.tailnet.ts.net", null).map { it.host })
+        assertEquals(listOf("100.68.110.33"), Hosts.candidates(listOf(bare), null, null).map { it.host })
+        // Paired over the LAN only, but the Mac's name is known: it's tried after the LAN.
+        assertEquals(listOf("192.168.1.20", "mac.tailnet.ts.net"), Hosts.candidates(listOf(lan), "mac.tailnet.ts.net", null).map { it.host })
+        assertTrue(Hosts.candidates(listOf(lan), "mac.tailnet.ts.net", null).last().tailscale)
+    }
+
+    @Test fun anOldPairingIsOneAddress() {
+        assertEquals(listOf(lan), Hosts.candidates(listOf(lan), null, null))
+    }
+
+    // Keeping the list current
+
+    @Test fun theTowersCurrentListReplacesTheStoredOne() {
+        val moved = TowerHost("lan", "192.168.1.44", 7843)
+        assertEquals(listOf(moved, ts), Hosts.refresh(listOf(lan, ts), listOf(moved, ts)))
+        // Tailscale started on the Mac later: learnt.
+        assertEquals(listOf(lan, ts), Hosts.refresh(listOf(lan), listOf(lan, ts)))
+        // Tailscale stopped there: the tailnet address is kept (after the LAN) for when it's back.
+        assertEquals(listOf(lan, ts), Hosts.refresh(listOf(lan, ts), listOf(lan)))
+        // An older tower (no lan_hosts), or the API's list empty: what's stored stays.
+        assertEquals(listOf(lan, ts), Hosts.refresh(listOf(lan, ts), emptyList()))
+        // Kinds this app doesn't know are left out.
+        assertEquals(listOf(lan), Hosts.refresh(listOf(lan), listOf(lan, TowerHost("wireguard", "10.0.0.1", 7843))))
+    }
+
+    @Test fun theStatesListReads() {
+        val s = TowerJson.decodeFromString(
+            TowerState.serializer(),
+            """{"lan":"https://192.168.1.20:7843","lan_hosts":[{"kind":"lan","host":"192.168.1.20","port":7843},{"kind":"tailscale","host":"100.68.110.33","port":7843,"dns_name":"mac.tailnet.ts.net"}],
+               "tailscale":{"installed":true,"running":true,"state":"running","ip":"100.68.110.33","dns_name":"mac.tailnet.ts.net"}}""",
+        )
+        assertEquals(listOf(lan, ts), s.lanHosts)
+        assertEquals("mac.tailnet.ts.net", s.tailscale?.dnsName)
+        assertTrue(s.tailscale!!.running)
+        // An older tower: neither.
+        val old = TowerJson.decodeFromString(TowerState.serializer(), """{"lan":"https://192.168.1.20:7843"}""")
+        assertTrue(old.lanHosts.isEmpty())
+        assertNull(old.tailscale)
+    }
+
+    @Test fun theAddressesInWords() {
+        assertEquals("Wi-Fi 192.168.1.20 · Tailscale 100.68.110.33 (mac.tailnet.ts.net)", Hosts.describe(listOf(lan, ts)))
+        assertEquals("Wi-Fi 192.168.1.20:9000", Hosts.describe(listOf(lan.copy(port = 9000))))
+        assertEquals("Tailscale", ActiveRoute(ts).label)
+        assertEquals("Wi-Fi", ActiveRoute(lan).label)
+    }
+}

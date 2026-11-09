@@ -61,7 +61,9 @@ import androidx.core.content.ContextCompat
 import dev.herdertower.phone.api.CertificateProbe
 import dev.herdertower.phone.api.Endpoint
 import dev.herdertower.phone.api.Fingerprint
+import dev.herdertower.phone.api.Hosts
 import dev.herdertower.phone.api.PairLink
+import dev.herdertower.phone.api.TowerHost
 import dev.herdertower.phone.api.PairLinkException
 import dev.herdertower.phone.api.QrScan
 import dev.herdertower.phone.data.TowerSession
@@ -75,12 +77,19 @@ import java.util.concurrent.Executors
 private enum class Source { Qr, Link, Manual }
 
 /** What the user is pairing with, once the fingerprint is known. */
-private data class Candidate(val host: String, val port: Int, val code: String, val fingerprint: String, val source: Source)
+private data class Candidate(
+    val host: String, val port: Int, val code: String, val fingerprint: String, val source: Source,
+    /** Every address to pair over and keep (LAN, Tailscale), in order; one for a typed address or an old QR. */
+    val hosts: List<TowerHost> = listOf(TowerHost(Hosts.kindOf(host), host, port)),
+    val magicDns: String? = null,
+)
+
+private fun PairLink.candidate(source: Source) = Candidate(host, port, code, fingerprint, source, hosts, magicDns)
 
 @Composable
 fun PairingScreen(session: TowerSession, initial: PairLink?, onCancel: (() -> Unit)?) {
     // A link that opened the app may come from any web page or app, not only the Mac's QR: its fingerprint is compared by eye.
-    var candidate by remember(initial) { mutableStateOf(initial?.let { Candidate(it.host, it.port, it.code, it.fingerprint, Source.Link) }) }
+    var candidate by remember(initial) { mutableStateOf(initial?.candidate(Source.Link)) }
     var tab by rememberSaveable { mutableStateOf(0) }
     // Android 17+: pairing is a connection to the Mac on the local network, which needs this permission first.
     val localNet = rememberLocalNetwork(askNow = true)
@@ -110,7 +119,7 @@ fun PairingScreen(session: TowerSession, initial: PairLink?, onCancel: (() -> Un
                     Segment("Enter by hand", tab == 1) { tab = 1 }
                 }
                 if (tab == 0) {
-                    Scan(onLink = { candidate = Candidate(it.host, it.port, it.code, it.fingerprint, Source.Qr) })
+                    Scan(onLink = { candidate = it.candidate(Source.Qr) })
                 } else {
                     Manual(onProbed = { candidate = it })
                 }
@@ -233,11 +242,11 @@ private fun Manual(onProbed: (Candidate) -> Unit) {
     val scope = rememberCoroutineScope()
 
     Text(
-        "Type the address and code “tower phone pair” printed. The app then shows the certificate's fingerprint for you to compare with the Mac's.",
+        "Type the address and code “tower phone pair” printed (or paste its link into Address). Away from home, over Tailscale: the Mac's 100.x address or its MagicDNS name. The app then shows the certificate's fingerprint for you to compare with the Mac's.",
         style = MaterialTheme.typography.bodyMedium, color = tc.muted,
     )
     OutlinedTextField(
-        host, { host = it.trim() }, Modifier.fillMaxWidth(), label = { Text("Address") }, placeholder = { Text("192.168.1.20") },
+        host, { host = it.trim() }, Modifier.fillMaxWidth(), label = { Text("Address") }, placeholder = { Text("192.168.1.20 or mac.tailnet.ts.net") },
         singleLine = true, keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
     )
     OutlinedTextField(
@@ -252,6 +261,15 @@ private fun Manual(onProbed: (Candidate) -> Unit) {
     error?.let { Text(it, color = tc.failed, style = MaterialTheme.typography.bodyMedium) }
     Button(
         onClick = {
+            // The whole link pasted in: every address in it, its code and fingerprint (compared by eye, as a link's).
+            if (host.startsWith(PairLink.SCHEME + "://", ignoreCase = true)) {
+                try {
+                    onProbed(PairLink.parse(host).candidate(Source.Link))
+                } catch (e: PairLinkException) {
+                    error = e.message
+                }
+                return@Button
+            }
             val h = PairLink.validHost(host)
             val p = PairLink.validPort(port)
             val c = PairLink.validCode(code)
@@ -293,6 +311,10 @@ private fun Confirm(session: TowerSession, c: Candidate, onBack: () -> Unit) {
     GlassCard(Modifier.fillMaxWidth()) {
         Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
             Text("Tower at ${c.host}:${c.port}", style = MaterialTheme.typography.titleMedium, color = tc.text)
+            // More than one way to it (the LAN and Tailscale): all of them, kept for connecting from anywhere.
+            if (c.hosts.size > 1 || c.hosts.any { it.tailscale }) {
+                Text(Hosts.describe(c.hosts, c.magicDns), style = MaterialTheme.typography.bodySmall, color = tc.muted)
+            }
             Text(
                 when (c.source) {
                     Source.Qr -> "Certificate fingerprint (from the QR):"
@@ -336,7 +358,7 @@ private fun Confirm(session: TowerSession, c: Candidate, onBack: () -> Unit) {
             busy = true
             error = null
             scope.launch {
-                session.pair(Endpoint(c.host, c.port, c.fingerprint), c.code, name.ifBlank { TowerSession.defaultDeviceName() })
+                session.pair(c.hosts, c.magicDns, c.fingerprint, c.code, name.ifBlank { TowerSession.defaultDeviceName() })
                     .onFailure { error = TowerSession.describe(it) }
                 busy = false
             }

@@ -7,13 +7,22 @@ import android.security.keystore.KeyProperties
 import android.util.Base64
 import androidx.core.content.edit
 import dev.herdertower.phone.api.Endpoint
+import dev.herdertower.phone.api.Hosts
+import dev.herdertower.phone.api.TowerHost
+import dev.herdertower.phone.api.TowerJson
+import kotlinx.serialization.builtins.ListSerializer
 import java.security.KeyStore
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
 import javax.crypto.spec.GCMParameterSpec
 
-/** A paired tower. [toString] never shows the token. */
+/**
+ * A paired tower. [host]/[port] are its first address (as paired); [hosts]
+ * is every address it listens on, in order (LAN, Tailscale), and
+ * [magicDns] its Tailscale name. One certificate, pinned by [fingerprint],
+ * for all of them. [toString] never shows the token.
+ */
 data class Credentials(
     val host: String,
     val port: Int,
@@ -21,9 +30,15 @@ data class Credentials(
     val token: String,
     val deviceId: String,
     val deviceName: String,
+    val hosts: List<TowerHost> = listOf(TowerHost(Hosts.kindOf(host), host, port)),
+    val magicDns: String? = null,
 ) {
     val endpoint: Endpoint get() = Endpoint(host, port, fingerprint)
-    override fun toString() = "Credentials(host=$host, port=$port, fingerprint=${fingerprint.take(8)}…, token=<hidden>, device=$deviceId)"
+
+    /** The same tower at [h]. */
+    fun endpointAt(h: TowerHost): Endpoint = Endpoint(h.host, h.port, fingerprint)
+
+    override fun toString() = "Credentials(hosts=${hosts.joinToString { it.id }}, fingerprint=${fingerprint.take(8)}…, token=<hidden>, device=$deviceId)"
 }
 
 interface CredentialStore {
@@ -44,9 +59,17 @@ class KeystoreCredentialStore(context: Context) : CredentialStore {
         val host = prefs.getString("host", null) ?: return null
         val sealed = prefs.getString("token", null) ?: return null
         val token = runCatching { open(sealed) }.getOrNull() ?: return null // key gone (e.g. restored to another phone)
+        val port = prefs.getInt("port", 7843)
+        // Paired before Tailscale: its one address.
+        val hosts = prefs.getString("hosts", null)
+            ?.let { runCatching { Hosts.clean(TowerJson.decodeFromString(HOSTS, it)) }.getOrNull() }
+            ?.takeIf { it.isNotEmpty() }
+            ?: listOf(TowerHost(Hosts.kindOf(host), host, port))
         return Credentials(
+            hosts = hosts,
+            magicDns = prefs.getString("magic_dns", null),
             host = host,
-            port = prefs.getInt("port", 7843),
+            port = port,
             fingerprint = prefs.getString("fingerprint", null) ?: return null,
             token = token,
             deviceId = prefs.getString("device_id", "") ?: "",
@@ -62,6 +85,8 @@ class KeystoreCredentialStore(context: Context) : CredentialStore {
             putString("token", seal(c.token))
             putString("device_id", c.deviceId)
             putString("device_name", c.deviceName)
+            putString("hosts", TowerJson.encodeToString(HOSTS, c.hosts))
+            putString("magic_dns", c.magicDns)
         }
     }
 
@@ -102,6 +127,7 @@ class KeystoreCredentialStore(context: Context) : CredentialStore {
     private companion object {
         const val ALIAS = "herder_tower_token"
         const val TRANSFORM = "AES/GCM/NoPadding"
+        val HOSTS = ListSerializer(TowerHost.serializer())
     }
 }
 
@@ -143,6 +169,11 @@ class Settings(context: Context) {
     var askedNotifications: Boolean
         get() = prefs.getBoolean("asked_notifications", false)
         set(v) = prefs.edit { putBoolean("asked_notifications", v) }
+
+    /** The address (`host:port`) the tower answered on last: tried right after the LAN. */
+    var lastRoute: String?
+        get() = prefs.getString("last_route", null)
+        set(v) = prefs.edit { putString("last_route", v) }
 
     /** Whether the phone should be the tower's voice (restored on launch). */
     var voice: Boolean

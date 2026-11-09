@@ -69,6 +69,8 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.semantics.Role
+import androidx.compose.ui.semantics.contentDescription
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
@@ -460,7 +462,21 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
             TextButton(onClick = { renaming = true }) { Text("Name this tower (${name.ifBlank { "not set" }})", color = tc.text) }
             TextButton(onClick = onRepair) { Text("Pair again…", color = tc.text) }
             TextButton(onClick = { confirmUnpair = true }) { Text("Unpair this phone", color = tc.failed) }
-            creds?.let { Text("${it.deviceName} · ${it.host}:${it.port}", style = MaterialTheme.typography.labelSmall, color = tc.faint) }
+            creds?.let { c ->
+                val link by session.link.collectAsStateWithLifecycle()
+                val via by session.activeRoute.collectAsStateWithLifecycle()
+                val v = via
+                Text(
+                    when {
+                        link is Link.Live && v != null -> "Connected ${if (v.tailscale) "over Tailscale" else "on Wi-Fi"} (${v.host.host})"
+                        link is Link.Live -> "Connected"
+                        else -> "Not connected"
+                    },
+                    Modifier.semantics { contentDescription = "Connection: " + (if (link is Link.Live && v != null) v.label else "not connected") },
+                    style = MaterialTheme.typography.labelMedium, color = tc.muted,
+                )
+                Text("${c.deviceName} · ${dev.herdertower.phone.api.Hosts.describe(c.hosts, c.magicDns)}", style = MaterialTheme.typography.labelSmall, color = tc.faint)
+            }
             // What's under the hood on this phone (read it out when something looks wrong).
             val orb by dev.herdertower.phone.orb.OrbProbe.report.collectAsStateWithLifecycle()
             val frameMs by dev.herdertower.phone.orb.OrbProbe.frameMs.collectAsStateWithLifecycle()

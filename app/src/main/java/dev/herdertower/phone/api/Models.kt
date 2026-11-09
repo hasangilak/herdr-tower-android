@@ -96,6 +96,10 @@ data class TowerState(
     val voice: String = "",
     @SerialName("stt_model") val sttModel: String = "",
     val lan: String = "",
+    /** Every address the tower listens on, in order (LAN, then Tailscale while it runs there); empty from an older tower. */
+    @kotlinx.serialization.SerialName("lan_hosts") val lanHosts: List<TowerHost> = emptyList(),
+    /** Tailscale on the Mac, as the tower sees it; null from an older tower. */
+    val tailscale: TailscaleInfo? = null,
     val phone: String? = null,
     /** The latest screenshots sessions sent (newest first). */
     val screenshots: List<Screenshot> = emptyList(),

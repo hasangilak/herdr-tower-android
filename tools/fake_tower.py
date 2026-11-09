@@ -1022,6 +1022,8 @@ if __name__ == "__main__":
     ap.add_argument("--host", default="127.0.0.1")
     ap.add_argument("--port", type=int, default=7899)
     ap.add_argument("--link-host", default="10.0.2.2", help="the address the phone should use (10.0.2.2 = this Mac, from the emulator)")
+    ap.add_argument("--hosts", default="", help="every address, as the Tailscale-era link: lan:<ip>:<port>,tailscale:<ip>:<port> (e.g. a LAN that isn't there, then 10.0.2.2 as the tailnet)")
+    ap.add_argument("--dns", default="", help="the MagicDNS name to put in the link and the state")
     a = ap.parse_args()
     crt, key, FP = cert()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
@@ -1030,6 +1032,20 @@ if __name__ == "__main__":
     srv = ThreadingHTTPServer((a.host, a.port), H)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     link = f"herdertower://pair?h={a.link_host}&p={a.port}&c={CODE}&fp={FP}"
+    if a.hosts:
+        # As the tower on its tower-tailscale branch: h/p the first address, then hosts= and dns= (docs/mobile-api.md).
+        first = a.hosts.split(",")[0].split(":")
+        link = f"herdertower://pair?h={first[1]}&p={first[2]}&c={CODE}&fp={FP}&hosts={a.hosts}" + (f"&dns={a.dns}" if a.dns else "")
+        hs = []
+        for e in a.hosts.split(","):
+            kind, ip, port = e.split(":")
+            h = {"kind": kind, "host": ip, "port": int(port)}
+            if kind == "tailscale" and a.dns:
+                h["dns_name"] = a.dns
+            hs.append(h)
+        ts = next((h for h in hs if h["kind"] == "tailscale"), None)
+        STATE["lan_hosts"] = hs
+        STATE["tailscale"] = {"installed": True, "running": ts is not None, "state": "running" if ts else "stopped", "ip": ts and ts["host"], "dns_name": a.dns or None}
     threading.Thread(target=questions_life, daemon=True).start()
     threading.Thread(target=pr_life, daemon=True).start()
     print(f"fake tower on https://{a.host}:{a.port}\ncode {CODE}\nfingerprint {' '.join(FP[i:i+4] for i in range(0, 64, 4))}\nLINK {link}", flush=True)

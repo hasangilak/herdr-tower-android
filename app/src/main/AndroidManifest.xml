@@ -20,6 +20,8 @@
         <intent>
             <action android:name="android.speech.RecognitionService" />
         </intent>
+        <!-- To say "install Tailscale" or "turn Tailscale on" when the Mac can't be reached. -->
+        <package android:name="com.tailscale.ipn" />
     </queries>
 
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />

@@ -83,6 +83,8 @@ python3 tools/fake_tower.py      # prints a pairing link for the emulator (10.0.
 
 It also has PR chips in every state (pending, passing, failing into main, conflicting, merged, closed) and merges them only in memory. `FAKE_PR_MERGE_FAIL=1` makes "GitHub" refuse the first merge, so the retry card shows. `FAKE_PR_CHECKS_S=40` sets when #88's checks pass and it starts waiting. `POST /v1/fake/pr` with `{"key": "example/api#88", …fields}` changes a PR live.
 
+`--hosts lan:192.0.2.1:7899,tailscale:10.0.2.2:7899 --dns mac.tailnet.ts.net` pairs the way a tower with Tailscale does. The link carries every address, and the state carries `lan_hosts`. Here the LAN address isn't there, so the app falls back to the second address and shows "via Tailscale".
+
 ## How it works
 
 - `api/`: the pairing link and QR, the certificate pin, `TowerClient` (every call, multipart files), the SSE parser and events, models.
