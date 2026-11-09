@@ -69,9 +69,13 @@ class TowerClient(
         .addNetworkInterceptor { chain -> chain.proceed(chain.request().newBuilder().header("Connection", "close").build()) }
         .build()
 
-    /** The event stream: no overall deadline; a `: ping` comes every 10 s, so 25 s of silence means it's gone. */
+    /**
+     * The event stream: no overall deadline; a `: ping` comes every 10 s, so 22 s of silence (two missed) means it's
+     * gone: a route that died without a word (Tailscale stopped on the Mac) is left that soon. The phone's own network
+     * changes are caught sooner, by the session's network check.
+     */
     private val streaming: OkHttpClient = http.newBuilder()
-        .readTimeout(25, TimeUnit.SECONDS)
+        .readTimeout(22, TimeUnit.SECONDS)
         .callTimeout(0, TimeUnit.SECONDS)
         .build()
 

@@ -34,10 +34,26 @@ class TowerApplication : Application() {
         // How this device can draw the orb: found once, off the main thread, by drawing it.
         dev.herdertower.phone.orb.OrbProbe.override = dev.herdertower.phone.orb.OrbTier.entries.firstOrNull { it.name == session.settings.orbTier }
         Thread({ dev.herdertower.phone.orb.OrbProbe.run() }, "orb-probe").start()
-        // Wi-Fi back or changed: reconnect now instead of waiting out the backoff.
+        // The network changed (Wi-Fi joined or lost, Tailscale's VPN on or off): reconnect now if not connected,
+        // and if connected, check the route still holds or the LAN is back (TowerSession.networkChanged).
         getSystemService(android.net.ConnectivityManager::class.java)?.registerDefaultNetworkCallback(object : android.net.ConnectivityManager.NetworkCallback() {
+            private var last: Pair<android.net.Network, Pair<Boolean, Boolean>>? = null
+
             override fun onAvailable(network: android.net.Network) {
-                session.reconnect()
+                session.networkChanged()
+            }
+
+            override fun onLost(network: android.net.Network) {
+                last = null
+                session.networkChanged()
+            }
+
+            override fun onCapabilitiesChanged(network: android.net.Network, caps: android.net.NetworkCapabilities) {
+                // Only a change of kind (a VPN on top or not, Wi-Fi or not), not every signal-strength update.
+                val kind = caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_VPN) to caps.hasTransport(android.net.NetworkCapabilities.TRANSPORT_WIFI)
+                val before = last
+                last = network to kind
+                if (before != null && before != last) session.networkChanged()
             }
         })
         // Headphones pulled out: stop talking out loud.

@@ -47,7 +47,12 @@ import kotlinx.coroutines.async
 import kotlinx.coroutines.coroutineScope
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.channels.Channel
+import kotlinx.coroutines.channels.BufferOverflow
+import kotlinx.coroutines.flow.MutableSharedFlow
 import kotlinx.coroutines.flow.MutableStateFlow
+import kotlinx.coroutines.flow.map
+import kotlinx.coroutines.flow.merge
+import kotlinx.coroutines.flow.receiveAsFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
@@ -172,6 +177,13 @@ class TowerSession(
      * attempt fails. Drained once the stream is live.
      */
     private val retryNow = Channel<Unit>(Channel.CONFLATED)
+
+    // Declared before init: its coroutines start at once on the main thread and read these.
+    /** Network changes, settled and acted on in init (see [networkChanged]). */
+    private val netChanges = MutableSharedFlow<Unit>(extraBufferCapacity = 1, onBufferOverflow = BufferOverflow.DROP_OLDEST)
+
+    /** Drops the live stream so the next connect picks the route again (the LAN first), without the retry card. */
+    private val kick = Channel<Unit>(Channel.CONFLATED)
     /** The token was refused or the certificate changed: no stream until this phone pairs again. */
     private val _blocked = MutableStateFlow<Link?>(null)
     private var refreshJob: CoJob? = null
@@ -211,6 +223,13 @@ class TowerSession(
                     }
                 }
         }
+        // Network changes: settle, then see whether the route still holds (or the LAN is back).
+        scope.launch {
+            netChanges.collectLatest {
+                delay(NET_SETTLE_MS)
+                recheckRoute()
+            }
+        }
         // While the app is on screen: refresh what isn't pushed every 20 s.
         scope.launch {
             combine(_link, _foreground) { l, fg -> l is Link.Live && fg }.distinctUntilChanged().collectLatest { on ->
@@ -248,6 +267,41 @@ class TowerSession(
         retryNow.trySend(Unit)
     }
 
+    /**
+     * The phone's network changed (Wi-Fi joined or lost, Tailscale's VPN on
+     * or off). Not connected: try again now. Connected: the route in use may
+     * be gone (Tailscale turned off leaves the stream silent until its read
+     * timeout), or the LAN may be back while on Tailscale; either way the
+     * stream moves at once (see [recheckRoute]).
+     */
+    fun networkChanged() {
+        netChanges.tryEmit(Unit)
+    }
+
+
+    /** The stream was dropped on purpose to move to another route. */
+    private class RouteChanged : java.io.IOException("Moving to another route.")
+
+    /** After a network change has settled: is the route in use still there, and is the LAN back? */
+    private suspend fun recheckRoute() {
+        val c = _creds.value ?: return
+        if (_link.value !is Link.Live) {
+            retryNow.trySend(Unit)
+            return
+        }
+        val route = _activeRoute.value?.host ?: return
+        if (probe(c, route).outcome != RouteOutcome.Answered) {
+            // It just failed: the next connect tries it last, not first again.
+            avoidRoute = route.id
+            kick.trySend(Unit)
+            return
+        }
+        // On Tailscale and the LAN answers again (home): the direct path.
+        if (route.tailscale && Hosts.candidates(c.hosts, c.magicDns, null).filter { !it.tailscale }.any { probe(c, it).outcome == RouteOutcome.Answered }) {
+            kick.trySend(Unit)
+        }
+    }
+
     fun renameTower(name: String) {
         settings.towerName = name.trim()
         _towerName.value = name.trim()
@@ -277,41 +331,65 @@ class TowerSession(
         data class Nowhere(val message: String) : Pick
     }
 
+    private val _routeTries = MutableStateFlow<List<RouteTry>>(emptyList())
+    /** What each address did on the last try (shown in the menu, and in the message when none answered). */
+    val routeTries: StateFlow<List<RouteTry>> = _routeTries.asStateFlow()
+
     /** Why nothing answered, in words that say what to do on this phone. */
-    private fun unreachable(c: Credentials): String =
-        RouteWords.unreachable(Hosts.candidates(c.hosts, c.magicDns, null).any { it.tailscale }, net.vpnOn(), net.tailscaleInstalled())
+    private fun unreachable(c: Credentials): String = RouteWords.unreachable(
+        tailnet = Hosts.candidates(c.hosts, c.magicDns, null).any { it.tailscale },
+        vpnOn = net.vpnOn(),
+        tailscaleInstalled = net.tailscaleInstalled(),
+        onWifi = net.onWifi(),
+        localNetworkBlocked = net.localNetworkBlocked(),
+        lan = _routeTries.value.firstOrNull { !it.host.tailscale && it.outcome != RouteOutcome.Answered },
+    )
+
+    /** Tries one address: hello over a short connect, the pinned certificate checked as everywhere. */
+    private suspend fun probe(c: Credentials, h: TowerHost): RouteTry {
+        val client = TowerClient(c.endpointAt(h), { _creds.value?.token }, connectTimeoutMs = PROBE_CONNECT_MS)
+        val outcome = try {
+            withTimeoutOrNull(PROBE_TOTAL_MS) { client.hello(); RouteOutcome.Answered } ?: RouteOutcome.TimedOut
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UnauthorizedException) {
+            RouteOutcome.Answered // it's there; the stream then says the token was refused
+        } catch (e: TowerApiException) {
+            RouteOutcome.Answered
+        } catch (e: SSLMismatch) {
+            return RouteTry(h, RouteOutcome.OtherCertificate, System.currentTimeMillis(), e.mismatch.got)
+        } catch (e: Exception) {
+            RouteOutcome.of(e)
+        }
+        return RouteTry(h, outcome, System.currentTimeMillis())
+    }
 
     /**
      * Where the tower answers now: each address in turn (the LAN first, with
      * a short connect timeout), the same pinned certificate for all. One
      * address only: no probe, the stream's own connect says.
      */
+    /** A route that just failed a check: tried last by the next connect (once). */
+    @Volatile private var avoidRoute: String? = null
+
     private suspend fun pick(c: Credentials): Pick {
-        val all = Hosts.candidates(c.hosts, c.magicDns, settings.lastRoute)
+        val avoid = avoidRoute.also { avoidRoute = null }
+        val all = Hosts.candidates(c.hosts, c.magicDns, settings.lastRoute).sortedBy { it.id == avoid }
         if (all.size <= 1) return Pick.Found(all.firstOrNull() ?: c.hosts.first())
-        var mismatched = 0
+        val tries = mutableListOf<RouteTry>()
         var got = ""
-        for (h in all) {
-            val probe = TowerClient(c.endpointAt(h), { _creds.value?.token }, connectTimeoutMs = PROBE_CONNECT_MS)
-            val answered = try {
-                withTimeoutOrNull(PROBE_TOTAL_MS) { probe.hello(); true } ?: false
-            } catch (e: CancellationException) {
-                throw e
-            } catch (e: UnauthorizedException) {
-                true // it's there; the stream then says the token was refused
-            } catch (e: SSLMismatch) {
+        try {
+            for (h in all) {
+                val t = probe(c, h)
+                tries += t
+                if (t.outcome == RouteOutcome.Answered) return Pick.Found(h)
                 // Another machine at this address (another network's 192.168.x): not the tower, try the next.
-                mismatched++
-                got = e.mismatch.got
-                false
-            } catch (e: TowerApiException) {
-                true
-            } catch (e: Exception) {
-                false
+                t.got?.let { got = it }
             }
-            if (answered) return Pick.Found(h)
+        } finally {
+            _routeTries.value = tries.toList()
         }
-        return if (mismatched == all.size) Pick.Mismatch(got) else Pick.Nowhere(unreachable(c))
+        return if (tries.all { it.outcome == RouteOutcome.OtherCertificate }) Pick.Mismatch(got) else Pick.Nowhere(unreachable(c))
     }
 
     /** The client for [h], kept while the route stays the same. */
@@ -337,9 +415,13 @@ class TowerSession(
     private suspend fun stream(voice: Boolean) {
         var attempt = 0
         var failing: String? = null
+        var switching = false
         while (true) {
             val creds = _creds.value ?: return
-            _link.value = Link.Connecting(attempt, failing)
+            // Moving to another route: the app stays "live" until it lands (no flash of Not connected).
+            if (!switching) _link.value = Link.Connecting(attempt, failing)
+            switching = false
+            kick.tryReceive() // a move asked for before this connect
             var route: TowerHost? = null
             var live = false
             val reason = try {
@@ -351,7 +433,8 @@ class TowerSession(
                     }
                     is Pick.Nowhere -> throw UnreachableException(p.message, null)
                 }
-                c.events(voice).collect { ev ->
+                // The stream, until it ends or the route is to change (network change, see recheckRoute).
+                merge(c.events(voice), kick.receiveAsFlow().map<Unit, TowerEvent> { throw RouteChanged() }).collect { ev ->
                     if (ev is TowerEvent.Hello) {
                         live = true
                         route?.let {
@@ -369,6 +452,9 @@ class TowerSession(
                 "The tower closed the connection."
             } catch (e: CancellationException) {
                 throw e
+            } catch (e: RouteChanged) {
+                switching = true
+                ""
             } catch (e: UnauthorizedException) {
                 block(Link.Revoked(e.message))
                 return
@@ -376,10 +462,20 @@ class TowerSession(
                 block(Link.CertificateChanged(e.mismatch.got))
                 return
             } catch (e: UnreachableException) {
+                // A single address (no probes): what it did, for the message and the menu.
+                if (!live && route != null && _routeTries.value.none { it.host == route }) {
+                    _routeTries.value = listOf(RouteTry(route!!, RouteOutcome.of(e), System.currentTimeMillis()))
+                }
                 // Never got through this time: say what the phone can do about it (Tailscale off, another network).
                 if (live) e.message ?: "Connection lost." else e.message?.takeIf { it.startsWith("Can't reach the Mac") || it.startsWith("Secure connection failed") } ?: unreachable(creds)
             } catch (e: Exception) {
                 e.message ?: "Connection lost."
+            }
+            if (switching) {
+                // Straight on to the new route: no backoff, no retry card.
+                attempt = 0
+                failing = null
+                continue
             }
             // A clip half-played when the voice dropped won't be resumed; the Mac takes over.
             if (voice) player.hush()
@@ -903,6 +999,7 @@ class TowerSession(
         muteHeldUntil = 0
         mutedIs(false)
         _activeRoute.value = null
+        _routeTries.value = emptyList()
         settings.lastRoute = null
         if (!sameTower) renameTower("")
     }
@@ -911,7 +1008,9 @@ class TowerSession(
         /** Trying one address of several: a LAN that isn't there gives up in this long, then Tailscale is tried. */
         const val PROBE_CONNECT_MS = 2_500L
         /** And the whole look at one address (connect, TLS, hello). */
-        const val PROBE_TOTAL_MS = 6_000L
+        const val PROBE_TOTAL_MS = 4_000L
+        /** A network change comes as several callbacks within a moment: act once they've settled. */
+        const val NET_SETTLE_MS = 800L
         private const val TAG = "TowerSession"
         /** Seconds between reconnects, as the contract asks: 1, 2, 5, 10, then every 10. */
         val BACKOFF = intArrayOf(1, 2, 5, 10)

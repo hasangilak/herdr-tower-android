@@ -421,4 +421,89 @@ class TowerSessionTest {
         assertEquals("the stream stays", 1, streams.size)
         assertEquals(Link.Live(false), s.link.value)
     }
+
+    // Moving between routes when the network changes
+
+    /** A second address of the same tower (same certificate), switched up or down; down closes each new connection at once. */
+    private inner class Route2 : AutoCloseable {
+        @Volatile var up = false
+        val events = CopyOnWriteArrayList<Long>()
+        val server = MockWebServer().apply {
+            useHttps(HandshakeCertificates.Builder().heldCertificate(cert).build().sslSocketFactory())
+            dispatcher = object : Dispatcher() {
+                override fun dispatch(request: RecordedRequest): MockResponse = when {
+                    !up -> MockResponse.Builder().onResponseStart(mockwebserver3.SocketEffect.CloseSocket()).build()
+                    request.url.encodedPath == "/v1/events" -> {
+                        events += System.currentTimeMillis()
+                        stream(hello(), state(muted = false))
+                    }
+                    request.url.encodedPath == "/v1/chat" -> json("""{"error": {"code": "not_found", "message": "no"}}""", 404)
+                    else -> json("{}")
+                }
+            }
+            start()
+        }
+        val host get() = dev.herdertower.phone.api.TowerHost("lan", server.hostName, server.port)
+        override fun close() = server.close()
+    }
+
+    @Test fun backOnTheMacsWifiTheStreamMovesToTheLanAtOnce() {
+        Route2().use { lan ->
+            val s = sessionAt(listOf(lan.host, dev.herdertower.phone.api.TowerHost("tailscale", server.hostName, server.port)))
+            val seen = CopyOnWriteArrayList<Link>()
+            s.scope.launch { s.link.collect { seen += it } }
+            s.setForeground(true)
+            until(what = "live over tailscale") { s.link.value == Link.Live(false) && s.activeRoute.value?.tailscale == true }
+            // Home again: the LAN answers; the phone's network changed.
+            lan.up = true
+            val at = System.currentTimeMillis()
+            s.networkChanged()
+            until(timeoutMs = 6_000, what = "on the LAN") { s.activeRoute.value?.host == lan.host && s.link.value == Link.Live(false) }
+            assertTrue("moved in ${System.currentTimeMillis() - at} ms, not after a read timeout", System.currentTimeMillis() - at < 5_000)
+            assertTrue("no retry card while moving: $seen", seen.none { it is Link.Retrying })
+        }
+    }
+
+    @Test fun theLanGoneTheStreamMovesToTailscaleAtOnce() {
+        Route2().use { lan ->
+            lan.up = true
+            val s = sessionAt(listOf(lan.host, dev.herdertower.phone.api.TowerHost("tailscale", server.hostName, server.port)))
+            val seen = CopyOnWriteArrayList<Link>()
+            s.scope.launch { s.link.collect { seen += it } }
+            s.setForeground(true)
+            until(what = "live on the LAN") { s.link.value == Link.Live(false) && s.activeRoute.value?.host == lan.host }
+            // Left home: the LAN address stops answering (its open stream would only end at the read timeout).
+            lan.up = false
+            val at = System.currentTimeMillis()
+            s.networkChanged()
+            until(timeoutMs = 10_000, what = "over tailscale") { s.activeRoute.value?.tailscale == true && s.link.value == Link.Live(false) }
+            assertTrue("moved in ${System.currentTimeMillis() - at} ms", System.currentTimeMillis() - at < 8_000)
+            assertTrue("no retry card while moving: $seen", seen.none { it is Link.Retrying })
+        }
+    }
+
+    @Test fun aNetworkChangeOnAHealthyRouteChangesNothing() {
+        val s = sessionAt(listOf(
+            dev.herdertower.phone.api.TowerHost("lan", server.hostName, server.port),
+            dev.herdertower.phone.api.TowerHost("tailscale", otherName, server.port),
+        ))
+        s.setForeground(true)
+        until(what = "live") { s.link.value == Link.Live(false) }
+        s.networkChanged()
+        Thread.sleep(2_500)
+        assertEquals("the stream stays", 1, streams.size)
+    }
+
+    @Test fun whenNoAddressAnswersEachOneIsRecorded() {
+        val s = sessionAt(
+            listOf(
+                dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort()),
+                dev.herdertower.phone.api.TowerHost("tailscale", "127.0.0.1", closedPort()),
+            ),
+            FakeNet(vpn = false, installed = true),
+        )
+        s.setForeground(true)
+        until(what = "retrying") { s.link.value is Link.Retrying }
+        assertEquals(listOf(RouteOutcome.Refused, RouteOutcome.Refused), s.routeTries.value.map { it.outcome })
+    }
 }

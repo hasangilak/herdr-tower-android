@@ -120,6 +120,9 @@ class HostsTest {
         assertEquals(listOf(lan, ts), Hosts.refresh(listOf(lan, ts), listOf(lan)))
         // An older tower (no lan_hosts), or the API's list empty: what's stored stays.
         assertEquals(listOf(lan, ts), Hosts.refresh(listOf(lan, ts), emptyList()))
+        // The Mac lists only its tailnet address (Wi-Fi off there, or an exit node): the LAN address is kept,
+        // or the phone could never find the Mac at home again without pairing anew.
+        assertEquals(listOf(ts, lan), Hosts.refresh(listOf(lan, ts), listOf(ts)))
         // Kinds this app doesn't know are left out.
         assertEquals(listOf(lan), Hosts.refresh(listOf(lan), listOf(lan, TowerHost("wireguard", "10.0.0.1", 7843))))
     }

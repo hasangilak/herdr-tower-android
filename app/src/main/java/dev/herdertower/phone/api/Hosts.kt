@@ -125,9 +125,10 @@ object Hosts {
     fun refresh(stored: List<TowerHost>, fresh: List<TowerHost>): List<TowerHost> {
         val clean = clean(fresh)
         if (clean.isEmpty()) return stored
-        // A tailnet address the Mac stopped listening on (Tailscale off there for now) is kept, after the fresh ones:
-        // it comes back when Tailscale does, and the phone may be away from home by then.
-        val keep = stored.filter { s -> s.tailscale && clean.none { it.tailscale } }
+        // A kind of address the Mac doesn't list now is kept, after the fresh ones: its tailnet address while Tailscale
+        // is off there, and its LAN address while it lists only the tailnet (Wi-Fi off, an exit node). Dropping the
+        // LAN one would leave the phone unable to find the Mac at home until it paired again.
+        val keep = stored.filter { s -> clean.none { it.kind == s.kind } }
         return (clean + keep).distinctBy { it.id }
     }
 }

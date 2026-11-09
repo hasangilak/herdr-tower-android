@@ -476,6 +476,11 @@ private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) ->
                     style = MaterialTheme.typography.labelMedium, color = tc.muted,
                 )
                 Text("${c.deviceName} · ${dev.herdertower.phone.api.Hosts.describe(c.hosts, c.magicDns)}", style = MaterialTheme.typography.labelSmall, color = tc.faint)
+                // Not connected: what each address did on the last try (refused, no answer, blocked by Android…).
+                val tries by session.routeTries.collectAsStateWithLifecycle()
+                if (link !is Link.Live && tries.isNotEmpty()) {
+                    Text("Last try: " + tries.joinToString(" · ") { it.line }, style = MaterialTheme.typography.labelSmall, color = tc.muted)
+                }
             }
             // What's under the hood on this phone (read it out when something looks wrong).
             val orb by dev.herdertower.phone.orb.OrbProbe.report.collectAsStateWithLifecycle()
