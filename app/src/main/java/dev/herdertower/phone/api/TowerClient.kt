@@ -310,6 +310,26 @@ class TowerClient(
     suspend fun questionVoice(id: String, tab: Int, wav: ByteArray): Interpreted =
         call(slow, request(url("questions", id, "voice", query = mapOf("tab" to tab.toString()))).post(wav.toRequestBody(WAV)).build(), Interpreted.serializer())
 
+    // PRs the sessions opened (docs/mobile-api.md, "PRs")
+
+    /** `GET /v1/prs`: open ones and the last day's closed, waiting ones first. */
+    suspend fun prs(): List<Pr> = get(PrsResponse.serializer(), "prs").prs
+
+    /** `GET /v1/prs/{owner}/{repo}/{number}`. `404 no_pr`. */
+    suspend fun pr(ref: PrRef): Pr? = get(PrResponse.serializer(), "prs", ref.owner, ref.repo, ref.number.toString()).pr
+
+    /** Step one of a merge: GitHub is asked again; the answer says what merging would do, with a token for step two. */
+    suspend fun confirmMerge(ref: PrRef): MergeConfirm =
+        post(MergeConfirm.serializer(), "{}".toRequestBody(JSON), "prs", ref.owner, ref.repo, ref.number.toString(), "confirm")
+
+    /**
+     * Step two: merges as confirmed (the repo's method, pinned to the commit
+     * shown, never forced). [override] only after the user said a second time
+     * that the failing checks are unrelated. The token is used up either way.
+     */
+    suspend fun merge(ref: PrRef, token: String, override: Boolean = false): MergeResult =
+        post(MergeResult.serializer(), json(MergeRequest.serializer(), MergeRequest(token, override.takeIf { it })), "prs", ref.owner, ref.repo, ref.number.toString(), "merge")
+
     suspend fun questionPolicy(): String = get(QuestionPolicy.serializer(), "questions-policy").policy
 
     suspend fun setQuestionPolicy(policy: String): String =

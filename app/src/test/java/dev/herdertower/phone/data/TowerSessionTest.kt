@@ -44,6 +44,9 @@ class TowerSessionTest {
     private val muteBodies = CopyOnWriteArrayList<String>()
     /** Every other request: method, path and the token it carried. */
     private val others = CopyOnWriteArrayList<Triple<String, String, String?>>()
+    /** PR calls (method, path, body) and how they're answered (a tower without PRs by default). */
+    private val prCalls = CopyOnWriteArrayList<String>()
+    private var prAnswer: (RecordedRequest) -> MockResponse = { json("""{"error": {"code": "not_found", "message": "no"}}""", 404) }
     /** How the n-th stream request (0-based) is answered; the last one repeats. */
     private var answers: List<() -> MockResponse> = listOf({ stream(hello(), state(muted = false)) })
 
@@ -65,6 +68,10 @@ class TowerSessionTest {
                         json(if ("true" in body) """{"muted": true}""" else """{"muted": false}""")
                     }
                     path == "/v1/chat" -> json("""{"error": {"code": "not_found", "message": "no"}}""", 404)
+                    path.startsWith("/v1/prs") -> {
+                        prCalls += request.method + " " + path + " " + request.body?.utf8().orEmpty()
+                        prAnswer(request)
+                    }
                     else -> {
                         others += Triple(request.method ?: "", path, request.headers["Authorization"])
                         json("{}")
@@ -256,5 +263,66 @@ class TowerSessionTest {
         } finally {
             other.close()
         }
+    }
+
+    private fun pr(state: String = "open", checks: String = "pending", checked: Long, waiting: Boolean = true) =
+        """{"key":"o/app#12","repo":"o/app","number":12,"title":"release: tickets","base":"main","head":"dev","state":"$state",""" +
+            """"mergeable":"mergeable","checks":{"state":"$checks","failing":[],"pending":[],"passed":2,"total":2},"session":"t58","name":"mediaroom",""" +
+            """"waiting":$waiting,"checked_ms":$checked,"merge":{"can":${state == "open"},"blocked":${if (state == "open") "null" else "\"It's merged already.\""},"needs_override":null,"warnings":[]}}"""
+
+    @Test fun aPrChipChangesInPlaceFromTheStreamAndAStaleCopyDoesntUndoIt() {
+        prAnswer = { json("""{"prs":[${pr(checked = 10)}]}""") }
+        val events = "event: pr\ndata: {\"op\":\"update\",\"pr\":${pr(checks = "passing", checked = 20)}}\n\n" +
+            "event: chat\ndata: {\"op\":\"update\",\"message\":{\"id\":\"h40\",\"at\":5,\"role\":\"pr\",\"kind\":\"pr\",\"text\":\"release: tickets\",\"pr\":${pr(state = "merged", checks = "passing", checked = 30, waiting = false)}}}\n\n" +
+            // Sent before the merge was seen: an open copy with an older look must not bring the Merge button back.
+            "event: pr\ndata: {\"op\":\"update\",\"pr\":${pr(checks = "passing", checked = 25)}}\n\n"
+        answers = listOf({ stream(hello(), state(muted = false), later = events, laterMs = 800) })
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "the list") { s.prs.value["o/app#12"]?.checks?.state == "pending" }
+        assertTrue(s.prsSupported.value)
+        assertTrue(s.prs.value.getValue("o/app#12").waiting)
+        until(what = "merged from the chat update") { s.prs.value["o/app#12"]?.state == "merged" }
+        Thread.sleep(300)
+        val p = s.prs.value.getValue("o/app#12")
+        assertEquals("merged", p.state)
+        assertEquals(30L, p.checkedMs)
+        assertEquals("one PR, changed in place", 1, s.prs.value.size)
+        assertTrue(s.thread.value.single { it.id == "h40" }.pr != null)
+    }
+
+    @Test fun mergingConfirmsThenSendsTheTokenAndTheChipFollows() = runBlocking {
+        prAnswer = { r ->
+            when {
+                r.url.encodedPath == "/v1/prs" -> json("""{"prs":[${pr(checked = 10)}]}""")
+                r.url.encodedPath.endsWith("/confirm") -> json("""{"token":"tok1","expires_ms":99,"method":"squash","can":true,"blocked":null,"needs_override":null,"warnings":["It merges into main: that ships to production."],"pr":${pr(checks = "passing", checked = 15)}}""")
+                r.url.encodedPath.endsWith("/merge") -> json("""{"merged":true,"pr":${pr(state = "merged", checks = "passing", checked = 16, waiting = false)}}""")
+                else -> json("{}", 404)
+            }
+        }
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "the list") { s.prs.value.isNotEmpty() }
+        val ref = s.prs.value.getValue("o/app#12").ref!!
+        val c = s.confirmMerge(ref).getOrThrow()
+        assertEquals("tok1", c.token)
+        assertEquals("the look updates the chip", "passing", s.prs.value.getValue("o/app#12").checks.state)
+        val r = s.merge(ref, c.token).getOrThrow()
+        assertTrue(r.merged)
+        assertEquals("merged", s.prs.value.getValue("o/app#12").state)
+        assertEquals(
+            listOf("POST /v1/prs/o/app/12/confirm {}", "POST /v1/prs/o/app/12/merge {\"token\":\"tok1\"}"),
+            prCalls.filter { it.startsWith("POST") },
+        )
+    }
+
+    @Test fun aTowerWithoutPrsShowsNone() {
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "live") { s.link.value == Link.Live(false) }
+        until(what = "asked") { prCalls.isNotEmpty() }
+        Thread.sleep(200)
+        assertFalse(s.prsSupported.value)
+        assertTrue(s.prs.value.isEmpty())
     }
 }

@@ -26,6 +26,8 @@ class MainActivity : ComponentActivity() {
     private var theme by mutableStateOf("system")
     /** A question to open (its notification was tapped). */
     private var openQuestion by mutableStateOf<String?>(null)
+    /** A PR whose chip to open (its notification was tapped). */
+    private var openPr by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,6 +67,8 @@ class MainActivity : ComponentActivity() {
                         onRepair = { repairing = true },
                         openQuestion = openQuestion,
                         onQuestionOpened = { openQuestion = null },
+                        openPr = openPr,
+                        onPrOpened = { openPr = null },
                     )
                 }
             }
@@ -107,6 +111,10 @@ class MainActivity : ComponentActivity() {
     private fun take(intent: Intent?) {
         if (intent?.action == dev.herdertower.phone.data.QuestionNotices.ACTION) {
             openQuestion = intent.getStringExtra(dev.herdertower.phone.data.QuestionNotices.EXTRA_ID)
+            return
+        }
+        if (intent?.action == dev.herdertower.phone.data.PrNotices.ACTION) {
+            openPr = intent.getStringExtra(dev.herdertower.phone.data.PrNotices.EXTRA_KEY)
             return
         }
         val data = intent?.data?.toString() ?: return

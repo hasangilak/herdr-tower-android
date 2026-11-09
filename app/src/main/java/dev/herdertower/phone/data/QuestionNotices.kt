@@ -123,7 +123,7 @@ class QuestionNotices internal constructor(
         fun allowed(sdk: Int, notificationsOn: Boolean, permissionGranted: Boolean): Boolean =
             notificationsOn && (sdk < 33 || permissionGranted)
 
-        private fun allowedOn(context: Context): Boolean = allowed(
+        fun allowedOn(context: Context): Boolean = allowed(
             Build.VERSION.SDK_INT,
             NotificationManagerCompat.from(context).areNotificationsEnabled(),
             Build.VERSION.SDK_INT >= 33 &&

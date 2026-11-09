@@ -324,6 +324,9 @@ data class ChatMessage(
     val account: String? = null,
     val kind: String? = null,
     val status: String? = null,
+    val space: String? = null,
+    /** role = pr: the PR as it is now (it changes in place: the same message comes again, updated). */
+    val pr: Pr? = null,
 ) {
     val mine: Boolean get() = role == "user" || role == "you" || role == "request"
     val fromTower: Boolean get() = role == "tower" || role == "assistant" || role == "answer"

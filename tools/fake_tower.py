@@ -130,6 +130,128 @@ JOBS = [
     {"job": "j3", "session": "t7", "name": "docs", "space": "Storefront", "account": "main", "status": "working", "asked": "Update the setup guide", "summary": "", "started_ms": T0 - 20 * MIN, "updated_ms": T0 - 5 * MIN},
     {"job": "j0", "session": "vps/t2", "name": "deploy", "space": "Infra", "account": None, "status": "done", "asked": "Deploy v2.3 to staging", "summary": "Deployed; health checks green.", "started_ms": T0 - 60 * MIN, "updated_ms": T0 - 40 * MIN},
 ]
+
+# PRs the sessions opened (herder-tower docs/mobile-api.md, "PRs"): one of each state; all invented, nothing reaches GitHub.
+def _pr(repo, n, title, base, head, checks, session, name, space, found_min, mergeable="mergeable", waiting=False, state="open", merged_by=None, draft=False):
+    failing = [c for c, ok in checks if ok is False]
+    pending = [c for c, ok in checks if ok is None]
+    cs = "none" if not checks else "failing" if failing else "pending" if pending else "passing"
+    return {"repo": repo, "number": n, "url": f"https://github.com/{repo}/pull/{n}", "title": title, "base": base, "head": head,
+            "head_sha": hashlib.sha1(f"{repo}{n}".encode()).hexdigest(), "state": state, "draft": draft, "mergeable": mergeable,
+            "checks": {"state": cs, "failing": failing, "pending": pending, "passed": len(checks) - len(failing) - len(pending), "total": len(checks)},
+            "session": session, "name": name, "space": space, "waiting": waiting, "found_ms": T0 - found_min * MIN, "checked_ms": T0 - found_min * MIN + 30_000,
+            "closed_ms": None if state == "open" else T0 - (found_min - 5) * MIN, "merged_by": merged_by}
+
+
+PRS = {f"{p['repo']}#{p['number']}": p for p in [
+    _pr("example/web", 40, "docs: the setup guide for the new checkout", "dev", "docs-checkout", [("CI / build", True)], "t7", "docs", "Storefront", 90, state="merged", merged_by="mac"),
+    _pr("example/web", 41, "spike: a second payment provider", "dev", "spike-pay", [("CI / build", True)], "t5", "web", "Storefront", 85, state="closed"),
+    _pr("example/web", 12, "chore: bump the UI kit to 4.0", "main", "deps-ui-4", [("CI / build", True), ("CI / test", True)], "t5", "web", "Storefront", 50, mergeable="conflicting"),
+    _pr("example/api", 88, "fix: retry uploads that time out", "dev", "retry-uploads", [("CI / build", True), ("CI / test", True), ("CI / lint", None), ("e2e", None), ("deploy preview", None)], "t3", "api", "Storefront", 9),
+    _pr("example/api", 91, "feat: export orders as CSV", "dev", "orders-csv", [("CI / build", True), ("CI / test", True), ("CI / lint", True)], "t3", "api", "Storefront", 7, waiting=True),
+    _pr("example/mediaroom", 1250, "release: support tickets can open a new request beside an open one", "main", "dev",
+        [("CI / build", True), ("CI / test", True), ("CI / lint", False), ("e2e", True), ("deploy preview", True)], "t9", "b2c tickets mediaroom", "Infra", 5, waiting=True),
+]}
+PROD = {"main", "master", "prod", "production", "release", "live"}
+
+
+def pr_gate(p):
+    blocked = ("It's merged already." if p["state"] == "merged" else "It's closed." if p["state"] == "closed" else
+               "It's a draft: mark it ready for review first." if p["draft"] else
+               f"It has conflicts with {p['base']}: they need resolving first." if p["mergeable"] == "conflicting" else None)
+    c = p["checks"]
+    needs = None
+    if c["state"] == "failing":
+        n = len(c["failing"])
+        needs = f"{n} check{'' if n == 1 else 's'} failing: {', '.join(c['failing'])}. Merge anyway only if you know the failure is unrelated."
+    warnings = []
+    if p["base"].lower() in PROD:
+        warnings.append(f"It merges into {p['base']}: that ships to production.")
+    if c["state"] == "pending":
+        k = len(c["pending"])
+        warnings.append(f"{k} check{' is' if k == 1 else 's are'} still running.")
+    if c["state"] == "none":
+        warnings.append("No checks ran on it.")
+    if p["mergeable"] == "unknown" and p["state"] == "open":
+        warnings.append("GitHub hasn't worked out yet whether it merges cleanly.")
+    return {"can": blocked is None, "blocked": blocked, "needs_override": needs, "warnings": warnings}
+
+
+def pr_view(p):
+    return dict(p, key=f"{p['repo']}#{p['number']}", merge=pr_gate(p))
+
+
+for k, p in PRS.items():
+    HISTORY.append({"at": p["found_ms"], "kind": "pr", "id": k, "session": p["session"], "name": p["name"], "space": p["space"], "text": p["title"]})
+HISTORY.sort(key=lambda e: e["at"])
+PR_TOKENS = {}  # token -> (device id, key, head sha, expires)
+# FAKE_PR_MERGE_FAIL=1: the first merge is refused by "GitHub" (409 merge_failed), to see the retry card.
+PR_FAIL_NEXT = [bool(os.environ.get("FAKE_PR_MERGE_FAIL"))]
+
+
+def pr_changed(key, op="update"):
+    """A PR changed: its `pr` event, and its chip's chat message again (the same id, updated)."""
+    p = PRS[key]
+    p["checked_ms"] = now()
+    publish("pr", {"op": op, "pr": pr_view(p)})
+    for i, e in enumerate(HISTORY):
+        if e["kind"] == "pr" and e.get("id") == key:
+            publish("chat", {"op": "update", "message": chat_message(e, i + 1)})
+
+
+def pr_life():
+    """#88's checks finish passing a while after the start, and its session then waits on the merge."""
+    time.sleep(float(os.environ.get("FAKE_PR_CHECKS_S", "40")))
+    p = PRS["example/api#88"]
+    p["checks"] = {"state": "passing", "failing": [], "pending": [], "passed": 5, "total": 5}
+    p["waiting"] = True
+    print("PR example/api#88: checks passed, waiting", flush=True)
+    pr_changed("example/api#88")
+
+
+def prs_route(h, method, seg, dev, b):
+    if seg == ["prs"] and method == "GET":
+        day = now() - 86400_000
+        ps = [p for p in PRS.values() if p["state"] == "open" or (p["closed_ms"] or 0) >= day]
+        ps.sort(key=lambda p: (p["state"] != "open", not p["waiting"], -p["found_ms"]))
+        return h.send(200, {"prs": [pr_view(p) for p in ps]})
+    if len(seg) < 4:
+        return h.err(404, "not_found", "no such path")
+    key = f"{seg[1]}/{seg[2]}#{seg[3]}"
+    p = PRS.get(key)
+    if p is None:
+        return h.err(404, "no_pr", "no PR the tower knows by that name")
+    if len(seg) == 4 and method == "GET":
+        return h.send(200, {"pr": pr_view(p)})
+    if seg[4:] == ["confirm"] and method == "POST":
+        tok = secrets.token_hex(12)
+        PR_TOKENS[tok] = (dev["id"], key, p["head_sha"], now() + 2 * MIN)
+        g = pr_gate(p)
+        return h.send(200, {"token": tok, "expires_ms": now() + 2 * MIN, "pr": pr_view(p), "method": "squash", **g})
+    if seg[4:] == ["merge"] and method == "POST":
+        d = json.loads(b or b"{}")
+        t = PR_TOKENS.pop(d.get("token", ""), None)
+        if not t or t[0] != dev["id"] or t[1] != key or t[3] < now():
+            return h.err(403, "bad_token", "confirm first (POST …/confirm): the token is missing, used, for another PR or device, or older than two minutes")
+        g = pr_gate(p)
+        if g["blocked"]:
+            return h.err(409, "blocked", g["blocked"])
+        if t[2] != p["head_sha"]:
+            return h.err(409, "changed", "New commits since you confirmed: look again.")
+        if g["needs_override"] and not d.get("override"):
+            return h.err(409, "needs_override", g["needs_override"])
+        if PR_FAIL_NEXT[0]:
+            PR_FAIL_NEXT[0] = False
+            return h.err(409, "merge_failed", "At least 1 approving review is required by reviewers with write access.")
+        p.update(state="merged", merged_by=f"phone:{dev['id']}", closed_ms=now(), waiting=False)
+        print(f"PR {key} merged from {dev['name']} (override={bool(d.get('override'))})", flush=True)
+        pr_changed(key, "closed")
+        add_history({"at": now(), "kind": "watch", "session": p["session"], "name": p["name"],
+                     "text": f"{p['session']} ({p['name']}): the user merged PR #{p['number']} into {p['base']} ({p['repo']}) from the phone."})
+        return h.send(200, {"merged": True, "pr": pr_view(p)})
+    return h.err(404, "not_found", "no such path")
+
+
 FOCUS = [None]
 ROUTE = {}  # device id -> "phone" | "mac"
 SPACES = [("Storefront", ["t3", "t5", "t7"], "The shop: checkout, onboarding and the orders API."), ("Infra", ["vps/t2", "t9"], None)]
@@ -212,7 +334,7 @@ def whisper(wav):
 def chat_message(e, i):
     """A history entry as a message of the main chat thread (GET /v1/chat, event chat), as docs/mobile-api.md."""
     kind = e["kind"]
-    role = {"request": "user", "answer": "tower", "screenshot": "screenshots"}.get(kind, "event")
+    role = {"request": "user", "answer": "tower", "screenshot": "screenshots", "pr": "pr"}.get(kind, "event")
     atts = []
     for n, path in enumerate(e.get("attachments", []), 1):
         name = path.rsplit("/", 1)[-1]
@@ -225,6 +347,12 @@ def chat_message(e, i):
             m[k] = e[k]
     if kind == "behavior":
         m["diff"] = e.get("diff", "")
+    if kind == "pr":
+        p = PRS.get(e["id"])
+        m["space"] = e.get("space")
+        m["pr"] = pr_view(p) if p else {"key": e["id"], "title": e.get("text", "")}
+        if p:
+            m["updated_at"] = max(p["checked_ms"], e["at"])
     if kind == "screenshot":
         s = next((x for x in SHOTS if x["id"] == e["id"]), {"id": e["id"]})
         m["screenshots"] = [{k: s.get(k) for k in ("id", "caption", "session", "name", "account", "at")} | {"url": "/v1/screenshots/" + e["id"]}]
@@ -232,7 +360,7 @@ def chat_message(e, i):
 
 
 def thread():
-    return [chat_message(e, i + 1) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot", "answered", "behavior") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
+    return [chat_message(e, i + 1) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot", "answered", "behavior", "pr") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
 
 
 def add_history(e):
@@ -678,6 +806,15 @@ class H(BaseHTTPRequestHandler):
         if seg[:1] != ["v1"]:
             return self.err(404, "not_found", "no such path")
         seg = seg[1:]
+        if (method, seg) == ("POST", ["fake", "pr"]):
+            # Drive a PR's state for screenshots: {"key": "example/api#88", "checks": {...}, "waiting": true, ...}.
+            d = json.loads(self.body() or b"{}")
+            k = d.pop("key", "")
+            if k not in PRS:
+                return self.err(404, "no_pr", "no such PR")
+            PRS[k].update(d)
+            pr_changed(k, "update" if PRS[k]["state"] == "open" else "closed")
+            return self.send(200, {"pr": pr_view(PRS[k])})
         if (method, seg) == ("POST", ["pair"]):
             b = json.loads(self.body() or b"{}")
             if b.get("code") != CODE:
@@ -694,6 +831,8 @@ class H(BaseHTTPRequestHandler):
         if seg[:1] == ["behaviors"]:
             if behaviors_route(self, method, seg, q, self.body() if method in ("POST", "PUT") else b""):
                 return
+        if seg[:1] == ["prs"]:
+            return prs_route(self, method, seg, dev, self.body() if method == "POST" else b"")
         if seg[:1] in (["questions"], ["questions-policy"]):
             if questions_route(self, method, seg, q, self.body() if method in ("POST", "PUT") else b""):
                 return
@@ -892,5 +1031,6 @@ if __name__ == "__main__":
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     link = f"herdertower://pair?h={a.link_host}&p={a.port}&c={CODE}&fp={FP}"
     threading.Thread(target=questions_life, daemon=True).start()
+    threading.Thread(target=pr_life, daemon=True).start()
     print(f"fake tower on https://{a.host}:{a.port}\ncode {CODE}\nfingerprint {' '.join(FP[i:i+4] for i in range(0, 64, 4))}\nLINK {link}", flush=True)
     srv.serve_forever()

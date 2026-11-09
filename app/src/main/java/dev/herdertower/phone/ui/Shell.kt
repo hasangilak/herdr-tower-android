@@ -213,7 +213,11 @@ fun setVoice(on: Boolean, session: TowerSession, perms: Permissions, context: Co
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme: (String) -> Unit, onRepair: () -> Unit, openQuestion: String? = null, onQuestionOpened: () -> Unit = {}) {
+fun Shell(
+    session: TowerSession, voice: VoiceController, theme: String, onTheme: (String) -> Unit, onRepair: () -> Unit, openQuestion: String? = null, onQuestionOpened: () -> Unit = {},
+    /** A PR's key whose chip to open in the chat (from its notification). */
+    openPr: String? = null, onPrOpened: () -> Unit = {},
+) {
     var stack by rememberSaveable(stateSaver = Route.StackSaver) { mutableStateOf(listOf<Route>(Route.Home)) }
     val snack = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
@@ -233,6 +237,16 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
         if (openQuestion != null) {
             go(Route.Question(openQuestion))
             onQuestionOpened()
+        }
+    }
+
+    // From a PR's notification: the chat, at that PR's chip.
+    var focusPr by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(openPr) {
+        if (openPr != null) {
+            focusPr = openPr
+            go(Route.Chat)
+            onPrOpened()
         }
     }
 
@@ -268,9 +282,10 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
 
     // Questions can wait for you while the app is closed: on Android 13+ their notifications need asking once.
     val questionsOn by session.questionsSupported.collectAsStateWithLifecycle()
+    val prsOn by session.prsSupported.collectAsStateWithLifecycle()
     val perms = rememberPermissions()
-    LaunchedEffect(questionsOn) {
-        if (questionsOn && Build.VERSION.SDK_INT >= 33 && !perms.has(Manifest.permission.POST_NOTIFICATIONS) && !session.settings.askedNotifications) {
+    LaunchedEffect(questionsOn || prsOn) {
+        if ((questionsOn || prsOn) && Build.VERSION.SDK_INT >= 33 && !perms.has(Manifest.permission.POST_NOTIFICATIONS) && !session.settings.askedNotifications) {
             session.settings.askedNotifications = true
             perms.ask(arrayOf(Manifest.permission.POST_NOTIFICATIONS)) {}
         }
@@ -293,7 +308,7 @@ fun Shell(session: TowerSession, voice: VoiceController, theme: String, onTheme:
                         val b = session.behaviors.value?.behaviors?.let { all -> dev.herdertower.phone.api.BehaviorsApi.fromChatLine(title, all) }
                         go(Route.Behaviors)
                         if (b != null) go(Route.Behavior(b.id))
-                    })
+                    }, focusPr = focusPr, onFocusedPr = { focusPr = null })
                     Route.Spaces -> SpacesScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onSpace = { go(Route.Space(it)) })
                     Route.Activity -> ActivityScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
                     is Route.Space -> SpaceScreen(session, route.name, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })

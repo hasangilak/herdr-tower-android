@@ -450,4 +450,56 @@ class TowerClientTest {
         kotlinx.coroutines.withTimeout(3_000) { job.cancelAndJoin() }
         assertTrue("cancel took ${System.currentTimeMillis() - t0} ms", System.currentTimeMillis() - t0 < 3_000)
     }
+
+    @Test fun mergingIsTwoCallsWithTheTokenAndOverrideOnlyWhenSaid() = runBlocking {
+        val ref = PrRef("eyzhub", "eyz-mediaroom-serverless", 1250)
+        server.enqueue(json("""{"token":"9f2c","expires_ms":1,"method":"merge","can":true,"blocked":null,"needs_override":null,"warnings":[],"pr":{"key":"eyzhub/eyz-mediaroom-serverless#1250","number":1250}}"""))
+        assertEquals("9f2c", client().confirmMerge(ref).token)
+        val confirm = taken()
+        assertEquals("POST", confirm.method)
+        assertEquals("/v1/prs/eyzhub/eyz-mediaroom-serverless/1250/confirm", confirm.url.encodedPath)
+        assertEquals("{}", confirm.body!!.utf8())
+        assertEquals("Bearer htk_secret", confirm.headers["Authorization"])
+
+        server.enqueue(json("""{"merged":true,"pr":{"key":"eyzhub/eyz-mediaroom-serverless#1250","state":"merged","merged_by":"phone:d_1"}}"""))
+        val r = client().merge(ref, "9f2c")
+        assertTrue(r.merged)
+        assertEquals("phone:d_1", r.pr?.mergedBy)
+        val merge = taken()
+        assertEquals("/v1/prs/eyzhub/eyz-mediaroom-serverless/1250/merge", merge.url.encodedPath)
+        assertEquals("""{"token":"9f2c"}""", merge.body!!.utf8())
+
+        server.enqueue(json("""{"merged":true}"""))
+        client().merge(ref, "t2", override = true)
+        assertEquals("""{"token":"t2","override":true}""", taken().body!!.utf8())
+    }
+
+    @Test fun aRefusedMergeSaysWhy() = runBlocking {
+        val ref = PrRef("o", "app", 12)
+        server.enqueue(json("""{"error":{"code":"bad_token","message":"confirm first"}}""", 403))
+        try {
+            client().merge(ref, "made-up")
+            fail()
+        } catch (e: TowerApiException) {
+            assertEquals(403 to "bad_token", e.status to e.code)
+        }
+        server.enqueue(json("""{"error":{"code":"needs_override","message":"1 check failing: lint."}}""", 409))
+        try {
+            client().merge(ref, "t")
+            fail()
+        } catch (e: TowerApiException) {
+            assertEquals("needs_override", e.code)
+            assertEquals("1 check failing: lint.", e.message)
+        }
+    }
+
+    @Test fun thePrList() = runBlocking {
+        server.enqueue(json("""{"prs":[{"key":"o/app#12","repo":"o/app","number":12,"state":"open","waiting":true}]}"""))
+        val prs = client().prs()
+        assertEquals("/v1/prs", taken().url.encodedPath)
+        assertEquals(listOf("o/app#12"), prs.map { it.id })
+        server.enqueue(json("""{"pr":{"key":"o/app#12","base":"main"}}"""))
+        assertEquals("main", client().pr(PrRef("o", "app", 12))?.base)
+        assertEquals("/v1/prs/o/app/12", taken().url.encodedPath)
+    }
 }

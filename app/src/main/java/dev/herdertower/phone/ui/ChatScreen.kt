@@ -94,7 +94,11 @@ private sealed interface ChatRow {
 }
 
 @Composable
-fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit, onQuestion: (String) -> Unit = {}, onBehavior: (String) -> Unit = {}) {
+fun ChatScreen(
+    session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit, onQuestion: (String) -> Unit = {}, onBehavior: (String) -> Unit = {},
+    /** A PR's key (`owner/repo#n`) whose chip to show (from its notification), and that it was shown. */
+    focusPr: String? = null, onFocusedPr: () -> Unit = {},
+) {
     val questions by session.questions.collectAsStateWithLifecycle()
     val history by session.history.collectAsStateWithLifecycle()
     val thread by session.thread.collectAsStateWithLifecycle()
@@ -134,6 +138,29 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
     // The reply in progress: what the tower says this turn, until the answer lands on the thread.
     val saying = state?.takeIf { work != null && it.said.isNotBlank() && it.saidMs >= work.sinceMs }?.said
     val shotsById = remember(thread) { thread.associate { it.id to it.shots() } }
+    // PR chips: the message's PR, or the newer copy the tower sent since (it changes in place).
+    val prs by session.prs.collectAsStateWithLifecycle()
+    val prOfMessage = remember(thread) { thread.mapNotNull { m -> dev.herdertower.phone.api.PrsApi.of(m)?.let { m.id to it } }.toMap() }
+    var merging by remember { mutableStateOf<dev.herdertower.phone.api.Pr?>(null) }
+    var highlight by remember { mutableStateOf<String?>(null) }
+    var focus by remember { mutableStateOf<String?>(null) }
+    // From a notification: find the PR's chip (paging back a little if it's older), show it and light it up a while.
+    LaunchedEffect(focusPr) {
+        val key = focusPr ?: return@LaunchedEffect
+        onFocusedPr()
+        fun find() = session.thread.value.lastOrNull { dev.herdertower.phone.api.PrsApi.of(it)?.id == key }?.id
+        var id = find()
+        var pages = 0
+        while (id == null && pages++ < 6 && session.threadMore.value && session.loadOlderThread() > 0) id = find()
+        if (id == null) {
+            snack("That PR's chip isn't in the chat any more.")
+            return@LaunchedEffect
+        }
+        focus = id
+        highlight = id
+        kotlinx.coroutines.delay(5000)
+        if (highlight == id) highlight = null
+    }
     val waiting = remember(pendingSent, thread, now) { if (useThread) ChatModel.unmatched(pendingSent, thread, now) else emptyList() }
 
     Box(Modifier.fillMaxSize()) {
@@ -166,6 +193,12 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
         sentFiles = { e ->
             SentFiles(session, e) { pics, i -> viewing = pics to i }
         },
+        prChip = { e ->
+            val p = prOfMessage[e.id]?.let { m -> prs[m.id]?.takeIf { dev.herdertower.phone.api.PrsApi.newer(m, it) } ?: m }
+            if (p != null) PrChip(p, onMerge = { merging = p }, highlighted = highlight == e.id, at = e.at) else EventLine(e, acc, onOpen)
+        },
+        focus = focus,
+        onFocused = { focus = null },
         inputBar = {
             // Questions left to the user stay in view above the input, until answered.
             // A short screen (landscape, large text) keeps room for the input: the cards scroll in less.
@@ -195,6 +228,7 @@ fun ChatScreen(session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, 
         },
     )
     viewing?.let { (pics, i) -> PicViewer(pics, i) { viewing = null } }
+    merging?.let { p -> MergeSheet(session, prs[p.id] ?: p) { merging = null } }
     }
 }
 
@@ -270,6 +304,11 @@ fun ChatContent(
     onBehavior: (String) -> Unit = {},
     /** The sessions at work now, inline in the header. */
     activePills: @Composable (Modifier) -> Unit = {},
+    /** A PR a session opened (`kind` pr): its chip. */
+    prChip: @Composable (HistoryEntry) -> Unit = { EventLine(it, accounts, onOpen) },
+    /** A message to scroll to (its id), once; [onFocused] after. */
+    focus: String? = null,
+    onFocused: () -> Unit = {},
     inputBar: @Composable () -> Unit,
 ) {
     val list = rememberLazyListState()
@@ -309,6 +348,15 @@ fun ChatContent(
     // Scrolled up to the top: load the older messages.
     val atTop by remember { androidx.compose.runtime.derivedStateOf { list.firstVisibleItemIndex == 0 && list.layoutInfo.totalItemsCount > 1 } }
     LaunchedEffect(atTop, canLoadMore, follow) { if (atTop && !follow && canLoadMore && rows.isNotEmpty()) onLoadOlder() }
+    // To one message (a PR's chip from its notification): it stays in view, the end isn't followed.
+    LaunchedEffect(focus, rows) {
+        val id = focus ?: return@LaunchedEffect
+        val i = rows.indexOfFirst { it is ChatRow.Item && it.e.id == id }
+        if (i < 0) return@LaunchedEffect
+        follow = false
+        list.animateScrollToItem(i + 1) // after the "Earlier messages" row
+        onFocused()
+    }
 
     GlassScaffold(header = {
         HeaderClose(onClose)
@@ -347,6 +395,7 @@ fun ChatContent(
                             "request" -> UserBubble(r.e, sentFiles)
                             "behavior" -> BehaviorChangeCard(r.e.text, r.e.diff) { onBehavior(r.e.text) }
                             "answer" -> ReplyBubble(r.e, replyShots)
+                            "pr" -> prChip(r.e)
                             "screenshot" -> if (r.e.id != null && !curated) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
                             else -> EventLine(r.e, accounts, onOpen)
                         }

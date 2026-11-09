@@ -14,6 +14,11 @@ import dev.herdertower.phone.api.Agent
 import dev.herdertower.phone.api.CertificateMismatchException
 import dev.herdertower.phone.api.ChatApi
 import dev.herdertower.phone.api.ChatMessage
+import dev.herdertower.phone.api.MergeConfirm
+import dev.herdertower.phone.api.MergeResult
+import dev.herdertower.phone.api.Pr
+import dev.herdertower.phone.api.PrRef
+import dev.herdertower.phone.api.PrsApi
 import dev.herdertower.phone.api.Endpoint
 import dev.herdertower.phone.api.Fingerprint
 import dev.herdertower.phone.api.HistoryEntry
@@ -211,7 +216,10 @@ class TowerSession(private val context: Context, private val store: CredentialSt
 
     fun setForeground(fg: Boolean) {
         _foreground.value = fg
-        if (fg) notices.clearAll()
+        if (fg) {
+            notices.clearAll()
+            prNotices.clearAll()
+        }
     }
 
     fun setVoice(on: Boolean) {
@@ -313,6 +321,11 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             is TowerEvent.Chat -> {
                 _threadSupported.value = true
                 _thread.value = ChatApi.merge(_thread.value, listOf(ev.message))
+                PrsApi.of(ev.message)?.let { setPrs(listOf(it)) }
+            }
+            is TowerEvent.PrChanged -> {
+                _prsSupported.value = true
+                setPrs(listOf(ev.change.pr))
             }
             is TowerEvent.Audio -> {
                 lastClip = ev.clip.id
@@ -423,10 +436,55 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         }
     }
 
+    // PRs the sessions opened
+
+    private val _prs = MutableStateFlow<Map<String, Pr>>(emptyMap())
+    /** The PRs the tower's sessions opened, by key (`owner/repo#n`), each as last heard: from the list, the chat and the `pr` events. */
+    val prs: StateFlow<Map<String, Pr>> = _prs.asStateFlow()
+
+    private val _prsSupported = MutableStateFlow(false)
+    /** Whether the tower tracks PRs (`/v1/prs`). */
+    val prsSupported: StateFlow<Boolean> = _prsSupported.asStateFlow()
+
+    private val prNotices = PrNotices(context)
+
+    private fun setPrs(more: List<Pr>) {
+        val next = PrsApi.merge(_prs.value, more)
+        if (next == _prs.value) return
+        _prs.value = next
+        prNotices.follow(next.values, background = !_foreground.value)
+    }
+
+    private suspend fun loadPrs() {
+        val c = client ?: return
+        try {
+            setPrs(c.prs())
+            _prsSupported.value = true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: TowerApiException) {
+            // A tower from before PRs: no chips, no merging.
+            if (e.status == 404) _prsSupported.value = false
+        } catch (e: UnauthorizedException) {
+            block(Link.Revoked(e.message))
+        } catch (e: Exception) {
+            Log.i(TAG, "prs: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** Step one of merging [ref]: what it would do now, and the token for [merge]. The PR's copy here is updated too. */
+    suspend fun confirmMerge(ref: PrRef): Result<MergeConfirm> =
+        act { it.confirmMerge(ref) }.onSuccess { if (it.pr.id.isNotBlank()) setPrs(listOf(it.pr)) }
+
+    /** Step two: merges with the token from [confirmMerge]; [override] after the user's second yes to failing checks. */
+    suspend fun merge(ref: PrRef, token: String, override: Boolean = false): Result<MergeResult> =
+        act { it.merge(ref, token, override) }.onSuccess { r -> r.pr?.let { setPrs(listOf(it)) } }
+
     // Reading
 
     private fun refreshAll() {
         scope.launch { loadThread() }
+        scope.launch { loadPrs() }
         scope.launch { loadQuestions() }
         scope.launch { loadBehaviors() }
         scope.launch {
@@ -469,6 +527,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         try {
             val page = c.chat(limit = 60)
             _threadSupported.value = true
+            setPrs(page.messages.mapNotNull(PrsApi::of))
             // The newest page joins what's loaded when they overlap; after a gap (or another tower) it replaces it.
             val joins = page.messages.isEmpty() || _thread.value.any { it.id == page.messages.first().id }
             _thread.value = if (joins) ChatApi.merge(_thread.value, page.messages) else ChatApi.merge(emptyList(), page.messages)
@@ -491,6 +550,7 @@ class TowerSession(private val context: Context, private val store: CredentialSt
             val page = c.chat(before = oldest.id.ifBlank { oldest.at.toString() }, limit = limit)
             n = page.messages.size
             _thread.value = ChatApi.merge(_thread.value, page.messages)
+            setPrs(page.messages.mapNotNull(PrsApi::of))
             _threadMore.value = page.more ?: (n >= limit)
         }
         return n
@@ -708,6 +768,9 @@ class TowerSession(private val context: Context, private val store: CredentialSt
         _questionsSupported.value = false
         _questionPolicy.value = null
         notices.forget()
+        _prs.value = emptyMap()
+        _prsSupported.value = false
+        prNotices.forget()
         images.clear() // another tower's pictures could share an id
         lastClip = null
         _route.value = null
