@@ -25,6 +25,8 @@ interface PhoneNet {
     fun onWifi(): Boolean? = null
     /** Android 17+ keeps this app off the local network until "local network" access is allowed. */
     fun localNetworkBlocked(): Boolean = false
+    /** The ranges (`10.10.30`) of the Wi-Fi or wired networks the phone is on now: which of the Mac's networks it is on. */
+    fun localRanges(): Set<String> = emptySet()
 }
 
 /** What one address did when the app tried it. */
@@ -78,6 +80,17 @@ class SystemPhoneNet(private val context: Context) : PhoneNet {
         }
     }.getOrNull()
 
+    @Suppress("DEPRECATION")
+    override fun localRanges(): Set<String> = runCatching {
+        val cm = context.getSystemService(ConnectivityManager::class.java) ?: return emptySet()
+        cm.allNetworks.filter { n ->
+            val caps = cm.getNetworkCapabilities(n) ?: return@filter false
+            caps.hasTransport(NetworkCapabilities.TRANSPORT_WIFI) || caps.hasTransport(NetworkCapabilities.TRANSPORT_ETHERNET)
+        }.flatMap { n -> cm.getLinkProperties(n)?.linkAddresses.orEmpty() }
+            .mapNotNull { a -> (a.address as? java.net.Inet4Address)?.hostAddress?.let(dev.herdertower.phone.api.Hosts::rangeOf) }
+            .toSet()
+    }.getOrDefault(emptySet())
+
     override fun localNetworkBlocked(): Boolean = Build.VERSION.SDK_INT >= 37 &&
         ContextCompat.checkSelfPermission(context, "android.permission.ACCESS_LOCAL_NETWORK") != PackageManager.PERMISSION_GRANTED
 
@@ -94,6 +107,9 @@ class SystemPhoneNet(private val context: Context) : PhoneNet {
 
 /** What the app says about the way to the Mac. */
 object RouteWords {
+    /** No address of the tower answers here: the words, and the card's button opens the scanner. */
+    const val OTHER_NETWORK = "Can't reach the tower on this network. Pair again here (scan the QR in Settings → Phone on the Mac), or turn on Tailscale on both."
+
     /**
      * No address answered. [tailnet]: the pairing has a Tailscale address
      * (or MagicDNS name) to try; [vpnOn] and [tailscaleInstalled] are the
@@ -114,19 +130,11 @@ object RouteWords {
         lan?.outcome == RouteOutcome.Blocked ->
             "Android blocked the connection to the Mac at ${lan.host.host}. Check that local network access is allowed for this app" +
                 (if (tailnet && vpnOn != true) ", or turn Tailscale on." else ".")
-        // On Wi-Fi, yet the Mac's LAN address didn't answer: say what it did, since "join the Mac's Wi-Fi" would be wrong.
-        onWifi == true && lan != null ->
-            "On Wi-Fi, but the Mac at ${lan.host.host} ${lan.outcome.words}. Is this the Mac's network, with the tower's phone API on?" +
-                (if (tailnet && vpnOn != true) " Away from it: turn Tailscale on." else "")
-        !tailnet ->
-            "Can't reach the Mac. Is the phone on the Mac's Wi-Fi, with “tower phone enable” on? " +
-                "Away from home: start Tailscale on the Mac, then pair again so the phone learns its tailnet address."
-        tailscaleInstalled == false ->
-            "Can't reach the Mac on this network, and Tailscale isn't installed on this phone. " +
-                "Join the Mac's Wi-Fi, or install Tailscale and sign in to the Mac's tailnet."
-        vpnOn == false ->
-            "Can't reach the Mac on this network, and Tailscale is off on this phone. Turn Tailscale on, or join the Mac's Wi-Fi."
-        else ->
-            "Can't reach the Mac on Wi-Fi or over Tailscale. Is the Mac awake, with Tailscale running there and the phone API on?"
+        // Nothing of the tower's answers here: pair again on this network, or reach it over Tailscale. What each
+        // address did is in the menu (routeTries).
+        // What the phone itself can say about Tailscale follows: the one thing to do on this side.
+        tailscaleInstalled == false && tailnet -> "$OTHER_NETWORK Tailscale isn't installed on this phone."
+        vpnOn == false && tailnet -> "$OTHER_NETWORK Tailscale is off on this phone."
+        else -> OTHER_NETWORK
     }
 }

@@ -111,20 +111,56 @@ class HostsTest {
 
     // Keeping the list current
 
-    @Test fun theTowersCurrentListReplacesTheStoredOne() {
+    private fun ids(list: List<TowerHost>) = list.map { it.id }
+
+    @Test fun theTowersCurrentListIsMergedIn() {
         val moved = TowerHost("lan", "192.168.1.44", 7843)
-        assertEquals(listOf(moved, ts), Hosts.refresh(listOf(lan, ts), listOf(moved, ts)))
+        // The Mac moved to another address on the same network: that network's old one goes.
+        assertEquals(ids(listOf(moved, ts)), ids(Hosts.refresh(listOf(lan, ts), listOf(moved, ts))))
         // Tailscale started on the Mac later: learnt.
-        assertEquals(listOf(lan, ts), Hosts.refresh(listOf(lan), listOf(lan, ts)))
+        assertEquals(ids(listOf(lan, ts)), ids(Hosts.refresh(listOf(lan), listOf(lan, ts))))
         // Tailscale stopped there: the tailnet address is kept (after the LAN) for when it's back.
-        assertEquals(listOf(lan, ts), Hosts.refresh(listOf(lan, ts), listOf(lan)))
+        assertEquals(ids(listOf(lan, ts)), ids(Hosts.refresh(listOf(lan, ts), listOf(lan))))
         // An older tower (no lan_hosts), or the API's list empty: what's stored stays.
         assertEquals(listOf(lan, ts), Hosts.refresh(listOf(lan, ts), emptyList()))
         // The Mac lists only its tailnet address (Wi-Fi off there, or an exit node): the LAN address is kept,
         // or the phone could never find the Mac at home again without pairing anew.
-        assertEquals(listOf(ts, lan), Hosts.refresh(listOf(lan, ts), listOf(ts)))
+        assertEquals(ids(listOf(lan, ts)), ids(Hosts.refresh(listOf(lan, ts), listOf(ts))))
         // Kinds this app doesn't know are left out.
-        assertEquals(listOf(lan), Hosts.refresh(listOf(lan), listOf(lan, TowerHost("wireguard", "10.0.0.1", 7843))))
+        assertEquals(ids(listOf(lan)), ids(Hosts.refresh(listOf(lan), listOf(lan, TowerHost("wireguard", "10.0.0.1", 7843)))))
+    }
+
+    @Test fun eachNetworksAddressIsRememberedAndNamed() {
+        val home = TowerHost("lan", "192.168.2.211", 7843)
+        val office = TowerHost("lan", "10.10.30.116", 7843)
+        // Over Tailscale at the office, the hosts event says the Mac's new LAN address: learnt before it's needed,
+        // the home one kept (the Mac goes home again).
+        val merged = Hosts.refresh(listOf(home, ts), listOf(office, ts), TowerNetwork("10.10.30", "Office", NetworkLan("10.10.30.116", 7843)))
+        assertEquals(listOf("10.10.30.116:7843", "192.168.2.211:7843", "100.68.110.33:7843"), ids(merged))
+        assertEquals("Office", merged[0].seenName)
+        assertEquals("10.10.30", merged[0].range)
+        assertEquals("192.168.2", merged[1].range)
+        assertTrue(Hosts.describe(merged).startsWith("Office 10.10.30.116 · Wi-Fi 192.168.2.211"))
+        // Home again: its address first, the office's kept, the name it was given there too.
+        val back = Hosts.refresh(merged, listOf(home, ts), TowerNetwork("192.168.2", "Home", null))
+        assertEquals(listOf("192.168.2.211:7843", "10.10.30.116:7843", "100.68.110.33:7843"), ids(back))
+        assertEquals("Office", back[1].seenName)
+        assertEquals("Home", back[0].seenName)
+        // At most eight networks, the latest first.
+        val many = (1..10).fold(listOf(ts)) { acc, i -> Hosts.refresh(acc, listOf(TowerHost("lan", "10.0.$i.5", 7843), ts)) }
+        assertEquals((10 downTo 3).map { "10.0.$it.5" }, many.filter { !it.tailscale }.map { it.host })
+        assertTrue("Tailscale is never dropped", many.any { it.tailscale })
+    }
+
+    @Test fun thisNetworksAddressIsTriedFirstAndAnothersAfterTailscale() {
+        val home = TowerHost("lan", "192.168.2.211", 7843, seenRange = "192.168.2")
+        val office = TowerHost("lan", "10.10.30.116", 7843, seenRange = "10.10.30")
+        val stored = listOf(home, office, ts)
+        assertEquals(listOf("10.10.30.116", "100.68.110.33", "mac.tailnet.ts.net", "192.168.2.211"), Hosts.candidates(stored, null, null, setOf("10.10.30")).map { it.host })
+        // On cellular (no Wi-Fi range known): every LAN address first, as before.
+        assertEquals(listOf("192.168.2.211", "10.10.30.116"), Hosts.candidates(stored, null, null, emptySet()).take(2).map { it.host })
+        assertEquals("10.10.30", Hosts.rangeOf("10.10.30.116"))
+        assertEquals(null, Hosts.rangeOf("mac.tailnet.ts.net"))
     }
 
     @Test fun theStatesListReads() {

@@ -344,9 +344,13 @@ private fun Confirm(session: TowerSession, c: Candidate, onBack: () -> Unit) {
         )
         return
     }
-    // Pairing again replaces the tower this phone is paired with: say so, with its address.
-    paired?.takeIf { it.host != c.host || it.port != c.port || it.fingerprint != c.fingerprint }?.let { old ->
-        Text(
+    // The same tower (its certificate) at another address: this pairing is renewed, its other networks kept.
+    // Another tower: it replaces the one this phone is paired with, so say so, with its address.
+    paired?.let { old ->
+        if (dev.herdertower.phone.api.Fingerprint.matches(old.fingerprint, c.fingerprint)) Text(
+            "The same tower: this pairs it again here and keeps the networks it was reached on before.",
+            style = MaterialTheme.typography.bodyMedium, color = tc.muted,
+        ) else Text(
             "This replaces the pairing with the tower at ${old.host}:${old.port}.",
             style = MaterialTheme.typography.bodyMedium, color = tc.blocked,
         )

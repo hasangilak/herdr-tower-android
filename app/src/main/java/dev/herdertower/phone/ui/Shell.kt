@@ -382,12 +382,19 @@ fun ConnectionNotice(link: Link, session: TowerSession, onRepair: () -> Unit, mo
     val notice = LinkModel.connectionNotice(link) ?: return
     val retry = notice.action == NoticeAction.Retry
     GlassCard(modifier.fillMaxWidth()) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Dot(if (retry) tc.accentHi else tc.blocked)
-            Spacer(Modifier.size(10.dp))
-            Text(notice.message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = tc.text)
-            TextButton(onClick = if (retry) session::reconnect else onRepair) {
-                Text(if (retry) "Retry now" else "Pair again", color = tc.text, fontWeight = FontWeight.Medium)
+        Column {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Dot(if (retry) tc.accentHi else tc.blocked)
+                Spacer(Modifier.size(10.dp))
+                Text(notice.message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = tc.text)
+                if (!notice.scan) TextButton(onClick = if (retry) session::reconnect else onRepair) {
+                    Text(if (retry) "Retry now" else "Pair again", color = tc.text, fontWeight = FontWeight.Medium)
+                }
+            }
+            // Not on any network the tower was seen on: pair again here (the scanner opens), or try once more.
+            if (notice.scan) Row(Modifier.padding(start = 18.dp, top = 6.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
+                PillButton("Scan the QR", primary = true, onClick = onRepair)
+                PillButton("Retry now", onClick = session::reconnect)
             }
         }
     }

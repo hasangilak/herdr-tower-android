@@ -28,5 +28,9 @@ class LinkModelTest {
         assertEquals("$reason Trying again now.", shown[4]!!.message)
         assertNull(LinkModel.connectionNotice(Link.Live(false)))
         assertEquals(NoticeAction.Repair, LinkModel.connectionNotice(Link.Revoked("gone"))!!.action)
+        // Nothing of the tower's answers on this network: the card also opens the scanner.
+        val here = LinkModel.connectionNotice(Link.Retrying(10, dev.herdertower.phone.data.RouteWords.OTHER_NETWORK, 3))!!
+        assertEquals(true, here.scan)
+        assertEquals(false, LinkModel.connectionNotice(Link.Retrying(10, "The tower closed the connection.", 1))!!.scan)
     }
 }

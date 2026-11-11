@@ -68,6 +68,16 @@ object SettingsModel {
         if (m.restartNeeded) add("Restarting starts each brain on a new conversation; for a few seconds a space's own tower is away.")
     }
 
+    /** "on the Office network", "on Wi-Fi", "over Tailscale": which network the tower is reached on. */
+    fun reachedOn(tailscale: Boolean, network: String?): String {
+        val net = network?.takeIf { it.isNotBlank() }?.let { if (it.startsWith("the ")) it else "the $it network" }
+        return when {
+            tailscale -> "over Tailscale" + (net?.let { " (the Mac is on $it)" } ?: "")
+            net != null -> "on $net"
+            else -> "on Wi-Fi"
+        }
+    }
+
     /** Under "The tower says out loud". */
     fun voiceLevelWords(v: String): String = when (v) {
         "off" -> "Nothing, here or on the Mac: the tower is muted. It still writes everything down."
@@ -122,6 +132,7 @@ fun SettingsScreen(session: TowerSession, theme: String, onTheme: (String) -> Un
     val link by session.link.collectAsStateWithLifecycle()
     val via by session.activeRoute.collectAsStateWithLifecycle()
     var renaming by remember { mutableStateOf(false) }
+    var renamingPhone by remember { mutableStateOf(false) }
     var confirmUnpair by remember { mutableStateOf(false) }
 
     Column(Modifier.fillMaxSize()) {
@@ -192,9 +203,10 @@ fun SettingsScreen(session: TowerSession, theme: String, onTheme: (String) -> Un
 
             Section("Paired with") {
                 val v = via
+                val network by session.network.collectAsStateWithLifecycle()
                 Text(
                     when {
-                        link is Link.Live && v != null -> "${name.ifBlank { "This Mac" }}, ${if (v.tailscale) "over Tailscale" else "on Wi-Fi"} (${v.host.host})"
+                        link is Link.Live && v != null -> "${name.ifBlank { "This Mac" }}, " + SettingsModel.reachedOn(v.tailscale, network?.label ?: v.host.seenName) + " (${v.host.host})"
                         link is Link.Live -> name.ifBlank { "This Mac" }
                         else -> "${name.ifBlank { "This Mac" }}: out of reach now"
                     },
@@ -209,6 +221,8 @@ fun SettingsScreen(session: TowerSession, theme: String, onTheme: (String) -> Un
                 }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     PillButton("Name it") { renaming = true }
+                    val pairingOn by session.pairingSupported.collectAsStateWithLifecycle()
+                    if (pairingOn) PillButton("Rename this phone") { renamingPhone = true }
                     PillButton("Pair again", onClick = onRepair)
                     PillButton("Unpair") { confirmUnpair = true }
                 }
@@ -296,6 +310,25 @@ fun SettingsScreen(session: TowerSession, theme: String, onTheme: (String) -> Un
             text = { OutlinedTextField(text, { text = it.take(40) }, singleLine = true, label = { Text("The Mac's name") }) },
             confirmButton = { TextButton(onClick = { session.renameTower(text); renaming = false }) { Text("Save") } },
             dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
+        )
+    }
+    if (renamingPhone) {
+        var text by remember { mutableStateOf(creds?.deviceName.orEmpty()) }
+        AlertDialog(
+            onDismissRequest = { renamingPhone = false },
+            title = { Text("This phone's name on the Mac") },
+            text = { OutlinedTextField(text, { text = it.take(40) }, singleLine = true, label = { Text("As Settings → Phone on the Mac lists it") }) },
+            confirmButton = {
+                TextButton(enabled = text.isNotBlank(), onClick = {
+                    renamingPhone = false
+                    scope.launch {
+                        session.renameDevice(text)
+                            .onSuccess { snack("The Mac calls this phone “${text.trim()}” now.") }
+                            .onFailure { snack("Couldn't rename it: ${TowerSession.describe(it)}") }
+                    }
+                }) { Text("Save") }
+            },
+            dismissButton = { TextButton(onClick = { renamingPhone = false }) { Text("Cancel") } },
         )
     }
     if (confirmUnpair) {

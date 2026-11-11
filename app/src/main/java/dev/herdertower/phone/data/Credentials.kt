@@ -175,8 +175,24 @@ class Settings(context: Context) {
         get() = prefs.getString("last_route", null)
         set(v) = prefs.edit { putString("last_route", v) }
 
+    /**
+     * This install's own id, made once and kept (unpairing keeps it too):
+     * sent when pairing, so pairing again, here or on another network, re-pairs
+     * the same device on the Mac instead of adding one more.
+     */
+    val installId: String
+        get() = prefs.getString("install_id", null)?.takeIf { it.matches(INSTALL_ID) }
+            ?: ByteArray(16).also { java.security.SecureRandom().nextBytes(it) }
+                .let { java.util.Base64.getUrlEncoder().withoutPadding().encodeToString(it) } // 22 characters
+                .also { prefs.edit { putString("install_id", it) } }
+
     /** Whether the phone should be the tower's voice (restored on launch). */
     var voice: Boolean
         get() = prefs.getBoolean("voice", false)
         set(v) = prefs.edit { putBoolean("voice", v) }
+
+    private companion object {
+        /** What the tower takes: 8 to 64 letters, digits, - and _. */
+        val INSTALL_ID = Regex("[A-Za-z0-9_-]{8,64}")
+    }
 }

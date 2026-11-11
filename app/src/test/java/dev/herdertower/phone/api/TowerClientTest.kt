@@ -54,6 +54,36 @@ class TowerClientTest {
         assertEquals("""{"code":"48213907","name":"Pixel 9"}""", req.body!!.utf8())
     }
 
+    @Test fun pairingAgainNamesThisInstall() = runBlocking {
+        token = null
+        server.enqueue(json("""{"token": "htk_new", "device": {"id": "d_3fa9c2e1", "name": "Pixel 9"}, "fingerprint": "$fp", "api": 1, "repaired": true}"""))
+        val r = client().pair("48213907", "Pixel 9", installId = "4f1c2a9e0b7d4e1f")
+        assertTrue("the same device, re-paired in place", r.repaired)
+        assertEquals("d_3fa9c2e1", r.device.id)
+        assertEquals("""{"code":"48213907","name":"Pixel 9","install_id":"4f1c2a9e0b7d4e1f"}""", taken().body!!.utf8())
+        server.enqueue(json("""{"hosts":[{"kind":"lan","host":"10.10.30.116","port":7843}],"network":{"range":"10.10.30","name":"Office","lan":{"host":"10.10.30.116","port":7843}},"magic_dns":"mac.tailnet.ts.net"}"""))
+        token = "htk_new"
+        val n = client().network()
+        assertEquals("/v1/network", taken().url.encodedPath)
+        assertEquals("Office", n.network?.label)
+        assertEquals("10.10.30.116", n.network?.lan?.host)
+        assertEquals("the network 10.10.30.x", TowerNetwork("10.10.30", null).label)
+        // The pair answer says where the tower is now, as GET /v1/network does.
+        val p = TowerJson.decodeFromString(PairResponse.serializer(), """{"token":"htk_q","device":{"id":"d_92b42279","name":"OnePlus"},"fingerprint":"$fp","api":1,
+            "features":["quiet","acts","pairing"],"repaired":false,"hosts":[{"kind":"lan","host":"10.10.30.116","port":7843}],
+            "network":{"range":"10.10.30","name":"Office","lan":{"host":"10.10.30.116","port":7843}},"magic_dns":null}""")
+        assertEquals("Office", p.network?.name)
+        assertEquals(listOf("10.10.30.116"), p.hosts?.map { it.host })
+        assertTrue(p.features.orEmpty().contains("pairing"))
+        // This phone's name on the Mac.
+        server.enqueue(json("""{"device":{"id":"d_92b42279","name":"Work phone"}}"""))
+        assertEquals("Work phone", client().renameDevice("Work phone").name)
+        val req = taken()
+        assertEquals("PATCH", req.method)
+        assertEquals("/v1/device", req.url.encodedPath)
+        assertEquals("""{"name":"Work phone"}""", req.body!!.utf8())
+    }
+
     @Test fun aWrongCodeSaysHowManyTriesAreLeft() = runBlocking {
         server.enqueue(json("""{"error": {"code": "wrong_code", "message": "that isn't the code on the Mac", "tries_left": 4}}""", 403))
         try {

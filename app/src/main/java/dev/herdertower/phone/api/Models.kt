@@ -23,7 +23,12 @@ val TowerJson = Json {
 data class Device(val id: String = "", val name: String = "")
 
 @Serializable
-data class PairRequest(val code: String, val name: String)
+data class PairRequest(
+    val code: String,
+    val name: String,
+    /** Made once per install and kept: pairing again with it re-pairs the same device on the Mac. */
+    @SerialName("install_id") val installId: String? = null,
+)
 
 @Serializable
 data class PairResponse(
@@ -33,7 +38,19 @@ data class PairResponse(
     val api: Int = 1,
     /** What this tower has beyond the first v1 (`quiet`); null from a tower before features. */
     val features: List<String>? = null,
+    /** This install was paired here before: the same device, re-paired in place. */
+    val repaired: Boolean = false,
+    /** Where the tower is now: merged into the QR's addresses, and the network named from the first pairing. */
+    val hosts: List<TowerHost>? = null,
+    val network: TowerNetwork? = null,
+    @SerialName("magic_dns") val magicDns: String? = null,
 )
+
+@Serializable
+data class RenameRequest(val name: String)
+
+@Serializable
+data class DeviceResponse(val device: Device = Device())
 
 @Serializable
 data class Hello(
@@ -116,6 +133,8 @@ data class TowerState(
     @SerialName("decisions_count") val decisionsCount: Int? = null,
     /** How much the tower tells the user: `decisions`, `results` or `everything`. Null from a tower before it. */
     @SerialName("tell_level") val tellLevel: String? = null,
+    /** The network the Mac is on (a tower with `pairing`). */
+    val network: TowerNetwork? = null,
     /** What the tower says out loud: `off`, `decisions` or `replies`. Null from a tower before it. */
     @SerialName("tell_voice") val tellVoice: String? = null,
     /** The brains' model, as `GET /v1/model` reports it. */
@@ -303,9 +322,16 @@ data class StreamHello(
     val voice: Boolean = false,
     /** What this tower has beyond the first v1; a tower from before features sends none: read as none. */
     val features: List<String>? = null,
+    /** The Mac's addresses now and the network it is on (a tower that has them): merged into the stored ones. */
+    val hosts: List<TowerHost>? = null,
+    val network: TowerNetwork? = null,
+    @SerialName("magic_dns") val magicDns: String? = null,
 ) {
     /** The Quiet Tower: decisions, missions, threads, launches, the tell level and the model. */
     val quiet: Boolean get() = features.orEmpty().contains("quiet")
+
+    /** Pairing on more than one network: install ids, the Mac's addresses as they change, renaming the phone. */
+    val pairing: Boolean get() = features.orEmpty().contains("pairing")
 
     /** Receipts for commands, with undo; rules from answers; the tower's voice level. */
     val acts: Boolean get() = features.orEmpty().contains("acts")

@@ -105,6 +105,18 @@ class TowerEventTest {
         assertEquals("decisions", s.tellVoice)
     }
 
+    @Test fun theMacsAddressesComeWithHelloAndChange() {
+        val h = (TowerEvent.decode(RawEvent(null, "hello", """{"api":1,"features":["quiet"],"hosts":[{"kind":"lan","host":"10.10.30.116","port":7843},{"kind":"tailscale","host":"100.68.110.33","port":7843}],
+            "network":{"range":"10.10.30","name":"Office","lan":{"host":"10.10.30.116","port":7843}}}""")) as TowerEvent.Hello).hello
+        assertEquals(listOf("10.10.30.116", "100.68.110.33"), h.hosts?.map { it.host })
+        assertEquals("Office", h.network?.name)
+        val e = TowerEvent.decode(RawEvent(null, "hosts", """{"hosts":[{"kind":"lan","host":"192.168.2.211","port":7843}],"network":{"range":"192.168.2","name":null,"lan":{"host":"192.168.2.211","port":7843}},"magic_dns":null}""")) as TowerEvent.HostsChanged
+        assertEquals("192.168.2.211", e.update.hosts.single().host)
+        assertEquals("the network 192.168.2.x", e.update.network?.label)
+        // An older tower's hello has neither.
+        assertEquals(null, (TowerEvent.decode(RawEvent(null, "hello", """{"api":1}""")) as TowerEvent.Hello).hello.hosts)
+    }
+
     @Test fun aThreadMessageAndAnAction() {
         val t = TowerEvent.decode(RawEvent(null, "thread", """{"space":"fix-login","message":{"id":"h22","at":1794369749048,"from":"t3","from_name":"fix login eyzflow",
             "to":"t4","to_name":"fix login mediaroom","text":"Which port does the api listen on?","space":"fix-login","delivered":true}}""")) as TowerEvent.ThreadAdded

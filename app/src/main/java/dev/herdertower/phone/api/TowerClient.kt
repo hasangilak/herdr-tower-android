@@ -144,10 +144,17 @@ class TowerClient(
     // Pairing
 
     /** `POST /v1/pair`: trades the code shown on the Mac for this phone's token (returned once). */
-    suspend fun pair(code: String, name: String): PairResponse {
-        val req = request(url("pair"), auth = false).post(json(PairRequest.serializer(), PairRequest(code, name))).build()
+    suspend fun pair(code: String, name: String, installId: String? = null): PairResponse {
+        val req = request(url("pair"), auth = false).post(json(PairRequest.serializer(), PairRequest(code, name, installId))).build()
         return call(http, req, PairResponse.serializer())
     }
+
+    /** `PATCH /v1/device`: this phone's name on the Mac. */
+    suspend fun renameDevice(name: String): Device =
+        call(http, request(url("device")).patch(json(RenameRequest.serializer(), RenameRequest(name))).build(), DeviceResponse.serializer()).device
+
+    /** `GET /v1/network`: the Mac's addresses now and the network it is on. */
+    suspend fun network(): HostsUpdate = get(HostsUpdate.serializer(), "network")
 
     // Reading
 

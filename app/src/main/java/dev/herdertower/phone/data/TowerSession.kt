@@ -317,7 +317,9 @@ class TowerSession(
             return
         }
         // On Tailscale and the LAN answers again (home): the direct path.
-        if (route.tailscale && Hosts.candidates(c.hosts, c.magicDns, null).filter { !it.tailscale }.any { probe(c, it).outcome == RouteOutcome.Answered }) {
+        // Only this network's LAN address: another network's would just time out.
+        val ranges = net.localRanges()
+        if (route.tailscale && Hosts.candidates(c.hosts, c.magicDns, null, ranges).filter { !it.tailscale && (ranges.isEmpty() || it.range in ranges) }.any { probe(c, it).outcome == RouteOutcome.Answered }) {
             kick.trySend(Unit)
         }
     }
@@ -394,7 +396,7 @@ class TowerSession(
 
     private suspend fun pick(c: Credentials): Pick {
         val avoid = avoidRoute.also { avoidRoute = null }
-        val all = Hosts.candidates(c.hosts, c.magicDns, settings.lastRoute).sortedBy { it.id == avoid }
+        val all = Hosts.candidates(c.hosts, c.magicDns, settings.lastRoute, net.localRanges()).sortedBy { it.id == avoid }
         if (all.size <= 1) return Pick.Found(all.firstOrNull() ?: c.hosts.first())
         val tries = mutableListOf<RouteTry>()
         var got = ""
@@ -419,10 +421,24 @@ class TowerSession(
         return clientAt(c, h).also { client = it }
     }
 
-    /** The tower's current addresses (state `lan_hosts`): stored, so the next connect tries them; the stream stays. */
-    private fun learnHosts(fresh: List<TowerHost>, dns: String?) {
+    private val _pairingSupported = MutableStateFlow(false)
+    /** Whether the tower has `pairing`: renaming this phone from here, among the rest. */
+    val pairingSupported: StateFlow<Boolean> = _pairingSupported.asStateFlow()
+
+    private val _network = MutableStateFlow<dev.herdertower.phone.api.TowerNetwork?>(null)
+    /** The network the Mac is on, as the tower says it (hello, the `hosts` event); null from a tower that doesn't. */
+    val network: StateFlow<dev.herdertower.phone.api.TowerNetwork?> = _network.asStateFlow()
+
+    /**
+     * The tower's current addresses (hello, the `hosts` event, state
+     * `lan_hosts`): merged into the stored ones, so the next connect tries
+     * them; the stream stays. Over Tailscale the phone learns the Mac's new
+     * LAN address before it needs it, and another network's is remembered.
+     */
+    private fun learnHosts(fresh: List<TowerHost>, dns: String?, network: dev.herdertower.phone.api.TowerNetwork? = null) {
+        if (network != null) _network.value = network
         val c = _creds.value ?: return
-        val hosts = Hosts.refresh(c.hosts, fresh)
+        val hosts = Hosts.refresh(c.hosts, fresh, network ?: _network.value)
         val magic = dns?.trim()?.trimEnd('.')?.takeIf { it.isNotEmpty() } ?: hosts.firstNotNullOfOrNull { it.dnsName } ?: c.magicDns
         if (hosts == c.hosts && magic == c.magicDns) return
         val next = c.copy(hosts = hosts, magicDns = magic)
@@ -464,7 +480,9 @@ class TowerSession(
                     if (ev is TowerEvent.Hello) {
                         // What this tower has is checked once, on connecting: the Quiet Tower, or the calls from before it.
                         quiet(ev.hello.quiet)
+                        ev.hello.hosts?.let { learnHosts(it, ev.hello.magicDns, ev.hello.network) } ?: ev.hello.network?.let { _network.value = it }
                         _actsSupported.value = ev.hello.acts
+                        _pairingSupported.value = ev.hello.pairing
                         live = true
                         route?.let {
                             _activeRoute.value = ActiveRoute(it)
@@ -538,6 +556,7 @@ class TowerSession(
                 }
                 ev.state.tellLevel?.let { _tell.value = it }
                 ev.state.tellVoice?.let { _tellVoice.value = it }
+                ev.state.network?.let { _network.value = it }
                 ev.state.brainModel?.let { _model.value = it }
                 if (before != null && before.agents.map { it.address to it.status } != ev.state.agents.map { it.address to it.status }) refreshSoon()
             }
@@ -589,6 +608,7 @@ class TowerSession(
             }
             is TowerEvent.ActionChanged -> setAction(ev.action)
             is TowerEvent.ActChanged -> setAct(ev.act)
+            is TowerEvent.HostsChanged -> learnHosts(ev.update.hosts, ev.update.magicDns, ev.update.network)
             is TowerEvent.Hello, TowerEvent.Ping, is TowerEvent.Unknown -> {}
         }
     }
@@ -1523,13 +1543,24 @@ class TowerSession(
      */
     suspend fun pair(hosts: List<TowerHost>, magicDns: String?, fingerprint: String, code: String, name: String): Result<Credentials> = try {
         require(hosts.isNotEmpty()) { "No address to pair with." }
-        val tries = Hosts.candidates(hosts, magicDns, null)
+        // The same tower (its certificate) seen before: its stored addresses are tried too, after the QR's. A QR
+        // shown at the office still pairs when the Mac has gone home since (the code is the same either way).
+        val known = _creds.value?.takeIf { Fingerprint.matches(it.fingerprint, fingerprint) }
+        val tries = (Hosts.candidates(hosts, magicDns, null, net.localRanges()) +
+            known?.let { Hosts.candidates(it.hosts, it.magicDns, settings.lastRoute, net.localRanges()) }.orEmpty()).distinctBy { it.id }
         var answered: Pair<TowerHost, dev.herdertower.phone.api.PairResponse>? = null
         var lastError: Exception? = null
         for ((i, h) in tries.withIndex()) {
             val last = i == tries.lastIndex
             try {
-                val r = TowerClient(Endpoint(h.host, h.port, fingerprint), { null }, connectTimeoutMs = if (last) 5_000 else PROBE_CONNECT_MS).pair(code, name)
+                val pc = TowerClient(Endpoint(h.host, h.port, fingerprint), { null }, connectTimeoutMs = if (last) 5_000 else PROBE_CONNECT_MS)
+                // This install's id: the Mac re-pairs the same device instead of adding another. A tower that
+                // refuses the field (a strict older one) is asked again without it.
+                val r = try {
+                    pc.pair(code, name, settings.installId)
+                } catch (e: TowerApiException) {
+                    if (e.status == 400 && e.code != "wrong_code") pc.pair(code, name) else throw e
+                }
                 answered = h to r
                 break
             } catch (e: UnreachableException) {
@@ -1543,12 +1574,18 @@ class TowerSession(
         if (fp != null && !Fingerprint.matches(fp, fingerprint)) {
             throw SSLMismatch(CertificateMismatchException(fingerprint, fp))
         }
-        val first = hosts.first()
-        val c = Credentials(first.host, first.port, fingerprint, r.token, r.device.id, r.device.name.ifBlank { name }, hosts, magicDns)
         val before = _creds.value
+        // The same tower (the same certificate) paired again, on this network or another: one entry, its addresses
+        // from the QR first and the other networks it was seen on kept.
+        val sameTower = before != null && Fingerprint.matches(before.fingerprint, fingerprint)
+        // Then where the answer says the tower is now (a tower with `pairing`): its addresses, and the network's name.
+        r.network?.let { _network.value = it }
+        val fromQr = if (sameTower) Hosts.refresh(before!!.hosts, hosts, r.network ?: _network.value) else Hosts.refresh(hosts, hosts, r.network)
+        val merged = r.hosts?.let { Hosts.refresh(fromQr, it, r.network) } ?: fromQr
+        val first = merged.first()
+        val c = Credentials(first.host, first.port, fingerprint, r.token, r.device.id, r.device.name.ifBlank { name }, merged, r.magicDns ?: magicDns ?: before?.magicDns?.takeIf { sameTower })
         store.save(c)
         client = clientAt(c, via)
-        val sameTower = before != null && before.fingerprint == c.fingerprint && before.hosts.any { b -> c.hosts.any { it.id == b.id } }
         // The old pairing's token is revoked on its tower (best effort, it may be off): another tower's always,
         // the same tower's when this pairing is a new device there (pairing again over a revoked token is a no-op).
         if (before != null && before.token != c.token && (!sameTower || before.deviceId != c.deviceId)) {
@@ -1561,6 +1598,7 @@ class TowerSession(
         }
         // Another tower (or the same one again): nothing from before carries over.
         forgetTower(sameTower = sameTower)
+        r.network?.let { _network.value = it }
         settings.lastRoute = via.id
         _creds.value = c
         guessName(c.host)
@@ -1569,6 +1607,16 @@ class TowerSession(
         throw e
     } catch (e: Exception) {
         Result.failure(e)
+    }
+
+    /** This phone's name on the Mac (`PATCH /v1/device`), kept here too. */
+    suspend fun renameDevice(name: String): Result<Unit> = act { it.renameDevice(name.trim()) }.map { d ->
+        _creds.value?.let { c ->
+            val next = c.copy(deviceName = d.name.ifBlank { name.trim() })
+            store.save(next)
+            _creds.value = next
+        }
+        Unit
     }
 
     /** Forgets the tower; with [tellTower] also revokes this phone's token on the Mac first. */
@@ -1611,7 +1659,11 @@ class TowerSession(
         queue = emptyList()
         _decisions.value = emptyList()
         _decisionsSupported.value = null
-        decisionNotices.forget()
+        // The same tower paired again keeps what was seen: its decisions don't all notify a second time.
+        if (!sameTower) {
+            decisionNotices.forget()
+            _network.value = null
+        }
         _missions.value = MissionsResponse()
         _missionsSupported.value = null
         _tell.value = null

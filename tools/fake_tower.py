@@ -46,6 +46,7 @@ def save_tokens():
     with open(_tokens_file(), "w") as f:
         json.dump(TOKENS, f)
 SUBS = []  # (queue, voice)
+LINK_HOST = ["10.0.2.2", 7899]
 CLIPS = {}
 LOCK = threading.Lock()
 
@@ -1235,6 +1236,18 @@ def act_undo(act, force):
             "kept_worktrees": kept, "space_closed": False}, None
 
 
+NETWORK = {"range": None, "name": "Office", "lan": None}
+
+
+def network_view():
+    """The Mac's addresses and the network it is on (hello, the hosts event, GET /v1/network)."""
+    hs = STATE.get("lan_hosts") or [{"kind": "lan", "host": LINK_HOST[0], "port": LINK_HOST[1]}]
+    lan = next((h for h in hs if h["kind"] == "lan"), None)
+    r = ".".join(lan["host"].split(".")[:3]) if lan and lan["host"].count(".") == 3 else None
+    net = dict(NETWORK, range=NETWORK.get("range") or r, lan={"host": lan["host"], "port": lan["port"]} if lan else None)
+    return {"hosts": hs, "network": net, "magic_dns": (STATE.get("tailscale") or {}).get("dns_name"), "tailscale": STATE.get("tailscale") or {"installed": False, "running": False}}
+
+
 def quiet_route(h, method, seg, q, b):
     """The Quiet Tower calls (docs/mobile-api.md, "The Quiet Tower"); True when handled."""
     body = json.loads(b or b"{}") if method in ("POST", "PUT") and not h.headers.get("Content-Type", "").startswith("multipart/") else {}
@@ -1504,6 +1517,15 @@ class H(BaseHTTPRequestHandler):
         if seg[:1] != ["v1"]:
             return self.err(404, "not_found", "no such path")
         seg = seg[1:]
+        if (method, seg) == ("POST", ["fake", "network"]):
+            # The Mac moved (another network, Tailscale on or off): {"hosts": [...], "name": "Home"}; the hosts event says so.
+            d = json.loads(self.body() or b"{}")
+            if "hosts" in d:
+                STATE["lan_hosts"] = d["hosts"]
+            NETWORK["name"] = d.get("name", NETWORK["name"])
+            NETWORK["range"] = d.get("range")
+            publish("hosts", network_view())
+            return self.send(200, network_view())
         if (method, seg) == ("POST", ["fake", "pr"]):
             # Drive a PR's state for screenshots: {"key": "example/api#88", "checks": {...}, "waiting": true, ...}.
             d = json.loads(self.body() or b"{}")
@@ -1525,14 +1547,27 @@ class H(BaseHTTPRequestHandler):
             return self.send(200, {"decision": d_view(DECISIONS[did])})
         if (method, seg) == ("POST", ["pair"]):
             b = json.loads(self.body() or b"{}")
+            iid = b.get("install_id")
+            # A bad install id is refused before the code is used.
+            if iid is not None and not re.fullmatch(r"[A-Za-z0-9_-]{8,64}", str(iid)):
+                return self.err(400, "bad_install_id", "install_id is 8 to 64 letters, digits, - and _")
             if b.get("code") != CODE:
                 return self.err(403, "wrong_code", "that isn't the code on the Mac", tries_left=4)
             tok = "htk_" + secrets.token_urlsafe(32)
-            dev = {"id": "d_" + secrets.token_hex(4), "name": b.get("name", "phone")}
+            # The same install paired before: that device, re-paired in place (its old token refused from now on).
+            old = next(((t, d) for t, d in TOKENS.items() if iid and d.get("install_id") == iid), None)
+            if old:
+                del TOKENS[old[0]]
+                dev = dict(old[1], name=b.get("name", old[1]["name"]))
+            else:
+                dev = {"id": "d_" + secrets.token_hex(4), "name": b.get("name", "phone"), **({"install_id": iid} if iid else {})}
             TOKENS[tok] = dev
             save_tokens()
-            print(f"paired {dev['name']} ({dev['id']})", flush=True)
-            return self.send(200, {"token": tok, "device": dev, "fingerprint": FP, "api": 1, **({"features": ["quiet", "acts"]} if QUIET[0] else {})})
+            print(f"{'re-paired' if old else 'paired'} {dev['name']} ({dev['id']})", flush=True)
+            nv = network_view() if QUIET[0] else {}
+            nv.pop("tailscale", None)
+            return self.send(200, {"token": tok, "device": {"id": dev["id"], "name": dev["name"]}, "fingerprint": FP, "api": 1, "repaired": bool(old),
+                                   **({"features": ["quiet", "acts", "pairing"], **nv} if QUIET[0] else {})})
         dev = self.device()
         if dev is None:
             return self.err(401, "unauthorized", "unknown token")
@@ -1548,9 +1583,11 @@ class H(BaseHTTPRequestHandler):
             if quiet_route(self, method, seg, q, self.body() if method in ("POST", "PUT") else b""):
                 return
         if method == "GET":
+            if seg == ["network"] and QUIET[0]:
+                return self.send(200, network_view())
             if seg == ["hello"]:
                 return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS), "audio_route": ROUTE.get(dev["id"], "phone"),
-                                       **({"features": ["quiet", "acts"]} if QUIET[0] else {})})
+                                       **({"features": ["quiet", "acts", "pairing"]} if QUIET[0] else {})})
             if seg == ["device", "audio"]:
                 return self.send(200, {"route": ROUTE.get(dev["id"], "phone")})
             if seg == ["audio"]:
@@ -1669,6 +1706,14 @@ class H(BaseHTTPRequestHandler):
                 return self.err(400, "bad_route", "route is phone or mac")
             ROUTE[dev["id"]] = r
             return self.send(200, {"route": r})
+        if method in ("PATCH", "PUT") and seg == ["device"] and QUIET[0]:
+            name = (json.loads(self.body() or b"{}").get("name") or "").strip()
+            if not name:
+                return self.err(400, "bad_name", "a name is needed")
+            dev["name"] = name
+            save_tokens()
+            print(f"renamed {dev['id']}: {name}", flush=True)
+            return self.send(200, {"device": {"id": dev["id"], "name": name}})
         if (method, seg) == ("DELETE", ["device"]):
             for t, d in list(TOKENS.items()):
                 if d is dev:
@@ -1697,7 +1742,7 @@ class H(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts"]} if QUIET[0] else {})})
+            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts", "pairing"], **network_view()} if QUIET[0] else {})})
             out("state", STATE)
             if QUIET[0]:
                 # Right after the first state: the whole open list (a muted space's marked), then the missions.
@@ -1733,6 +1778,9 @@ class H(BaseHTTPRequestHandler):
     def do_PUT(self):
         self.route("PUT")
 
+    def do_PATCH(self):
+        self.route("PATCH")
+
 
 def cert():
     os.makedirs(CERT_DIR, exist_ok=True)
@@ -1764,6 +1812,7 @@ if __name__ == "__main__":
     ThreadingHTTPServer.request_queue_size = 128
     srv = ThreadingHTTPServer((a.host, a.port), H)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
+    LINK_HOST[:] = [a.link_host, a.port]
     link = f"herdertower://pair?h={a.link_host}&p={a.port}&c={CODE}&fp={FP}"
     if a.hosts:
         # As the tower on its tower-tailscale branch: h/p the first address, then hosts= and dns= (docs/mobile-api.md).

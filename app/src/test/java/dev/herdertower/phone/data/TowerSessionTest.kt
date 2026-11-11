@@ -252,6 +252,21 @@ class TowerSessionTest {
         assertTrue(s.questions.value.isEmpty())
     }
 
+    @Test fun aQrOfTheSameTowerFromAnotherNetworkStillPairsThroughTheStoredAddress() = runBlocking {
+        extra = { r -> if (r.url.encodedPath == "/v1/pair") json("""{"token": "htk_again", "device": {"id": "d_test", "name": "test phone"}, "fingerprint": "$fp", "api": 1, "repaired": true}""") else null }
+        val s = session(voice = false)
+        // The QR names the office address, where nothing answers now; the Mac has gone home, which the phone knows.
+        val office = dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", 1)
+        val r = s.pair(listOf(office), null, fp, "12345678", "test phone")
+        assertTrue("${r.exceptionOrNull()}", r.isSuccess)
+        assertEquals("htk_again", s.credentials.value?.token)
+        assertEquals("the same device, re-paired in place", "d_test", s.credentials.value?.deviceId)
+        val body = calls.first { it.startsWith("POST /v1/pair") }
+        assertTrue(body, body.contains("\"install_id\""))
+        // Both addresses kept: the office's (for when the Mac is back there) and the one that answered.
+        assertEquals(setOf("127.0.0.1:1", "${server.hostName}:${server.port}"), s.credentials.value?.hosts?.map { it.id }?.toSet())
+    }
+
     @Test fun pairingWithAnotherTowerRevokesTheOldToken() = runBlocking {
         // A second tower, with its own certificate.
         val otherCert = HeldCertificate.Builder().commonName("herder-tower").ecdsa256().build()
@@ -267,7 +282,7 @@ class TowerSessionTest {
         try {
             val s = session(voice = false)
             val result = s.pair(dev.herdertower.phone.api.Endpoint(other.hostName, other.port, otherFp), "12345678", "test phone")
-            assertTrue(result.isSuccess)
+            assertTrue("${result.exceptionOrNull()?.let { it.javaClass.name + ": " + it.message + " @ " + it.stackTrace.take(4).joinToString(" < ") }}", result.isSuccess)
             assertEquals("htk_new", s.credentials.value?.token)
             // The first tower is told to forget this phone, with the old token.
             until(what = "the old token revoked") { others.any { it.first == "DELETE" && it.second == "/v1/device" } }
@@ -419,7 +434,7 @@ class TowerSessionTest {
         s.setForeground(true)
         until(what = "retrying") { s.link.value is Link.Retrying }
         val reason = (s.link.value as Link.Retrying).reason
-        assertTrue(reason, reason.startsWith("Can't reach the Mac. Is the phone on the Mac's Wi-Fi"))
+        assertTrue(reason, reason.startsWith(RouteWords.OTHER_NETWORK))
     }
 
     @Test fun theTowersAddressesAreLearntWithoutReopeningTheStream() {
@@ -492,6 +507,22 @@ class TowerSessionTest {
             assertTrue("moved in ${System.currentTimeMillis() - at} ms", System.currentTimeMillis() - at < 8_000)
             assertTrue("no retry card while moving: $seen", seen.none { it is Link.Retrying })
         }
+    }
+
+    @Test fun theMacsNewAddressesAreMergedInWithoutMovingTheStream() {
+        val here = "{\"kind\":\"lan\",\"host\":\"${server.hostName}\",\"port\":${server.port}}"
+        val hello = "event: hello\ndata: {\"api\":1,\"device\":\"d_test\",\"voice\":false,\"features\":[\"quiet\"],\"hosts\":[$here],\"network\":{\"range\":null,\"name\":\"Office\"}}\n\n"
+        // Then the Mac's addresses change: Tailscale on, and the hosts event says so.
+        val later = "event: hosts\ndata: {\"hosts\":[$here,{\"kind\":\"tailscale\",\"host\":\"100.68.110.33\",\"port\":${server.port}}],\"network\":{\"range\":null,\"name\":\"Office\"},\"magic_dns\":\"mac.tailnet.ts.net\"}\n\n"
+        answers = listOf({ stream(hello, state(muted = false), later = later, laterMs = 600) })
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "live") { s.link.value == Link.Live(false) }
+        assertEquals("Office", s.network.value?.name)
+        until(what = "the tailnet address learnt") { s.credentials.value?.hosts?.any { it.tailscale } == true }
+        assertEquals("mac.tailnet.ts.net", s.credentials.value?.magicDns)
+        assertEquals("Office", s.credentials.value?.hosts?.first()?.seenName)
+        assertEquals("the stream stays", 1, streams.size)
     }
 
     @Test fun aNetworkChangeOnAHealthyRouteChangesNothing() {

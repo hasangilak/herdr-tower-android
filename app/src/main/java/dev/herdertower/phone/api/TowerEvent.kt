@@ -24,6 +24,8 @@ sealed interface TowerEvent {
     data class ThreadAdded(val event: ThreadEvent) : TowerEvent
     /** An act changed: another session joined it, it can't be undone lightly any more, or it was undone. */
     data class ActChanged(val act: Act) : TowerEvent
+    /** The Mac's addresses changed (another network, Tailscale on or off). */
+    data class HostsChanged(val update: HostsUpdate) : TowerEvent
     /** A launch or a close a phone started moved a step. */
     data class ActionChanged(val action: TowerAction) : TowerEvent
     data object Hush : TowerEvent
@@ -49,6 +51,7 @@ sealed interface TowerEvent {
                 "decisions" -> DecisionsChanged(DecisionsApi.event(raw.data))
                 "missions" -> MissionsChanged(MissionsApi.event(raw.data))
                 "act" -> ActChanged(TowerJson.decodeFromString(Act.serializer(), raw.data).also { require(it.id.isNotBlank()) })
+                "hosts" -> HostsChanged(TowerJson.decodeFromString(HostsUpdate.serializer(), raw.data))
                 "thread" -> ThreadAdded(TowerJson.decodeFromString(ThreadEvent.serializer(), raw.data))
                 "action" -> ActionChanged(TowerJson.decodeFromString(TowerAction.serializer(), raw.data).also { require(it.id.isNotBlank()) })
                 "hush" -> Hush
