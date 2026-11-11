@@ -152,6 +152,12 @@ class HostsTest {
         assertTrue("Tailscale is never dropped", many.any { it.tailscale })
     }
 
+    @Test fun whenEachLastAnsweredSurvivesAFreshList() {
+        val stored = listOf(TowerHost("lan", "10.10.30.116", 7843, lastOkMs = 5), ts.copy(lastOkMs = 7))
+        val merged = Hosts.refresh(stored, listOf(TowerHost("lan", "10.10.30.116", 7843), ts))
+        assertEquals(listOf(5L, 7L), merged.map { it.lastOkMs })
+    }
+
     @Test fun thisNetworksAddressIsTriedFirstAndAnothersAfterTailscale() {
         val home = TowerHost("lan", "192.168.2.211", 7843, seenRange = "192.168.2")
         val office = TowerHost("lan", "10.10.30.116", 7843, seenRange = "10.10.30")

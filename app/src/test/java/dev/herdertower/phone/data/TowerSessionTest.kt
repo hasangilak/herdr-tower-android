@@ -374,6 +374,51 @@ class TowerSessionTest {
         return s
     }
 
+    /** Bonjour on this network: the towers it finds, and how often it was asked. */
+    private class FakeFinder(val found: () -> List<FoundTower>) : TowerFinder {
+        var asked = 0
+        override suspend fun find(fingerprint: String, timeoutMs: Long): List<FoundTower> {
+            asked++
+            return found().filter { true }
+        }
+    }
+
+    @Test fun pairedAtTheOfficeAtHomeTheTowerIsFoundByBonjourWithoutPairingAgain() {
+        // The old app's pairing: one address, the office's, where nothing answers now.
+        val office = dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort())
+        val here = dev.herdertower.phone.api.TowerHost("lan", server.hostName, server.port)
+        val finder = FakeFinder { listOf(FoundTower(here, "Hassan's MacBook")) }
+        val first = office
+        val creds = Credentials(first.host, first.port, fp, "htk_test", "d_test", "test phone", listOf(office), null)
+        val store = FakeStore(creds)
+        val s = TowerSession(FakeContext(), store, Settings(FakeContext()), FakeNet(false, false), finder)
+        sessions += s
+        s.setForeground(true)
+        until(timeoutMs = 10_000, what = "live at the found address") { s.link.value == Link.Live(false) }
+        assertEquals(1, finder.asked)
+        assertEquals("the same token: no pairing again", "htk_test", s.credentials.value?.token)
+        // Both kept: home found here, and the office for when the phone is back there.
+        val ids = s.credentials.value!!.hosts.map { it.id }
+        assertTrue("$ids", here.id in ids && office.id in ids)
+        assertEquals(here.id, s.activeRoute.value?.host?.id)
+        assertTrue("stored for next time", store.saved?.hosts?.any { it.id == here.id } == true)
+        assertTrue("answered just now", s.credentials.value!!.hosts.first { it.id == here.id }.lastOkMs != null)
+    }
+
+    @Test fun anotherMacsTowerOrNoneFoundLeavesTheCard() {
+        val office = dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort())
+        val other = dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort())
+        // A finder that returns an address that doesn't answer: nothing is stored.
+        val finder = FakeFinder { listOf(FoundTower(other, null)) }
+        val creds = Credentials(office.host, office.port, fp, "htk_test", "d_test", "test phone", listOf(office), null)
+        val s = TowerSession(FakeContext(), FakeStore(creds), Settings(FakeContext()), FakeNet(false, false), finder)
+        sessions += s
+        s.setForeground(true)
+        until(timeoutMs = 10_000, what = "the retry card") { s.link.value is Link.Retrying }
+        assertEquals(listOf(office.id), s.credentials.value?.hosts?.map { it.id })
+        assertTrue((s.link.value as Link.Retrying).reason.startsWith(RouteWords.OTHER_NETWORK))
+    }
+
     @Test fun aLanThatIsntThereFallsBackToTailscaleAndIsRemembered() {
         val s = sessionAt(listOf(
             dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort()),

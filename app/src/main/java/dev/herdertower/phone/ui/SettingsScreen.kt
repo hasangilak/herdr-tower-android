@@ -68,6 +68,40 @@ object SettingsModel {
         if (m.restartNeeded) add("Restarting starts each brain on a new conversation; for a few seconds a space's own tower is away.")
     }
 
+    /** One network of the pairing, as Settings lists it. */
+    data class NetworkRow(val title: String, val address: String, val status: String, val now: Boolean)
+
+    /**
+     * The pairing's networks: one row per stored address (its network's name,
+     * or its range; Tailscale), and how it stands: reached now, when it last
+     * answered, or that it didn't answer on the last try.
+     */
+    fun networks(
+        hosts: List<dev.herdertower.phone.api.TowerHost>,
+        magicDns: String?,
+        active: dev.herdertower.phone.api.TowerHost?,
+        tries: List<dev.herdertower.phone.data.RouteTry>,
+        now: Long,
+    ): List<NetworkRow> = hosts.map { h ->
+        val title = when {
+            h.tailscale -> "Tailscale"
+            !h.seenName.isNullOrBlank() -> h.seenName!!
+            h.range != null -> "The network ${h.range}.x"
+            else -> "Wi-Fi"
+        }
+        val name = (h.dnsName ?: magicDns?.takeIf { h.tailscale })?.takeIf { it != h.host }
+        val address = h.host + (if (h.port != dev.herdertower.phone.api.PairLink.DEFAULT_PORT) ":${h.port}" else "") + (name?.let { " · $it" } ?: "")
+        val here = active != null && (active.id == h.id || (active.tailscale && h.tailscale))
+        val failed = tries.lastOrNull { it.host.id == h.id }?.takeIf { it.outcome != dev.herdertower.phone.data.RouteOutcome.Answered }
+        val status = when {
+            here -> "connected now"
+            failed != null -> "no answer here" + (h.lastOkMs?.let { " · last ${ago(it, now)}" } ?: "")
+            h.lastOkMs != null -> "last answered ${ago(h.lastOkMs, now)}"
+            else -> "from the pairing"
+        }
+        NetworkRow(title, address, status, here)
+    }
+
     /** "on the Office network", "on Wi-Fi", "over Tailscale": which network the tower is reached on. */
     fun reachedOn(tailscale: Boolean, network: String?): String {
         val net = network?.takeIf { it.isNotBlank() }?.let { if (it.startsWith("the ")) it else "the $it network" }
@@ -214,15 +248,29 @@ fun SettingsScreen(session: TowerSession, theme: String, onTheme: (String) -> Un
                     style = MaterialTheme.typography.bodyLarge, color = tc.text,
                 )
                 creds?.let { c ->
-                    Words("${c.deviceName} · ${dev.herdertower.phone.api.Hosts.describe(c.hosts, c.magicDns)}")
-                    // Out of reach: what each address did on the last try (refused, no answer, blocked by Android…).
+                    // The pairing: every network the tower was reached on, and how each stands now.
                     val tries by session.routeTries.collectAsStateWithLifecycle()
-                    if (link !is Link.Live && tries.isNotEmpty()) Words("Last try: " + tries.joinToString(" · ") { it.line })
+                    val now = rememberNow(true)
+                    Text("Networks it is reached on", style = MaterialTheme.typography.labelLarge, color = tc.faint)
+                    SettingsModel.networks(c.hosts, c.magicDns, if (link is Link.Live) v?.host else null, tries, now).forEach { row ->
+                        Row(Modifier.fillMaxWidth().padding(vertical = 2.dp), verticalAlignment = Alignment.Top) {
+                            Column(Modifier.weight(1f)) {
+                                Text(row.title, style = MaterialTheme.typography.bodyLarge, color = tc.text)
+                                Text(row.address, style = MaterialTheme.typography.bodySmall, color = tc.muted)
+                            }
+                            Text(row.status, style = MaterialTheme.typography.labelMedium, color = if (row.now) tc.live else tc.faint)
+                        }
+                    }
+                    Words("This phone is ${c.deviceName.ifBlank { "paired" }} there. Back on one of these networks it connects by itself; on a new one it looks for the Mac first.")
                 }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     PillButton("Name it") { renaming = true }
                     val pairingOn by session.pairingSupported.collectAsStateWithLifecycle()
                     if (pairingOn) PillButton("Rename this phone") { renamingPhone = true }
+                }
+                // The last way: only when the Mac can't be found from here at all.
+                Words("Pairing again is only needed when the phone can't find the Mac on any network: it keeps this pairing.")
+                FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     PillButton("Pair again", onClick = onRepair)
                     PillButton("Unpair") { confirmUnpair = true }
                 }

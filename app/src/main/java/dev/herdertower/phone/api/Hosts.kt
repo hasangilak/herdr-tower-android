@@ -19,6 +19,8 @@ data class TowerHost(
     /** Kept here, not sent by the tower: the network a LAN address was seen on (its range, `10.10.30`), and its name there ("Office"). */
     @SerialName("seen_range") val seenRange: String? = null,
     @SerialName("seen_name") val seenName: String? = null,
+    /** Kept here too: when the tower last answered at this address (the phone's own record). */
+    @SerialName("last_ok_ms") val lastOkMs: Long? = null,
 ) {
     val tailscale: Boolean get() = kind == TAILSCALE
 
@@ -172,7 +174,8 @@ object Hosts {
         val now = clean.map { h ->
             if (h.tailscale) h else {
                 val range = rangeOf(h.host) ?: network?.range
-                h.copy(seenRange = range, seenName = network?.name?.takeIf { network.range == null || network.range == range } ?: stored.firstOrNull { it.id == h.id }?.seenName)
+                val before = stored.firstOrNull { it.id == h.id }
+                h.copy(seenRange = range, seenName = network?.name?.takeIf { network.range == null || network.range == range } ?: before?.seenName, lastOkMs = h.lastOkMs ?: before?.lastOkMs)
             }
         }
         val nowRanges = now.filter { !it.tailscale }.mapNotNull { it.range }.toSet()
@@ -183,7 +186,8 @@ object Hosts {
         // address while it lists only the tailnet (Wi-Fi off, an exit node).
         val keepTail = stored.filter { s -> s.tailscale && now.none { it.tailscale } }
         val lans = (now.filter { !it.tailscale } + otherLans).distinctBy { it.range ?: it.id }.take(MAX_NETWORKS)
-        return (lans + now.filter { it.tailscale } + keepTail).distinctBy { it.id }
+        val tails = now.filter { it.tailscale }.map { h -> h.copy(lastOkMs = h.lastOkMs ?: stored.firstOrNull { it.id == h.id }?.lastOkMs) }
+        return (lans + tails + keepTail).distinctBy { it.id }
     }
 }
 

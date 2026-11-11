@@ -111,6 +111,8 @@ class TowerSession(
     val settings: Settings,
     /** The phone's side of Tailscale (whether its VPN is up), for saying why the Mac can't be reached. */
     private val net: PhoneNet = SystemPhoneNet(context),
+    /** Finds the tower on this network by Bonjour when no stored address answers. */
+    private val finder: TowerFinder = NsdTowerFinder(context),
 ) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -411,7 +413,51 @@ class TowerSession(
         } finally {
             _routeTries.value = tries.toList()
         }
-        return if (tries.all { it.outcome == RouteOutcome.OtherCertificate }) Pick.Mismatch(got) else Pick.Nowhere(unreachable(c))
+        if (tries.all { it.outcome == RouteOutcome.OtherCertificate }) return Pick.Mismatch(got)
+        // Nothing stored answers: on Wi-Fi the Mac may be here under an address the phone hasn't seen.
+        discover(c)?.let { return Pick.Found(it) }
+        return Pick.Nowhere(unreachable(c))
+    }
+
+    /** When a Bonjour search last ran: once in a while, not on every retry. */
+    @Volatile private var lastDiscoveryMs = 0L
+
+    /**
+     * Looks for the paired tower on this network by Bonjour (its certificate's
+     * fingerprint in the service's TXT): one that answers, pinned as always,
+     * with this phone's token, is stored as this network's address. No pairing
+     * again. Null: not on Wi-Fi, searched a moment ago, or not found.
+     */
+    private suspend fun discover(c: Credentials): TowerHost? {
+        if (net.onWifi() == false) return null
+        val now = System.currentTimeMillis()
+        if (now - lastDiscoveryMs < DISCOVERY_EVERY_MS) return null
+        lastDiscoveryMs = now
+        val found = runCatching { finder.find(c.fingerprint, DISCOVERY_MS) }.getOrDefault(emptyList())
+        for (f in found) {
+            val t = probe(c, f.host)
+            _routeTries.value = _routeTries.value.filterNot { it.host.id == t.host.id } + t
+            if (t.outcome != RouteOutcome.Answered) continue
+            val cur = _creds.value ?: return null
+            val next = cur.copy(hosts = Hosts.refresh(cur.hosts, listOf(f.host.copy(lastOkMs = System.currentTimeMillis())), null))
+            store.save(next)
+            _creds.value = next
+            f.name?.let { if (settings.towerName.isBlank()) _towerName.value = it }
+            Log.i(TAG, "found the tower on this network by Bonjour")
+            return f.host
+        }
+        return null
+    }
+
+    /** The tower answered at [h]: noted on the stored address (its "last answered"). */
+    private fun answeredAt(h: TowerHost) {
+        val c = _creds.value ?: return
+        val now = System.currentTimeMillis()
+        // A MagicDNS name tried in place of the tailnet entry counts for it.
+        val id = c.hosts.firstOrNull { it.id == h.id }?.id ?: c.hosts.firstOrNull { h.tailscale && it.tailscale }?.id ?: return
+        val next = c.copy(hosts = c.hosts.map { if (it.id == id) it.copy(lastOkMs = now) else it })
+        store.save(next)
+        _creds.value = next
     }
 
     /** The client for [h], kept while the route stays the same. */
@@ -487,6 +533,7 @@ class TowerSession(
                         route?.let {
                             _activeRoute.value = ActiveRoute(it)
                             settings.lastRoute = it.id
+                            answeredAt(it)
                         }
                         attempt = 0
                         failing = null
@@ -513,8 +560,14 @@ class TowerSession(
                 if (!live && route != null && _routeTries.value.none { it.host == route }) {
                     _routeTries.value = listOf(RouteTry(route!!, RouteOutcome.of(e), System.currentTimeMillis()))
                 }
+                // Its one address didn't answer: the Mac may be on this network under another (Bonjour). Found and
+                // stored: straight on to it, no retry card.
+                if (!live && route != null && creds.hosts.size <= 1 && discover(creds) != null) {
+                    switching = true
+                    ""
+                }
                 // Never got through this time: say what the phone can do about it (Tailscale off, another network).
-                if (live) e.message ?: "Connection lost." else e.message?.takeIf { it.startsWith("Can't reach the Mac") || it.startsWith("Secure connection failed") } ?: unreachable(creds)
+                else if (live) e.message ?: "Connection lost." else e.message?.takeIf { it.startsWith("Can't reach the Mac") || it.startsWith("Secure connection failed") } ?: unreachable(creds)
             } catch (e: Exception) {
                 e.message ?: "Connection lost."
             }
@@ -1733,6 +1786,9 @@ class TowerSession(
         private const val ANSWERED_HOLD_MS = 5_000L
         /** How often an action is asked about while it runs, and for how long at most. */
         private const val ACTION_POLL_MS = 2_000L
+        /** A Bonjour search: how long it listens, and how often at most. */
+        private const val DISCOVERY_MS = 4_000L
+        private const val DISCOVERY_EVERY_MS = 30_000L
         private const val ACTION_WATCH_MS = 15 * 60_000L
 
         /** The stream to keep open: the voice whenever this phone is it (on screen or not), else the feed while on screen or lingering. */

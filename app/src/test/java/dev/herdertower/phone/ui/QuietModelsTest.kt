@@ -125,6 +125,24 @@ class QuietModelsTest {
         assertTrue(DecisionModel.answerable(Decision(kind = "choice")) && DecisionModel.answerable(Decision()))
     }
 
+    @Test fun thePairingListsEachNetworkAndHowItStands() {
+        fun t(kind: String, host: String, port: Int, dns: String? = null, seenRange: String? = null, seenName: String? = null, lastOkMs: Long? = null) =
+            dev.herdertower.phone.api.TowerHost(kind, host, port, dns, seenRange, seenName, lastOkMs)
+        val now = 1_794_400_000_000L
+        val office = t("lan", "10.10.30.116", 7843, seenRange = "10.10.30", seenName = "Office", lastOkMs = now - 6 * 3_600_000)
+        val home = t("lan", "192.168.2.211", 7843, seenRange = "192.168.2", lastOkMs = now - 20_000)
+        val old = t("lan", "192.168.1.9", 7843)
+        val ts = t("tailscale", "100.68.110.33", 7843, "mac.tailnet.ts.net")
+        val tries = listOf(dev.herdertower.phone.data.RouteTry(office, dev.herdertower.phone.data.RouteOutcome.TimedOut, now))
+        val rows = SettingsModel.networks(listOf(home, office, old, ts), null, home, tries, now)
+        assertEquals(listOf("The network 192.168.2.x", "Office", "The network 192.168.1.x", "Tailscale"), rows.map { it.title })
+        assertEquals(listOf("connected now", "no answer here · last 6 h ago", "from the pairing", "from the pairing"), rows.map { it.status })
+        assertEquals("100.68.110.33 · mac.tailnet.ts.net", rows[3].address)
+        assertTrue(rows[0].now)
+        // Out of reach: when each last answered.
+        assertEquals("last answered just now", SettingsModel.networks(listOf(home), null, null, emptyList(), now).single().status)
+    }
+
     @Test fun aCommandsReplyCarriesItsAct() {
         val act = dev.herdertower.phone.api.Act(id = "r1", line = "Opened notes fix in M5 Pro.", undo = dev.herdertower.phone.api.ActUndo(true))
         val thread = listOf(
