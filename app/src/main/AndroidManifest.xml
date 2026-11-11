@@ -66,6 +66,11 @@
             <meta-data android:name="android.support.FILE_PROVIDER_PATHS" android:resource="@xml/file_paths" />
         </provider>
 
+        <!-- An answer tapped on a decision's notification. -->
+        <receiver
+            android:name=".data.DecisionNotices$Receiver"
+            android:exported="false" />
+
         <service
             android:name=".voice.VoiceService"
             android:exported="false"

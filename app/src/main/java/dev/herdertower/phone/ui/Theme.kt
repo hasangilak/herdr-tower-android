@@ -70,6 +70,17 @@ data class TowerColors(
     val screen: Color,
     val screenText: Color,
     val scrim: Color,
+    /** What's the user's to decide: the queue's count, a card's first answer. Amber, as on the Mac. */
+    val decision: Color,
+    val onDecision: Color,
+    /** The same amber as text or an outline on the background. */
+    val decisionInk: Color,
+    /** The talk button, and a chosen toggle. */
+    val talk: Color,
+    val onTalk: Color,
+    /** Listening now, or at work. */
+    val live: Color,
+    val onLive: Color,
 ) {
     /** A session's or job's status. */
     fun status(status: String?): Color = when (status) {
@@ -110,6 +121,13 @@ val DarkTower = TowerColors(
     screen = Color(0xFF0E0907),
     screenText = Color(0xFFF3E6DA),
     scrim = Color.Black.copy(alpha = 0.55f),
+    decision = Color(0xFFFFCF70),
+    onDecision = Color(0xFF2B1503),
+    decisionInk = Color(0xFFFFCF70),
+    talk = Color(0xFFFFF6EE),
+    onTalk = Color(0xFF2B1810),
+    live = Color(0xFF59D9FF),
+    onLive = Color(0xFF0B2230),
 )
 
 val LightTower = TowerColors(
@@ -138,6 +156,13 @@ val LightTower = TowerColors(
     screen = Color(0xFF2A1A12),
     screenText = Color(0xFFF7EADF),
     scrim = Color.Black.copy(alpha = 0.35f),
+    decision = Color(0xFFFFC04D),
+    onDecision = Color(0xFF2B1503),
+    decisionInk = Color(0xFF7A3F00),
+    talk = Color(0xFF2B1810),
+    onTalk = Color.White,
+    live = Color(0xFF0E7C9B),
+    onLive = Color.White,
 )
 
 val NAVY = Color(0xFF16233A) // text on the Mac's account hues
@@ -225,7 +250,9 @@ fun glowFor(phase: String, needsYou: Boolean): Color = when {
     phase == "listening" || phase == "armed" -> Color(0xFF59D9FF)
     phase == "speaking" -> Color(0xFFA39EFF)
     phase == "announcing" -> Color(0xFFFFB347)
-    phase == "blocked" || needsYou -> Color(0xFFF0705F)
+    phase == "blocked" -> Color(0xFFF0705F)
+    // A decision waits: the amber of the queue.
+    needsYou -> Color(0xFFFFB347)
     phase == "thinking" || phase == "transcribing" -> Color(0xFFFFA860)
     phase == "off" -> Color(0xFF8A7B70)
     else -> Color(0xFFE0702A)

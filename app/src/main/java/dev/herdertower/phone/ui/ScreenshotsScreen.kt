@@ -82,10 +82,27 @@ import dev.herdertower.phone.data.Link
 import dev.herdertower.phone.data.TowerSession
 import kotlinx.coroutines.launch
 
-/** All the screenshots sessions sent (or one session's), as a grid; tap for the viewer. */
+/** What the Shots tab says under its title. */
+object ShotsModel {
+    /** "6 today", "14 shots", "None yet". */
+    fun count(shots: List<Screenshot>, now: Long = System.currentTimeMillis()): String {
+        val today = shots.count { dayLabel(it.at) == dayLabel(now) }
+        return when {
+            shots.isEmpty() -> "None yet"
+            today > 0 -> "$today today"
+            else -> plural(shots.size, "shot")
+        }
+    }
+}
+
+/**
+ * Shots: what sessions sent, newest first, as a grid; tap one for full
+ * size. With [onlySession] one session's; [onBack] when it was opened from
+ * another screen (the tab itself has none).
+ */
 @OptIn(androidx.compose.material3.ExperimentalMaterial3Api::class)
 @Composable
-fun ScreenshotsScreen(session: TowerSession, onlySession: String?, open: String?, onBack: () -> Unit) {
+fun ScreenshotsScreen(session: TowerSession, onlySession: String?, open: String?, onBack: (() -> Unit)?) {
     val all by session.screenshots.collectAsStateWithLifecycle()
     val acc = rememberAccounts(session)
     val scope = rememberCoroutineScope()
@@ -95,21 +112,18 @@ fun ScreenshotsScreen(session: TowerSession, onlySession: String?, open: String?
     LaunchedEffect(Unit) { session.refreshLists() }
 
     Box(Modifier.fillMaxSize()) {
-        Column(Modifier.fillMaxSize().statusBarsPadding()) {
-            SubHeader("Screenshots", if (shots.isEmpty()) "None yet" else plural(shots.size, "screenshot"), onBack)
+        Column(Modifier.fillMaxSize()) {
+            TopBar("Shots", ShotsModel.count(shots), onBack = onBack)
             PullToRefreshBox(refreshing, { refreshing = true; scope.launch { session.refreshLists(); refreshing = false } }, Modifier.fillMaxSize()) {
                 LazyVerticalGrid(
-                    GridCells.Adaptive(160.dp),
+                    GridCells.Adaptive(150.dp),
                     Modifier.fillMaxSize(),
-                    contentPadding = PaddingValues(start = 20.dp, end = 20.dp, top = 8.dp, bottom = 40.dp),
+                    contentPadding = PaddingValues(start = 14.dp, end = 14.dp, top = 4.dp, bottom = 16.dp),
                     horizontalArrangement = Arrangement.spacedBy(14.dp),
                     verticalArrangement = Arrangement.spacedBy(18.dp),
                 ) {
                     if (shots.isEmpty()) item(span = { GridItemSpan(maxLineSpan) }) {
-                        Column(Modifier.padding(top = 80.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                            Text("No screenshots yet", style = MaterialTheme.typography.headlineSmall, color = tc.text)
-                            Text("When a session changes something you can see, it sends a picture here.", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
-                        }
+                        EmptyBox("No shots yet. When a session changes something you can see, it sends a picture here.")
                     }
                     items(shots, key = { it.id }) { s -> ShotCard(session, s, acc) { viewing = s.id } }
                 }
@@ -131,7 +145,7 @@ private fun ShotCard(session: TowerSession, s: Screenshot, acc: AccountLookup, o
         Thumb(session, s, Modifier.fillMaxWidth().aspectRatio(0.8f))
         Text(s.caption.ifBlank { "Screenshot" }, Modifier.padding(horizontal = 6.dp), style = MaterialTheme.typography.bodyMedium, color = tc.text, fontWeight = FontWeight.Medium, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Row(Modifier.padding(start = 6.dp, end = 4.dp, bottom = 6.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(6.dp)) {
-            Text(listOf(s.who, ago(s.at)).filter { it.isNotBlank() }.joinToString(" · "), Modifier.weight(1f, fill = false), style = MaterialTheme.typography.labelMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(listOf(s.space.orEmpty(), s.who, ago(s.at)).filter { it.isNotBlank() }.joinToString(" · "), Modifier.weight(1f, fill = false), style = MaterialTheme.typography.labelMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
             (s.account ?: s.session?.let { acc.of(it) })?.let { AccountBadge(it, it == acc.default) }
         }
     }

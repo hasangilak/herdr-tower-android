@@ -83,43 +83,6 @@ import kotlinx.coroutines.launch
 import kotlinx.coroutines.selects.select
 import kotlinx.coroutines.withContext
 
-/** A question a session asks, as a card: who asks, what, the tower's pick, its state. Opens the stepper. */
-@Composable
-fun QuestionCard(q: Question, onOpen: () -> Unit, modifier: Modifier = Modifier, compact: Boolean = false) {
-    GlassCard(modifier.fillMaxWidth(), highlighted = true, onClick = onOpen) {
-        Column(verticalArrangement = Arrangement.spacedBy(if (compact) 4.dp else 8.dp)) {
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Icon(Icons.AutoMirrored.Filled.HelpOutline, null, Modifier.size(18.dp), tint = tc.accentHi.takeIf { tc.dark } ?: tc.accent)
-                Spacer(Modifier.width(8.dp))
-                Text("${q.who} asks", Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = tc.text, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(QuestionModel.kindWord(q), style = MaterialTheme.typography.labelMedium, color = tc.faint)
-            }
-            Text(q.headline, style = if (compact) MaterialTheme.typography.bodyLarge else MaterialTheme.typography.titleMedium, color = tc.text, maxLines = if (compact) 1 else 3, overflow = TextOverflow.Ellipsis)
-            val words = QuestionModel.statusWords(q)
-            when {
-                words != null -> Text(words, style = MaterialTheme.typography.bodySmall, color = if (q.status == "failed") tc.failed else tc.muted)
-                q.recommendations == null -> Row(verticalAlignment = Alignment.CenterVertically) {
-                    CircularProgressIndicator(Modifier.size(12.dp), strokeWidth = 1.5.dp, color = tc.muted)
-                    Spacer(Modifier.width(8.dp))
-                    Text("Thinking of answers…", style = MaterialTheme.typography.bodySmall, color = tc.muted)
-                }
-                else -> q.recommendationsFor(0).firstOrNull()?.let { r ->
-                    Text("I'd say: ${r.label}", style = MaterialTheme.typography.bodySmall, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                }
-            }
-        }
-    }
-}
-
-/** The questions left to the user, as cards, oldest first. */
-@Composable
-fun QuestionCards(questions: List<Question>, onOpen: (String) -> Unit, modifier: Modifier = Modifier, compact: Boolean = false) {
-    if (questions.isEmpty()) return
-    Column(modifier, verticalArrangement = Arrangement.spacedBy(10.dp)) {
-        questions.forEach { q -> QuestionCard(q, { onOpen(q.id) }, compact = compact) }
-    }
-}
-
 /**
  * Answering a question set: one step per question (the tower's three
  * recommendations as big one-tap answers, the dialog's own options, and

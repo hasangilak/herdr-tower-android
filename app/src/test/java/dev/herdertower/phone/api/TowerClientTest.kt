@@ -11,6 +11,7 @@ import okhttp3.tls.HandshakeCertificates
 import okhttp3.tls.HeldCertificate
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertNull
 import org.junit.Assert.assertTrue
 import org.junit.Assert.fail
@@ -501,5 +502,247 @@ class TowerClientTest {
         server.enqueue(json("""{"pr":{"key":"o/app#12","base":"main"}}"""))
         assertEquals("main", client().pr(PrRef("o", "app", 12))?.base)
         assertEquals("/v1/prs/o/app/12", taken().url.encodedPath)
+    }
+
+    // Quiet Tower (herder-tower docs/mobile-api.md, "The Quiet Tower")
+
+    @Test fun readsTheQueueAndOneSpacesOwn() = runBlocking {
+        server.enqueue(json("""{"space":null,"count":1,"decisions":[{"id":"d1","kind":"permission","space":"sandbox","title":"Allow one read","options":[{"label":"Allow once","pick":true}],"state":"open","muted":false}]}"""))
+        val q = client().decisions()
+        assertEquals(listOf("d1"), q.decisions.map { it.id })
+        assertEquals(1, q.count)
+        assertEquals("/v1/decisions", taken().url.encodedPath)
+        server.enqueue(json("""{"space":"industrial landing/page","count":0,"decisions":[]}"""))
+        assertTrue(client().decisions("industrial landing/page").decisions.isEmpty())
+        val req = taken()
+        assertEquals("industrial landing/page", req.url.queryParameter("space"))
+    }
+
+    @Test fun answersAndDismissesADecision() = runBlocking {
+        // A choice: its words went to each waiting session (the second was busy: it gets them when it stops).
+        server.enqueue(json("""{"ok":true,"id":"d-db","state":"answered","answer":"Tabs","sent":[{"session":"t3","name":"fix login eyzflow","queue_id":3,"sent":true},
+            {"session":"t4","name":"fix login mediaroom","queue_id":4,"sent":false}],"errors":[]}"""))
+        val r = client().answerDecision("d-db", DecisionsApi.choiceBody(0))
+        assertEquals("answered", r.state)
+        assertEquals("Tabs", r.answer)
+        assertEquals(listOf(true, false), r.sent.map { it.sent })
+        var req = taken()
+        assertEquals("POST", req.method)
+        assertEquals("/v1/decisions/d-db/answer", req.url.encodedPath)
+        assertEquals("""{"choice":0}""", req.body!!.utf8())
+        // An id with a slash and a hash (a PR's key) stays one path segment.
+        server.enqueue(json("""{"ok":true,"state":"answering"}"""))
+        client().answerDecision("merge:o/app#12", DecisionsApi.otherBody("not yet"))
+        req = taken()
+        assertEquals("/v1/decisions/merge:o%2Fapp%2312/answer", req.url.encodedPath)
+        assertEquals("""{"other":"not yet"}""", req.body!!.utf8())
+        server.enqueue(json("""{"dismissed":"d-db","state":"dismissed"}"""))
+        client().dismissDecision("d-db")
+        req = taken()
+        assertEquals("DELETE", req.method)
+        assertEquals("/v1/decisions/d-db", req.url.encodedPath)
+        // Over already: the 409 says how, beside its code.
+        server.enqueue(json("""{"error":{"code":"closed","message":"d-db is answered already","state":"answered"}}""", 409))
+        try {
+            client().answerDecision("d-db", DecisionsApi.choiceBody(1))
+            fail()
+        } catch (e: TowerApiException) {
+            assertEquals(409, e.status)
+            assertEquals("closed", e.code)
+            assertEquals("answered", e.word("state"))
+        }
+    }
+
+    @Test fun aTowerFromBeforeTheQueueAnswers404() = runBlocking {
+        server.enqueue(json("""{"error":{"code":"not_found","message":"no GET /v1/decisions"}}""", 404))
+        try {
+            client().decisions()
+            fail()
+        } catch (e: TowerApiException) {
+            assertEquals(404, e.status)
+        }
+    }
+
+    @Test fun missionsTheirThreadAndWhatChangesThem() = runBlocking {
+        server.enqueue(json("""{"spaces":[{"name":"sandbox","goal":"A plan","state":"open","needs":1,"sessions":[{"address":"s1","name":"eyzflow","status":"done","worktree":"eyzflow@sandbox","port":3010}],"thread_count":33}],"quiet":["b2c"],"closed_today":[]}"""))
+        val m = client().missions()
+        assertEquals("sandbox", m.spaces.single().name)
+        assertEquals(3010, m.spaces.single().sessions.single().port)
+        assertEquals("/v1/missions", taken().url.encodedPath)
+
+        server.enqueue(json("""{"space":"sandbox","more":true,"messages":[{"id":"h23","at":5,"from":"s2","from_name":"mediaroom","to":"s1","to_name":"eyzflow","text":"Answers on stale writes.","space":"sandbox","delivered":false}]}"""))
+        val t = client().thread("sandbox", limit = 20, before = "h40")
+        assertEquals("mediaroom → eyzflow", t.messages.single().who)
+        assertEquals("h23", t.messages.single().id)
+        assertFalse(t.messages.single().delivered)
+        assertTrue(t.more)
+        var req = taken()
+        assertEquals("sandbox", req.url.queryParameter("space"))
+        assertEquals("20", req.url.queryParameter("limit"))
+        assertEquals("h40", req.url.queryParameter("before"))
+
+        // goal, follow and mute answer with a short result and the mission as it is now.
+        server.enqueue(json("""{"space":"M5 Pro","follow":true,"mission":{"name":"M5 Pro","goal":"Rethink","standing":true,"follow":true,"tower":{"name":"tower-m5-pro","status":"ready","address":"t9"}}}"""))
+        val followed = client().follow("M5 Pro", true)!!
+        assertEquals(true, followed.follow)
+        assertTrue(followed.ownTower)
+        req = taken()
+        assertEquals("/v1/spaces/M5%20Pro/follow", req.url.encodedPath)
+        assertEquals("""{"on":true}""", req.body!!.utf8())
+
+        server.enqueue(json("""{"space":"isa","mute":false,"mission":null}"""))
+        assertNull("a closed space has no mission: the caller reads them again", client().muteSpace("isa", false))
+        assertEquals("""{"on":false}""", taken().body!!.utf8())
+
+        server.enqueue(json("""{"space":"isa","goal":"Voice clips, live","done_when":"the tour plays","standing":false,"state":"open","report":"","mission":{"name":"isa","goal":"Voice clips, live","done_when":"the tour plays"}}"""))
+        assertEquals("the tour plays", client().setGoal("isa", "Voice clips, live", "the tour plays", standing = false)!!.doneWhen)
+        assertEquals("""{"goal":"Voice clips, live","done_when":"the tour plays","standing":false}""", taken().body!!.utf8())
+
+        // A close answers at once with its action; the receipt comes when it's done.
+        server.enqueue(json("""{"action":{"id":"act_e7cd9e2e","kind":"close","space":"isa","state":"running","plan":null,"receipt":null,"error":null,"by":"phone:d_1","started_ms":1,"finished_ms":null}}""", 202))
+        val close = client().closeSpace("isa")
+        assertEquals("act_e7cd9e2e", close.id)
+        assertTrue(close.running)
+        req = taken()
+        assertEquals("POST", req.method)
+        assertEquals("/v1/spaces/isa/close", req.url.encodedPath)
+        assertEquals("""{"force":false}""", req.body!!.utf8())
+        server.enqueue(json("""{"error":{"code":"busy","message":"isa isn't closed: mediaroom (t4) is working.","sessions":[{"address":"t4","name":"mediaroom","status":"working"}]}}""", 409))
+        try {
+            client().closeSpace("isa", force = true)
+            fail()
+        } catch (e: TowerApiException) {
+            assertEquals("busy", e.code)
+            assertEquals(listOf("t4"), e.list("sessions") { TowerJson.decodeFromJsonElement(BusySession.serializer(), it) }.map { it.address })
+        }
+        assertEquals("""{"force":true}""", taken().body!!.utf8())
+        server.enqueue(json("""{"action":{"id":"act_e7cd9e2e","kind":"close","space":"isa","state":"done","receipt":{"closed":"isa","sessions_ended":[{"address":"t3","name":"eyzflow"}],
+            "sessions_left":[],"herdr_space":"closed","worktrees_removed":["/w/.tower-worktrees/isa/eyzflow"],"kept_worktrees":[{"path":"/w/.tower-worktrees/isa/mediaroom","branch":"isa/mediaroom","repo":"/w/mediaroom","why":"2 commits on no remote"}],
+            "requests_closed":["a1"],"tower_ended":["tower-isa"],"report":""}}}"""))
+        val done = client().action("act_e7cd9e2e")
+        assertEquals("/v1/actions/act_e7cd9e2e", taken().url.encodedPath)
+        assertEquals("2 commits on no remote", done.closed?.keptWorktrees?.single()?.why)
+        assertNull(done.launch)
+    }
+
+    @Test fun setupsLaunchAndTheTellLevel() = runBlocking {
+        server.enqueue(json("""{"setups":[{"name":"eyzflow + mediaroom on orca","account":"orca","repos":["~/Work/eyz/eyzflow","~/Work/eyz/eyz-mediaroom-serverless"]}]}"""))
+        assertEquals(Setup("eyzflow + mediaroom on orca", "orca", listOf("~/Work/eyz/eyzflow", "~/Work/eyz/eyz-mediaroom-serverless")), client().setups().single())
+        taken()
+
+        // A dry run: the plan, nothing opened.
+        server.enqueue(json("""{"space":"fix-login","goal":"Fix the login redirect","made":true,"dry_run":true,"agenda":null,
+            "sessions":[{"name":"fix-login-eyzflow","repo":"/w/eyz/eyzflow","address":null,"account":"orca","worktree":"/w/.tower-worktrees/fix-login/eyzflow","branch":"fix-login/eyzflow","port":null,"task":null,"error":null}],
+            "assumed":{"setup":"eyzflow + mediaroom on orca","setup_why":"the first of 2","account":"orca","account_why":"the setup's","name":"fix-login","name_why":"the goal's first two words, small ones left out","worktrees":true,"worktrees_why":"one per repo, on a branch of its own"}}"""))
+        val plan = client().launchPlan("Fix the login redirect", setup = "eyzflow + mediaroom on orca")
+        assertEquals("fix-login", plan.space)
+        assertEquals("eyzflow", plan.sessions.single().folder)
+        assertEquals("the first of 2", plan.assumed.setupWhy)
+        assertEquals("""{"goal":"Fix the login redirect","setup":"eyzflow + mediaroom on orca","dry_run":true}""", taken().body!!.utf8())
+        // For real: the action, at once.
+        server.enqueue(json("""{"action":{"id":"act_3cbc0b4e","kind":"launch","space":"fix-login","state":"running","plan":{"space":"fix-login","sessions":[{"name":"fix-login-eyzflow","repo":"/w/eyz/eyzflow"}]},"receipt":null,"error":null,"started_ms":1}}""", 202))
+        val a = client().launch("Fix the login redirect")
+        assertEquals("act_3cbc0b4e", a.id)
+        assertEquals("fix-login", a.launch?.space)
+        // Only a goal: nothing else is sent, and nothing is asked.
+        assertEquals("""{"goal":"Fix the login redirect"}""", taken().body!!.utf8())
+
+        server.enqueue(json("""{"level":"decisions"}"""))
+        assertEquals("decisions", client().tell().level)
+        assertEquals("GET", taken().method)
+        server.enqueue(json("""{"level":"results","voice":"replies","was":"decisions"}"""))
+        assertEquals("results", client().setTell(level = "results").level)
+        var req = taken()
+        assertEquals("POST", req.method)
+        assertEquals("""{"level":"results"}""", req.body!!.utf8())
+        // What it says out loud, by itself.
+        server.enqueue(json("""{"level":"results","voice":"decisions","voice_was":"replies"}"""))
+        assertEquals("decisions", client().setTell(voice = "decisions").voice)
+        req = taken()
+        assertEquals("""{"voice":"decisions"}""", req.body!!.utf8())
+    }
+
+    private val act = """{"id":"r3f9a2c1b7d04","kind":"start","at_ms":1794371414922,"by":"tower","space":"M5 Pro","line":"Opened notes fix in M5 Pro.",
+        "sessions":[{"address":"t9","name":"notes-fix","label":"notes fix","worktree":null,"branch":null}],
+        "assumed":[{"what":"account","value":"orca","why":"what \"second\" names"},{"what":"folder","value":"notes","why":"the best match for \"notes\""}],
+        "request":{"at":1794371413527,"text":"open a session in the notes project on my second account"},"state":"done","undo":{"possible":true,"why":null},"closing":null,"undone_ms":null}"""
+
+    @Test fun actsTheirUndoAndRules() = runBlocking {
+        server.enqueue(json("""{"acts":[$act]}"""))
+        val a = client().acts().single()
+        assertEquals("/v1/acts", taken().url.encodedPath)
+        assertEquals("Opened notes fix in M5 Pro.", a.line)
+        assertEquals(listOf("account orca", "folder notes"), a.assumed.map(ActsApi::chip))
+        assertEquals("notes fix", a.sessions.single().shown)
+        assertTrue(a.undo.possible && !a.undone)
+        server.enqueue(json("""{"act":${act.replace("\"done\"", "\"undone\"").replace("\"closing\":null", "\"closing\":\"Closed it. Nothing else changed.\"")},
+            "closing":"Closed it. Nothing else changed.","sessions_ended":["t9"],"worktrees_removed":[],"kept_worktrees":[{"path":"/w/notes","why":"1 uncommitted change"}],"space_closed":false}"""))
+        val u = client().undoAct(a.id)
+        var req = taken()
+        assertEquals("/v1/acts/r3f9a2c1b7d04/undo", req.url.encodedPath)
+        assertEquals("""{"force":false}""", req.body!!.utf8())
+        assertTrue(u.act.undone)
+        assertEquals("1 uncommitted change", u.keptWorktrees.single().why)
+        server.enqueue(json("""{"error":{"code":"held","message":"not undone","sessions":[{"address":"t7","name":"fix-login-eyzflow","why":"1 uncommitted change (notes.txt)"}]}}""", 409))
+        try {
+            client().undoAct(a.id, force = true)
+            fail()
+        } catch (e: TowerApiException) {
+            assertEquals("held", e.code)
+            assertEquals("1 uncommitted change (notes.txt)", e.list("sessions") { TowerJson.decodeFromJsonElement(HeldSession.serializer(), it) }.single().why)
+        }
+        assertEquals("""{"force":true}""", taken().body!!.utf8())
+        server.enqueue(json("""{"sent":"Make this a rule: …","space":"Shop"}""", 202))
+        assertEquals("Shop", client().decisionRule("d1", "A sidebar").space)
+        req = taken()
+        assertEquals("/v1/decisions/d1/rule", req.url.encodedPath)
+        assertEquals("""{"answer":"A sidebar"}""", req.body!!.utf8())
+    }
+
+    @Test fun theBrainsModel() = runBlocking {
+        server.enqueue(json("""{"program":"claude","model":"claude-opus-5-5","effort":"high","choices":{"models":[{"id":"claude-fable-5-2","label":"Fable 5.2"},{"id":"claude-opus-5-5","label":"Opus 5.5"}],"efforts":["low","medium","high","xhigh","max"]},
+            "running":[{"brain":"tower","space":null,"address":"t1","model":"claude-opus-5-5","effort":"high","restart":false}],"restart_needed":false,"locked_by_args":false,"locked":{"model":null,"effort":null},
+            "says":"The tower's brain runs on Opus 5.5 at high effort.","restarted":[]}"""))
+        val m = client().model()
+        assertEquals("Opus 5.5", m.modelLabel)
+        assertEquals(5, m.choices.efforts.size)
+        assertEquals("/v1/model", taken().url.encodedPath)
+        server.enqueue(json("""{"model":"claude-fable-5-2","effort":"xhigh","restart_needed":true,"says":"… applies when it restarts.","restarted":[]}"""))
+        assertTrue(client().setModel("claude-fable-5-2", "xhigh").restartNeeded)
+        assertEquals("""{"model":"claude-fable-5-2","effort":"xhigh"}""", taken().body!!.utf8())
+        server.enqueue(json("""{"model":"claude-fable-5-2","effort":"xhigh","restart_needed":false,"restarted":["tower","tower-fix-login"]}"""))
+        assertEquals(listOf("tower", "tower-fix-login"), client().setModel(restart = true).restarted)
+        assertEquals("""{"restart":true}""", taken().body!!.utf8())
+    }
+
+    @Test fun aSpacesOwnConversationAndTheMainOne() = runBlocking {
+        server.enqueue(json("""{"messages":[{"id":"h24","role":"user","kind":"request","text":"What is left here?","space":"fix-login"}],"more":false}"""))
+        assertEquals("fix-login", client().chat(space = "fix-login").messages.single().space)
+        var req = taken()
+        assertEquals("fix-login", req.url.queryParameter("space"))
+        assertNull(req.url.queryParameter("main"))
+        server.enqueue(json("""{"messages":[],"more":false}"""))
+        client().chat(limit = 60, main = true)
+        req = taken()
+        assertEquals("1", req.url.queryParameter("main"))
+        assertNull(req.url.queryParameter("space"))
+        server.enqueue(json("""{"entries":[]}"""))
+        client().history(limit = 6, space = "fix-login")
+        assertEquals("fix-login", taken().url.queryParameter("space"))
+    }
+
+    @Test fun anAskNamesItsSpaceAlsoWithFiles() = runBlocking {
+        server.enqueue(json("""{"sent":"x"}""", 202))
+        client().ask("open one more session here", space = "sandbox")
+        assertEquals("""{"text":"open one more session here","space":"sandbox"}""", taken().body!!.utf8())
+        server.enqueue(json("""{"sent":"x"}""", 202))
+        client().ask("what's left?")
+        assertEquals("the main tower's call is unchanged", """{"text":"what's left?"}""", taken().body!!.utf8())
+        server.enqueue(json("""{"sent":"x","attachments":["/a/1.png"]}""", 202))
+        client().ask("[Image #1] this one", listOf(FilePart("a.png", "image/png", bytes = byteArrayOf(1, 2, 3))), space = "sandbox")
+        val body = taken().body!!.utf8()
+        assertTrue(body.contains("name=\"space\""))
+        assertTrue(body.contains("sandbox"))
+        assertTrue(body.contains("name=\"text\""))
     }
 }

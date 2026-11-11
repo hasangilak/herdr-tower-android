@@ -65,9 +65,9 @@ class Composer(context: Context, private val session: TowerSession) {
     /** What was sent from here and not yet back in the thread (shown as "sending…", never twice). */
     val pending: StateFlow<List<dev.herdertower.phone.ui.ChatModel.Pending>> = _pending.asStateFlow()
 
-    fun addPending(text: String, files: Int = 0) {
+    fun addPending(text: String, files: Int = 0, space: String? = null) {
         val now = System.currentTimeMillis()
-        _pending.value = _pending.value.filter { now - it.atMs < 90_000 } + dev.herdertower.phone.ui.ChatModel.Pending(text, now, files)
+        _pending.value = _pending.value.filter { now - it.atMs < 90_000 } + dev.herdertower.phone.ui.ChatModel.Pending(text, now, files, space)
     }
     /** Where dictation writes in the box, and whether it still may. */
     private val follow = DictationFollow()
@@ -252,19 +252,20 @@ class Composer(context: Context, private val session: TowerSession) {
      * it when the tower took it. It runs in the app's scope, so leaving the
      * screen doesn't cancel it. True when something was sent.
      */
-    suspend fun send(): Result<Boolean> {
+    suspend fun send(space: String? = null): Result<Boolean> {
         if (_sending.value) return Result.success(false)
         _sending.value = true
         return session.scope.async {
             try {
-                sendNow()
+                sendNow(space)
             } finally {
                 _sending.value = false
             }
         }.await()
     }
 
-    private suspend fun sendNow(): Result<Boolean> {
+    /** [space]: the draft goes to that space's tower, not the main one. */
+    private suspend fun sendNow(space: String?): Result<Boolean> {
         // Still dictating: the box shows words a second or two behind the voice. Stop, and wait for the
         // final transcript of the whole take, so what's sent is everything said (not cut at the last partial).
         if (_dictating.value.active.value) {
@@ -276,15 +277,11 @@ class Composer(context: Context, private val session: TowerSession) {
         // The tower's markers count files in order: number the tokens 1..n as they stand.
         val (text, renumber) = DraftTokens.renumber(raw.trim())
         val ordered = _attachments.value.mapNotNull { a -> renumber[a.number]?.let { it to a } }.sortedBy { it.first }.map { it.second }
-        val result = if (ordered.isEmpty()) {
-            session.act { it.ask(text) }.map { }
-        } else {
-            // Sent from disk, not memory: videos and files can be 50 MB.
-            val parts = ordered.map { FilePart(it.name.ifBlank { it.file.name }, it.mime, file = it.file) }
-            session.act { it.ask(text, parts) }.map { }
-        }
+        // Sent from disk, not memory: videos and files can be 50 MB.
+        val parts = ordered.map { FilePart(it.name.ifBlank { it.file.name }, it.mime, file = it.file) }
+        val result = session.ask(text, parts, space)
         return result.map {
-            addPending(text, ordered.size)
+            addPending(text, ordered.size, space)
             sent(raw, ordered)
             session.linger()
             true

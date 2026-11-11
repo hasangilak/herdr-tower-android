@@ -24,10 +24,8 @@ class MainActivity : ComponentActivity() {
     /** The user asked to pair again while paired. */
     private var repairing by mutableStateOf(false)
     private var theme by mutableStateOf("system")
-    /** A question to open (its notification was tapped). */
-    private var openQuestion by mutableStateOf<String?>(null)
-    /** A PR whose chip to open (its notification was tapped). */
-    private var openPr by mutableStateOf<String?>(null)
+    /** A decision whose card to open (its notification was tapped). */
+    private var openDecision by mutableStateOf<String?>(null)
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -65,10 +63,8 @@ class MainActivity : ComponentActivity() {
                         app.session, app.voice, theme,
                         onTheme = { theme = it; app.session.settings.theme = it },
                         onRepair = { repairing = true },
-                        openQuestion = openQuestion,
-                        onQuestionOpened = { openQuestion = null },
-                        openPr = openPr,
-                        onPrOpened = { openPr = null },
+                        openDecision = openDecision,
+                        onDecisionOpened = { openDecision = null },
                     )
                 }
             }
@@ -109,12 +105,8 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun take(intent: Intent?) {
-        if (intent?.action == dev.herdertower.phone.data.QuestionNotices.ACTION) {
-            openQuestion = intent.getStringExtra(dev.herdertower.phone.data.QuestionNotices.EXTRA_ID)
-            return
-        }
-        if (intent?.action == dev.herdertower.phone.data.PrNotices.ACTION) {
-            openPr = intent.getStringExtra(dev.herdertower.phone.data.PrNotices.EXTRA_KEY)
+        if (intent?.action == dev.herdertower.phone.data.DecisionNotices.ACTION_OPEN) {
+            openDecision = intent.getStringExtra(dev.herdertower.phone.data.DecisionNotices.EXTRA_ID)
             return
         }
         val data = intent?.data?.toString() ?: return

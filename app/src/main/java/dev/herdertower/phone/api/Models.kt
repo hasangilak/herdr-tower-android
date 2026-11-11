@@ -31,6 +31,8 @@ data class PairResponse(
     val device: Device = Device(),
     val fingerprint: String = "",
     val api: Int = 1,
+    /** What this tower has beyond the first v1 (`quiet`); null from a tower before features. */
+    val features: List<String>? = null,
 )
 
 @Serializable
@@ -42,6 +44,8 @@ data class Hello(
     @SerialName("phone_is_voice") val phoneIsVoice: Boolean = false,
     /** Where this phone's replies are heard: "phone" or "mac" (null: a tower from before the setting). */
     @SerialName("audio_route") val audioRoute: String? = null,
+    /** What this tower has beyond the first v1 (`quiet`); null from a tower before features. */
+    val features: List<String>? = null,
 )
 
 @Serializable
@@ -108,6 +112,14 @@ data class TowerState(
     /** What blocked sessions ask (question sets), and how the tower handles them. */
     val questions: List<Question> = emptyList(),
     @SerialName("question_policy") val questionPolicy: String? = null,
+    /** The open decisions outside muted spaces (the badge); the list itself has its own call and event. Null from a tower before them. */
+    @SerialName("decisions_count") val decisionsCount: Int? = null,
+    /** How much the tower tells the user: `decisions`, `results` or `everything`. Null from a tower before it. */
+    @SerialName("tell_level") val tellLevel: String? = null,
+    /** What the tower says out loud: `off`, `decisions` or `replies`. Null from a tower before it. */
+    @SerialName("tell_voice") val tellVoice: String? = null,
+    /** The brains' model, as `GET /v1/model` reports it. */
+    @SerialName("brain_model") val brainModel: BrainModel? = null,
 )
 
 /** The brain's current step, as the panel's working line shows it ("Delegating to orb-rust · 12s"). */
@@ -212,6 +224,10 @@ data class HistoryEntry(
     val path: String? = null,
     /** kind = behavior: the rule's diff. */
     val diff: String? = null,
+    /** kind = peer: the session that wrote to [session] (its address), and both names when the tower gives them. */
+    val from: String? = null,
+    @SerialName("from_name") val fromName: String? = null,
+    @SerialName("to_name") val toName: String? = null,
 )
 
 @Serializable
@@ -226,8 +242,9 @@ data class AccountsResponse(val default: String? = null, val accounts: List<Acco
 @Serializable
 data class Screen(val address: String = "", val screen: String = "")
 
+/** [space]: the request goes to that space's tower (the main one without it). */
 @Serializable
-data class AskRequest(val text: String)
+data class AskRequest(val text: String, val space: String? = null)
 
 @Serializable
 data class AskResponse(val sent: String = "", val attachments: List<String> = emptyList())
@@ -280,7 +297,19 @@ data class AudioClip(
 
 /** `hello` event: the first on every stream. */
 @Serializable
-data class StreamHello(val api: Int = 1, val device: String = "", val voice: Boolean = false)
+data class StreamHello(
+    val api: Int = 1,
+    val device: String = "",
+    val voice: Boolean = false,
+    /** What this tower has beyond the first v1; a tower from before features sends none: read as none. */
+    val features: List<String>? = null,
+) {
+    /** The Quiet Tower: decisions, missions, threads, launches, the tell level and the model. */
+    val quiet: Boolean get() = features.orEmpty().contains("quiet")
+
+    /** Receipts for commands, with undo; rules from answers; the tower's voice level. */
+    val acts: Boolean get() = features.orEmpty().contains("acts")
+}
 
 /** A screenshot a session sent to the tower (`GET /v1/screenshots`). */
 @Serializable
@@ -331,6 +360,8 @@ data class ChatMessage(
     val space: String? = null,
     /** role = pr: the PR as it is now (it changes in place: the same message comes again, updated). */
     val pr: Pr? = null,
+    /** kind = act: what the tower opened for the request before it, with what it assumed (it changes in place too). */
+    val act: Act? = null,
 ) {
     val mine: Boolean get() = role == "user" || role == "you" || role == "request"
     val fromTower: Boolean get() = role == "tower" || role == "assistant" || role == "answer"

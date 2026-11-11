@@ -159,7 +159,11 @@ class ComposerActions(
 
 /** Wires the composer to the tower, the photo picker, the camera and dictation. */
 @Composable
-fun rememberComposerActions(composer: Composer, onTalk: () -> Unit, onSent: () -> Unit = {}): ComposerActions {
+fun rememberComposerActions(composer: Composer, onTalk: () -> Unit, onSent: () -> Unit = {}, space: String? = null): ComposerActions {
+    // Read when Send is tapped: the screen in front may have changed where the draft goes.
+    val to by androidx.compose.runtime.rememberUpdatedState(space)
+    val sent by androidx.compose.runtime.rememberUpdatedState(onSent)
+    val talk by androidx.compose.runtime.rememberUpdatedState(onTalk)
     val context = LocalContext.current
     val scope = rememberCoroutineScope()
     val snack = LocalSnack.current
@@ -186,12 +190,12 @@ fun rememberComposerActions(composer: Composer, onTalk: () -> Unit, onSent: () -
         ComposerActions(
             send = {
                 scope.launch {
-                    composer.send()
-                        .onSuccess { if (it) onSent() }
+                    composer.send(to)
+                        .onSuccess { if (it) sent() }
                         .onFailure { snack("Couldn't send: ${TowerSession.describe(it)}") }
                 }
             },
-            talk = { perms.withMic(onTalk) },
+            talk = { perms.withMic { talk() } },
             pictures = { pick.launch(PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)) },
             files = { pickFiles.launch(arrayOf("*/*")) },
             camera = {

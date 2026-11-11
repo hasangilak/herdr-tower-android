@@ -158,8 +158,8 @@ class TowerClient(
     suspend fun spaces(): SpacesResponse = get(SpacesResponse.serializer(), "spaces")
     suspend fun jobs(status: String = "all", session: String? = null, limit: Int = 50): JobsResponse =
         get(JobsResponse.serializer(), "jobs", query = mapOf("status" to status, "session" to session, "limit" to limit.toString()))
-    suspend fun history(limit: Int = 100, session: String? = null, kind: String? = null, beforeMs: Long? = null): HistoryResponse =
-        get(HistoryResponse.serializer(), "history", query = mapOf("limit" to limit.toString(), "session" to session, "kind" to kind, "before_ms" to beforeMs?.toString()))
+    suspend fun history(limit: Int = 100, session: String? = null, kind: String? = null, beforeMs: Long? = null, space: String? = null): HistoryResponse =
+        get(HistoryResponse.serializer(), "history", query = mapOf("limit" to limit.toString(), "session" to session, "kind" to kind, "before_ms" to beforeMs?.toString(), "space" to space))
     suspend fun accounts(): AccountsResponse = get(AccountsResponse.serializer(), "accounts")
     suspend fun screen(address: String, lines: Int = 60): Screen =
         get(Screen.serializer(), "sessions", address, "screen", query = mapOf("lines" to lines.toString()))
@@ -170,9 +170,13 @@ class TowerClient(
     /** `GET /v1/screenshots/{id}`: the image's bytes (PNG, JPEG, WebP or GIF). */
     suspend fun screenshotImage(shot: Screenshot): ByteArray = bytes(shot.url, listOf("screenshots", shot.id), "image/*")
 
-    /** `GET /v1/chat?before=&limit=`: a page of the main chat thread (the latest, or before message [before]). */
-    suspend fun chat(before: String? = null, limit: Int = 50): ChatPage {
-        val req = request(url("chat", query = mapOf("before" to before, "limit" to limit.toString()))).get().build()
+    /**
+     * `GET /v1/chat?before=&limit=`: a page of the chat thread (the latest, or
+     * before message [before]). With [space], that space's own conversation;
+     * with [main], the main one without those (a Quiet Tower).
+     */
+    suspend fun chat(before: String? = null, limit: Int = 50, space: String? = null, main: Boolean = false): ChatPage {
+        val req = request(url("chat", query = mapOf("before" to before, "limit" to limit.toString(), "space" to space, "main" to if (main) "1" else null))).get().build()
         return fetch(http.newCall(req)) {
             val body = it.body.string()
             if (!it.isSuccessful) throw error(it.code, body)
@@ -192,7 +196,8 @@ class TowerClient(
     suspend fun setAudioRoute(route: String): AudioRoute =
         call(http, request(url("device", "audio")).put(json(AudioRoute.serializer(), AudioRoute(route))).build(), AudioRoute.serializer())
 
-    suspend fun ask(text: String): AskResponse = post(AskResponse.serializer(), json(AskRequest.serializer(), AskRequest(text)), "ask")
+    /** `POST /v1/ask`; with [space] the request goes to that space's tower. */
+    suspend fun ask(text: String, space: String? = null): AskResponse = post(AskResponse.serializer(), json(AskRequest.serializer(), AskRequest(text, space)), "ask")
 
     /**
      * `POST /v1/ask` with files: multipart, a `text` field and one part per
@@ -200,10 +205,11 @@ class TowerClient(
      * order. The tower saves them on the Mac and passes their paths after the
      * text, `[Image #N]`, `[Video #N]` or `[File #N: name]` marking each.
      */
-    suspend fun ask(text: String, files: List<FilePart>): AskResponse {
-        if (files.isEmpty()) return ask(text)
+    suspend fun ask(text: String, files: List<FilePart>, space: String? = null): AskResponse {
+        if (files.isEmpty()) return ask(text, space)
         val body = MultipartBody.Builder().setType(MultipartBody.FORM)
             .addFormDataPart("text", text)
+            .apply { if (space != null) addFormDataPart("space", space) }
             .apply { files.forEach { addFormDataPart(if (it.isImage) "image" else "file", it.name, partBody(it)) } }
             .build()
         return try {
@@ -336,6 +342,96 @@ class TowerClient(
     suspend fun merge(ref: PrRef, token: String, override: Boolean = false): MergeResult =
         post(MergeResult.serializer(), json(MergeRequest.serializer(), MergeRequest(token, override.takeIf { it })), "prs", ref.owner, ref.repo, ref.number.toString(), "merge")
 
+    // Quiet Tower (herder-tower docs/quiet-tower.md, "Step 11: the phone")
+
+    /** `GET /v1/decisions`: the main queue in order (muted spaces left out), or one [space]'s own (muted or not). */
+    suspend fun decisions(space: String? = null): DecisionsResponse =
+        get(DecisionsResponse.serializer(), "decisions", query = mapOf("space" to space))
+
+    /**
+     * `POST /v1/decisions/{id}/answer` with [body]: `{"choice":0}`, `{"other":"…"}`,
+     * or a question set's answers. A question's answer is typed in before it
+     * returns (some seconds a session). `409 closed`: it is over already.
+     */
+    suspend fun answerDecision(id: String, body: String): DecisionAnswered =
+        post(DecisionAnswered.serializer(), body.toRequestBody(JSON), "decisions", id, "answer", client = slow)
+
+    /** `DELETE /v1/decisions/{id}`: not the user's after all; nothing is sent. */
+    suspend fun dismissDecision(id: String) {
+        call(http, request(url("decisions", id)).delete().build(), Ignored.serializer())
+    }
+
+    /** `GET /v1/missions`: every open space as a mission, the quiet ones and today's closed ones by name. */
+    suspend fun missions(): MissionsResponse = get(MissionsResponse.serializer(), "missions")
+
+    private suspend fun mission(body: RequestBody, vararg segments: String): Mission? =
+        fetch(http.newCall(request(url(*segments)).post(body).build())) {
+            val text = it.body.string()
+            if (!it.isSuccessful) throw error(it.code, text)
+            MissionsApi.mission(text)
+        }
+
+    /** `POST /v1/spaces/{space}/goal`: what the space is for and what counts as done; answers with the mission (null: read them again). */
+    suspend fun setGoal(space: String, goal: String?, doneWhen: String?, standing: Boolean?): Mission? =
+        mission(json(GoalRequest.serializer(), GoalRequest(goal, doneWhen, standing)), "spaces", space, "goal")
+
+    /** `POST /v1/spaces/{space}/follow`: its results reach the user as they land. */
+    suspend fun follow(space: String, on: Boolean): Mission? = mission(json(OnRequest.serializer(), OnRequest(on)), "spaces", space, "follow")
+
+    /** `POST /v1/spaces/{space}/mute`: its decisions stay in its own queue. */
+    suspend fun muteSpace(space: String, on: Boolean): Mission? = mission(json(OnRequest.serializer(), OnRequest(on)), "spaces", space, "mute")
+
+    /**
+     * `POST /v1/spaces/{space}/close`: answers at once with the action that
+     * closes it. `409 busy` (with the sessions at work) unless [force].
+     */
+    suspend fun closeSpace(space: String, force: Boolean = false): TowerAction =
+        post(ActionResponse.serializer(), json(CloseRequest.serializer(), CloseRequest(force)), "spaces", space, "close").action
+
+    /** `GET /v1/thread?space=&before=`: what the sessions of a space wrote each other, newest last. */
+    suspend fun thread(space: String, limit: Int = 50, before: String? = null): ThreadResponse =
+        get(ThreadResponse.serializer(), "thread", query = mapOf("space" to space, "limit" to limit.toString(), "before" to before))
+
+    suspend fun setups(): List<Setup> = get(SetupsResponse.serializer(), "setups").setups
+
+    /** `POST /v1/launch` with `dry_run`: what launching would do; nothing is opened. */
+    suspend fun launchPlan(goal: String, setup: String? = null, name: String? = null): LaunchPlan =
+        post(LaunchPlan.serializer(), json(LaunchRequest.serializer(), LaunchRequest(goal, setup, name?.takeIf { it.isNotBlank() }, dryRun = true)), "launch")
+
+    /** `POST /v1/launch`: a space from one sentence. It answers at once with the action that opens its sessions. */
+    suspend fun launch(goal: String, setup: String? = null, name: String? = null): TowerAction =
+        post(ActionResponse.serializer(), json(LaunchRequest.serializer(), LaunchRequest(goal, setup, name?.takeIf { it.isNotBlank() })), "launch").action
+
+    /** `GET /v1/actions/{id}`: a launch or a close as it stands. */
+    suspend fun action(id: String): TowerAction = get(ActionResponse.serializer(), "actions", id).action
+
+    suspend fun tell(): Tell = get(Tell.serializer(), "tell")
+
+    /** `POST /v1/tell`: how much the tower tells ([level]) and what it says out loud ([voice]), either or both. */
+    suspend fun setTell(level: String? = null, voice: String? = null): Tell =
+        post(Tell.serializer(), json(TellRequest.serializer(), TellRequest(level, voice)), "tell")
+
+    /** `GET /v1/acts`: what the tower opened lately, newest first. */
+    suspend fun acts(): List<Act> = get(ActsResponse.serializer(), "acts").acts
+
+    /** `GET /v1/acts/{id}`: one act as it stands. */
+    suspend fun act(id: String): Act = get(ActResponse.serializer(), "acts", id).act
+
+    /** `POST /v1/acts/{id}/undo`: ends what the act opened. `409 held` while work would be lost, unless [force]. */
+    suspend fun undoAct(id: String, force: Boolean = false): UndoResult =
+        post(UndoResult.serializer(), json(UndoRequest.serializer(), UndoRequest(force)), "acts", id, "undo", client = slow)
+
+    /** `POST /v1/decisions/{id}/rule`: the answer just given becomes a standing rule ([answer]: its words, when the tower doesn't know them). */
+    suspend fun decisionRule(id: String, answer: String? = null): RuleSent =
+        post(RuleSent.serializer(), json(RuleRequest.serializer(), RuleRequest(answer)), "decisions", id, "rule")
+
+    /** `GET /v1/model`: what the tower's brains run on. */
+    suspend fun model(): BrainModel = get(BrainModel.serializer(), "model")
+
+    /** `POST /v1/model`: another model or effort (applies when a brain starts), and/or [restart] every brain now. */
+    suspend fun setModel(model: String? = null, effort: String? = null, restart: Boolean? = null): BrainModel =
+        post(BrainModel.serializer(), json(ModelRequest.serializer(), ModelRequest(model, effort, restart)), "model", client = slow)
+
     suspend fun questionPolicy(): String = get(QuestionPolicy.serializer(), "questions-policy").policy
 
     suspend fun setQuestionPolicy(policy: String): String =
@@ -427,9 +523,10 @@ class TowerClient(
         /** Turns an error response into the matching exception. */
         fun error(status: Int, body: String): TowerApiException {
             val detail = runCatching { TowerJson.decodeFromString(ErrorBody.serializer(), body).error }.getOrNull()
+            val extra = runCatching { (TowerJson.parseToJsonElement(body) as? kotlinx.serialization.json.JsonObject)?.get("error") as? kotlinx.serialization.json.JsonObject }.getOrNull()
             val code = detail?.code?.takeIf { it.isNotEmpty() } ?: "http_$status"
             val message = detail?.message?.takeIf { it.isNotEmpty() } ?: "The tower answered $status."
-            return if (status == 401) UnauthorizedException(code, message) else TowerApiException(status, code, message, detail?.triesLeft)
+            return if (status == 401) UnauthorizedException(code, message) else TowerApiException(status, code, message, detail?.triesLeft, extra)
         }
 
         /** A changed certificate anywhere in the failure: its causes, or other routes' failures OkHttp kept as suppressed. */

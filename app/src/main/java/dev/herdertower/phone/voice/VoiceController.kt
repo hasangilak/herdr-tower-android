@@ -9,6 +9,18 @@ import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.launch
 
+/** Where a take from the talk button goes. */
+sealed interface TalkTarget {
+    /** The main tower, as spoken. */
+    data object Main : TalkTarget
+
+    /** A space's own tower. */
+    data class Space(val name: String) : TalkTarget
+
+    /** Written down only, into a field on screen (a new space's goal). */
+    class Into(val take: (String) -> Unit) : TalkTarget
+}
+
 /**
  * Talking into the phone. Hold the button to talk and let go to send, or
  * tap it once: then it listens until you pause (or you tap again). Starting
@@ -17,17 +29,20 @@ import kotlinx.coroutines.launch
 class VoiceController(
     private val scope: CoroutineScope,
     private val hush: () -> Unit,
-    private val send: suspend (ByteArray) -> Result<VoiceResult>,
+    private val send: suspend (ByteArray, TalkTarget) -> Result<VoiceResult>,
     private val linger: () -> Unit,
     private val open: () -> Mic,
     private val clock: () -> Long = System::currentTimeMillis,
+    /** Writes down the take so far (the Mac's Whisper, nothing sent), for the words shown while talking; null: none. */
+    private val words: (suspend (ByteArray) -> String?)? = null,
 ) {
     constructor(session: TowerSession) : this(
         session.scope,
         session::hush,
-        { wav -> session.act { it.voice(wav) } },
+        session::take,
         session::linger,
         { Take.start(session.scope, endOnSilence = true).also { it.what = "voice" } },
+        words = { wav -> session.act { it.transcribe(wav) }.getOrNull()?.heard },
     )
 
     sealed interface Phase {
@@ -37,8 +52,13 @@ class VoiceController(
         data object Sending : Phase
     }
 
-    /** What the Mac heard from the last take. */
-    data class Heard(val text: String, val sent: Boolean, val atMs: Long)
+    /** What the Mac heard from the last take, and where it went. */
+    data class Heard(val text: String, val sent: Boolean, val atMs: Long, val target: TalkTarget = TalkTarget.Main)
+
+    /** Where the next take goes: set by the screen in front (the main tower unless it says otherwise). */
+    @Volatile var target: TalkTarget = TalkTarget.Main
+    /** Where the take in progress goes: as it was when it began, whatever screen comes after. */
+    private var going: TalkTarget = TalkTarget.Main
 
     private val _phase = MutableStateFlow<Phase>(Phase.Idle)
     val phase: StateFlow<Phase> = _phase.asStateFlow()
@@ -49,8 +69,13 @@ class VoiceController(
     private val _error = MutableStateFlow<String?>(null)
     val error: StateFlow<String?> = _error.asStateFlow()
 
+    private val _hearing = MutableStateFlow("")
+    /** The words of the take in progress, as the Mac has written them down so far. */
+    val hearing: StateFlow<String> = _hearing.asStateFlow()
+
     private var take: Mic? = null
     private var watcher: Job? = null
+    private var partials: Job? = null
     private var pressedAt = 0L
 
     /** Runs before a take starts (dictation into the draft stops: one microphone at a time). */
@@ -117,6 +142,8 @@ class VoiceController(
         take = null
         watcher?.cancel()
         levels?.cancel()
+        partials?.cancel()
+        _hearing.value = ""
         _level.value = 0f
         _pause.value = 0f
         _waiting.value = false
@@ -141,7 +168,24 @@ class VoiceController(
             return
         }
         take = t
+        going = target
+        _hearing.value = ""
         _phase.value = Phase.Recording(handsFree)
+        // The words so far, while you talk: one request at a time, less often as the take grows (each sends all of it).
+        partials?.cancel()
+        partials = words?.let { write ->
+            scope.launch {
+                var sentMs = 0L
+                while (true) {
+                    kotlinx.coroutines.delay(WORDS_EVERY_MS)
+                    val ms = t.durationMs
+                    if (!t.heardSpeech || ms < 700 || ms - sentMs < maxOf(600L, sentMs / 10)) continue
+                    sentMs = ms
+                    val heard = write(t.snapshot())?.let(::clean)
+                    if (take === t && !heard.isNullOrBlank()) _hearing.value = heard
+                }
+            }
+        }
         levels?.cancel()
         levels = scope.launch {
             launch { t.pauseProgress.collect { _pause.value = it } }
@@ -168,6 +212,7 @@ class VoiceController(
         take = null
         watcher?.cancel()
         levels?.cancel()
+        partials?.cancel()
         _level.value = 0f
         _pause.value = 0f
         _waiting.value = false
@@ -179,11 +224,12 @@ class VoiceController(
                 _phase.value = Phase.Idle
                 return@launch
             }
-            send(wav)
+            val to = going
+            send(wav, to)
                 .onSuccess { r ->
                     if (r.sent) linger()
-                    _heard.value = Heard(clean(r.heard), r.sent, System.currentTimeMillis())
-                    if (!r.sent && r.heard.isBlank()) _error.value = "The Mac heard nothing it could send."
+                    _heard.value = Heard(clean(r.heard), r.sent, System.currentTimeMillis(), to)
+                    if (!r.sent && clean(r.heard).isBlank()) _error.value = "The Mac heard nothing it could send."
                 }
                 .onFailure { _error.value = TowerSession.describe(it) }
             _phase.value = Phase.Idle
@@ -194,6 +240,7 @@ class VoiceController(
         /** Whisper's markers for no speech ("[BLANK_AUDIO]", "(silence)") aren't words. */
         fun clean(heard: String): String = heard.replace(Regex("""\[[A-Z_ ]+]|\((?:silence|music|noise)\)""", RegexOption.IGNORE_CASE), "").trim()
         private const val TAP_MS = 350L
+        private const val WORDS_EVERY_MS = 1000L
         private const val MIN_MS = 300L
     }
 }

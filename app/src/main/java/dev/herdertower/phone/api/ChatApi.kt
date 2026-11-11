@@ -33,6 +33,29 @@ object ChatApi {
     /** The tower's order: by `h<line>`, by time for messages without one. */
     private val ORDER = compareBy<ChatMessage>({ if (it.line == Long.MAX_VALUE) 1 else 0 }, { it.line }, { it.at })
 
+    /**
+     * Whose conversation a message is (docs/mobile-api.md, "Whose
+     * conversation"): a space's own holds its requests, answers and receipts;
+     * the main one holds everything except the requests and answers that
+     * have a space. A receipt that names a space is in both.
+     */
+    fun inMain(m: ChatMessage): Boolean = m.space.isNullOrBlank() || !(asked(m) || answered(m))
+
+    fun inSpace(m: ChatMessage, space: String): Boolean = m.space == space && (asked(m) || answered(m) || m.kind == "receipt")
+
+    /** The act a message carries, as the tower last told it: an `act` event may be newer than the message. */
+    fun actOf(m: ChatMessage, acts: Map<String, Act>): Act? = m.act?.let { acts[it.id] ?: it }
+
+    // By kind; a message without one by its role (a request is the user's, an answer the tower's).
+    private fun asked(m: ChatMessage) = m.kind == "request" || (m.kind == null && m.mine)
+    // An act (what the tower opened for a request) belongs where the request was asked, as its answer does.
+    private fun answered(m: ChatMessage) = m.kind == "answer" || m.kind == "act" || (m.kind == null && m.fromTower)
+
+    /** A request handed to the main tower for a space reads "In <space>: …": the space's own conversation shows it without that. */
+    fun bare(text: String, space: String): String = text.removePrefix("[voice] ").let { t ->
+        listOf("In $space: ", "In the space $space: ").firstOrNull { t.startsWith(it) }?.let { t.removePrefix(it) } ?: t
+    }
+
     /** Merges messages into the thread: by id (a later copy replaces an earlier), oldest first. */
     fun merge(thread: List<ChatMessage>, more: List<ChatMessage>): List<ChatMessage> {
         val byId = LinkedHashMap<String, ChatMessage>()

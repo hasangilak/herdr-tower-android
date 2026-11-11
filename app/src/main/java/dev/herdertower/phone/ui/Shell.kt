@@ -13,49 +13,28 @@ import androidx.compose.animation.ExitTransition
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.WindowInsets
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.verticalScroll
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.filled.ArrowForward
-import androidx.compose.material.icons.filled.Forum
-import androidx.compose.material.icons.filled.Computer
-import androidx.compose.material.icons.automirrored.filled.VolumeUp
-import androidx.compose.material.icons.filled.PhotoLibrary
-import androidx.compose.material.icons.filled.Tune
-import androidx.compose.material.icons.filled.Timeline
-import androidx.compose.material.icons.filled.Workspaces
-import androidx.compose.material3.AlertDialog
-import androidx.compose.material3.ExperimentalMaterial3Api
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.ModalBottomSheet
-import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
-import androidx.compose.material3.Switch
-import androidx.compose.material3.SwitchDefaults
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
-import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
-import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.CompositionLocalProvider
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
@@ -66,73 +45,117 @@ import androidx.compose.runtime.setValue
 import androidx.compose.runtime.staticCompositionLocalOf
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.semantics.Role
-import androidx.compose.ui.semantics.contentDescription
-import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.core.content.ContextCompat
-import androidx.core.net.toUri
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import dev.herdertower.phone.data.Link
 import dev.herdertower.phone.data.TowerSession
+import dev.herdertower.phone.tower
+import dev.herdertower.phone.voice.TalkTarget
 import dev.herdertower.phone.voice.VoiceController
-import dev.herdertower.phone.voice.VoiceService
 import kotlinx.coroutines.launch
 
 /** Shows a short message at the bottom (errors from actions). */
 val LocalSnack = staticCompositionLocalOf<(String) -> Unit> { {} }
 
-/** Where the user is: Home, Voice and Chat are the main flow; the rest open from the menu. */
+/**
+ * Where the user is. Four places are the tabs (the queue, the spaces, the
+ * record, the shots); a space, a session and a new space open from Spaces;
+ * the rest opens over whatever is in front.
+ */
 sealed interface Route {
-    data object Home : Route
-    data class Voice(val listen: Boolean) : Route
-    data object Chat : Route
+    data object Queue : Route
     data object Spaces : Route
-    data object Activity : Route
-    data class Session(val address: String) : Route
+    data object Record : Route
+    /** The shots: all (the tab), or one [session]'s; [open] shows that one in the viewer. */
+    data class Shots(val session: String? = null, val open: String? = null) : Route
+    /** A space's own tower. */
     data class Space(val name: String) : Route
-    /** Screenshots: all, or one [session]'s; [open] shows that one in the viewer. */
-    data class Screenshots(val session: String? = null, val open: String? = null) : Route
-    /** Answering a question a session asks. */
+    data class Session(val address: String) : Route
+    data object NewSpace : Route
+    data object Settings : Route
+    /** The whole conversation with the main tower, or with [space]'s own. */
+    data class Chat(val space: String? = null) : Route
+    /** Answering a question set a session asks, step by step. */
     data class Question(val id: String) : Route
-    /** How the tower works; [open] a behavior's title to open (from a chat card). */
+    /** How the tower works. */
     data object Behaviors : Route
     /** One behavior, or a new one ([id] null). */
     data class Behavior(val id: String?) : Route
 
+    /** The tab a route belongs to, or null for one that opens over any of them. */
+    val tab: Tab?
+        get() = when (this) {
+            Queue -> Tab.Queue
+            Spaces, is Space, is Session, NewSpace -> Tab.Spaces
+            Record -> Tab.Record
+            is Shots -> Tab.Shots
+            Settings, is Chat, is Question, Behaviors, is Behavior -> null
+        }
+
+    /** One of the four places themselves. */
+    val isTab: Boolean get() = this == Queue || this == Spaces || this == Record || this == Shots()
+
+    /** Whether the talk bar and the tabs show under it; not where a screen has its own input and fills the phone. */
+    val bars: Boolean get() = this !is Chat && this !is Question && this !is Behaviors && this !is Behavior
+
     companion object {
+        fun of(tab: Tab): Route = when (tab) {
+            Tab.Queue -> Queue
+            Tab.Spaces -> Spaces
+            Tab.Record -> Record
+            Tab.Shots -> Shots()
+        }
+
         fun encode(r: Route): String = when (r) {
-            Home -> "home"
-            is Voice -> "voice:${r.listen}"
-            Chat -> "chat"
+            Queue -> "queue"
             Spaces -> "spaces"
-            Activity -> "activity"
-            is Session -> "session:${r.address}"
-            is Space -> "space:${r.name}"
+            Record -> "record"
             // \u0002 between the two: a session's address or a file name may hold a colon.
-            is Screenshots -> "shots:${r.session.orEmpty()}\u0002${r.open.orEmpty()}"
+            is Shots -> "shots:${r.session.orEmpty()}\u0002${r.open.orEmpty()}"
+            is Space -> "space:${r.name}"
+            is Session -> "session:${r.address}"
+            NewSpace -> "new"
+            Settings -> "settings"
+            is Chat -> if (r.space == null) "chat" else "chat:${r.space}"
             is Question -> "question:${r.id}"
             Behaviors -> "behaviors"
             is Behavior -> "behavior:${r.id.orEmpty()}"
         }
 
         fun decode(s: String): Route = when {
-            s.startsWith("voice:") -> Voice(false) // don't start listening again after a restore
-            s == "chat" -> Chat
             s == "spaces" -> Spaces
-            s == "activity" -> Activity
+            s == "record" -> Record
+            s == "new" -> NewSpace
+            s == "settings" -> Settings
+            s == "chat" -> Chat()
+            s.startsWith("chat:") -> Chat(s.removePrefix("chat:"))
             s.startsWith("session:") -> Session(s.removePrefix("session:"))
             s.startsWith("space:") -> Space(s.removePrefix("space:"))
             s.startsWith("question:") -> Question(s.removePrefix("question:"))
             s == "behaviors" -> Behaviors
             s.startsWith("behavior:") -> Behavior(s.removePrefix("behavior:").ifEmpty { null })
             s.startsWith("shots:") -> s.removePrefix("shots:").let { rest -> if ('\u0002' in rest) rest.split('\u0002', limit = 2) else rest.split(":", limit = 2) }
-                .let { Screenshots(it[0].ifEmpty { null }, it.getOrNull(1)?.ifEmpty { null }) }
-            else -> Home
+                .let { Shots(it[0].ifEmpty { null }, it.getOrNull(1)?.ifEmpty { null }) }
+            // Anything else (a route of an older version too): the queue, where the app opens.
+            else -> Queue
         }
+
+        /** The stack after going to [r]: a tab starts over from it; anything else goes on top, once. */
+        fun push(stack: List<Route>, r: Route): List<Route> =
+            if (r.isTab) listOf(r) else stack.filterNot { it::class == r::class } + r
+
+        /** The stack after Back: one screen less; from another tab's own screen, the queue. Null: leave the app. */
+        fun pop(stack: List<Route>): List<Route>? = when {
+            stack.size > 1 -> stack.dropLast(1)
+            stack.lastOrNull() != Queue -> listOf(Queue)
+            else -> null
+        }
+
+        /** The tab lit for [stack]: the top screen's, or for one that opens over anything the one under it. */
+        fun tabOf(stack: List<Route>): Tab = stack.asReversed().firstNotNullOfOrNull { it.tab } ?: Tab.Queue
 
         val StackSaver = Saver<List<Route>, String>(
             save = { stack -> stack.joinToString("\u0001") { encode(it) } },
@@ -176,93 +199,54 @@ fun rememberPermissions(): Permissions {
     }
 }
 
-/** Where replies are heard, in words: for the status lines. */
-fun routeWords(route: String?, connected: Boolean): String = when {
-    route == "mac" -> "replies play on the Mac"
-    !connected -> "not connected: replies to you wait on the Mac for 15 minutes"
-    else -> "replies play on this phone"
-}
-
-/** The replies switch: this phone or the Mac. */
-@Composable
-fun RouteToggle(session: TowerSession, modifier: Modifier = Modifier, size: androidx.compose.ui.unit.Dp = 40.dp) {
-    val route by session.audioRoute.collectAsStateWithLifecycle()
-    val scope = rememberCoroutineScope()
-    val snack = LocalSnack.current
-    val onMac = route == "mac"
-    RoundIcon(
-        if (onMac) androidx.compose.material.icons.Icons.Filled.Computer else androidx.compose.material.icons.Icons.AutoMirrored.Filled.VolumeUp,
-        if (onMac) "Replies play on the Mac. Tap to hear them on this phone." else "Replies play on this phone. Tap to hear them on the Mac.",
-        modifier, size = size,
-    ) {
-        scope.launch {
-            val to = if (onMac) "phone" else "mac"
-            session.setAudioRoute(to)
-                .onSuccess { snack(if (to == "mac") "Replies play on the Mac" else "Replies play on this phone") }
-                .onFailure { snack("Couldn't switch: ${TowerSession.describe(it)}") }
-        }
-    }
-}
-
-/** Turns "the phone is the voice" on (with its permissions and service) or off. */
-fun setVoice(on: Boolean, session: TowerSession, perms: Permissions, context: Context) {
-    if (!on) return session.setVoice(false)
-    perms.forVoice {
-        session.setVoice(true)
-        VoiceService.start(context)
-    }
-}
-
-@OptIn(ExperimentalMaterial3Api::class)
+/**
+ * The app once paired: the screen in front, and under it, on every screen,
+ * the bar to talk or type to the tower and the four tabs. It opens on the
+ * queue.
+ */
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun Shell(
-    session: TowerSession, voice: VoiceController, theme: String, onTheme: (String) -> Unit, onRepair: () -> Unit, openQuestion: String? = null, onQuestionOpened: () -> Unit = {},
-    /** A PR's key whose chip to open in the chat (from its notification). */
-    openPr: String? = null, onPrOpened: () -> Unit = {},
+    session: TowerSession, voice: VoiceController, theme: String, onTheme: (String) -> Unit, onRepair: () -> Unit,
+    /** A decision whose card to open (its notification was tapped), and that it was. */
+    openDecision: String? = null, onDecisionOpened: () -> Unit = {},
 ) {
-    var stack by rememberSaveable(stateSaver = Route.StackSaver) { mutableStateOf(listOf<Route>(Route.Home)) }
+    var stack by rememberSaveable(stateSaver = Route.StackSaver) { mutableStateOf(listOf<Route>(Route.Queue)) }
     val snack = remember { SnackbarHostState() }
     val scope = rememberCoroutineScope()
     val show: (String) -> Unit = { msg -> scope.launch { snack.showSnackbar(msg) } }
-    var menu by remember { mutableStateOf(false) }
     val reduce = LocalReduceMotion.current
+    val composer = LocalContext.current.tower.composer
 
     fun go(r: Route) {
-        stack = if (r == Route.Home) listOf(Route.Home) else stack.filterNot { it::class == r::class } + r
+        stack = Route.push(stack, r)
     }
     fun back() {
-        if (stack.size > 1) stack = stack.dropLast(1)
+        Route.pop(stack)?.let { stack = it }
     }
-    BackHandler(enabled = stack.size > 1) { back() }
-    // From the notification: straight to that question.
-    LaunchedEffect(openQuestion) {
-        if (openQuestion != null) {
-            go(Route.Question(openQuestion))
-            onQuestionOpened()
-        }
-    }
+    BackHandler(enabled = Route.pop(stack) != null) { back() }
 
-    // From a PR's notification: the chat, at that PR's chip.
-    var focusPr by rememberSaveable { mutableStateOf<String?>(null) }
-    LaunchedEffect(openPr) {
-        if (openPr != null) {
-            focusPr = openPr
-            go(Route.Chat)
-            onPrOpened()
+    // From a decision's notification: the queue, with that card open.
+    var focusDecision by rememberSaveable { mutableStateOf<String?>(null) }
+    LaunchedEffect(openDecision) {
+        if (openDecision != null) {
+            focusDecision = openDecision
+            go(Route.Queue)
+            onDecisionOpened()
         }
     }
 
     val state by session.state.collectAsStateWithLifecycle()
     val link by session.link.collectAsStateWithLifecycle()
-    val jobs by session.jobs.collectAsStateWithLifecycle()
+    val decisions by session.decisions.collectAsStateWithLifecycle()
+    val missions by session.missions.collectAsStateWithLifecycle()
     val phase by voice.phase.collectAsStateWithLifecycle()
     val playing by session.player.nowPlaying.collectAsStateWithLifecycle()
     val connected = link is Link.Live
-    val blocked = HomeModel.blocked(state?.agents.orEmpty(), jobs).size
-    val orbPhase = HomeModel.orbPhase(connected, state?.phase, phase is VoiceController.Phase.Recording, phase is VoiceController.Phase.Sending, playing)
-    val needsYou = HomeModel.needsYou(connected, state?.phase, blocked)
+    val waiting = decisions.count { it.open }
+    val orbPhase = LinkModel.orbPhase(connected, state?.phase, phase is VoiceController.Phase.Recording, phase is VoiceController.Phase.Sending, playing)
 
-    // The header's orb: a tap mutes the whole tower (here and on the Mac), another lets it talk again.
+    // The orb: a tap mutes the whole tower (here and on the Mac), another lets it talk again.
     val muted by session.muted.collectAsStateWithLifecycle()
     val muting by session.muting.collectAsStateWithLifecycle()
     val mute = remember(muted, muting, connected) {
@@ -275,270 +259,117 @@ fun Shell(
             }
         }
     }
-    // The headers' Stop: this reply only, shown the moment the tower talks, here or on the Mac.
+    // Stop: this reply only, shown the moment the tower talks, here or on the Mac.
     val talking = connected && (playing != null || state?.speaking == true || state?.announcing == true)
     val stop = remember(talking) { StopState(talking) { session.hush() } }
 
     // Android 17+: no connection to the tower without the local network permission; asked as the app opens.
     rememberLocalNetwork(askNow = true) { session.reconnect() }
 
-    // Questions can wait for you while the app is closed: on Android 13+ their notifications need asking once.
-    val questionsOn by session.questionsSupported.collectAsStateWithLifecycle()
-    val prsOn by session.prsSupported.collectAsStateWithLifecycle()
+    // A decision can wait for you while the app is closed: on Android 13+ its notification needs asking once.
     val perms = rememberPermissions()
-    LaunchedEffect(questionsOn || prsOn) {
-        if ((questionsOn || prsOn) && Build.VERSION.SDK_INT >= 33 && !perms.has(Manifest.permission.POST_NOTIFICATIONS) && !session.settings.askedNotifications) {
+    LaunchedEffect(connected) {
+        if (connected && Build.VERSION.SDK_INT >= 33 && !perms.has(Manifest.permission.POST_NOTIFICATIONS) && !session.settings.askedNotifications) {
             session.settings.askedNotifications = true
             perms.ask(arrayOf(Manifest.permission.POST_NOTIFICATIONS)) {}
         }
     }
-    CompositionLocalProvider(LocalSnack provides show, LocalMute provides mute, LocalStop provides stop) {
-        Backdrop(orbPhase, needsYou) {
-            AnimatedContent(
-                targetState = stack.last(),
-                transitionSpec = {
-                    if (reduce) EnterTransition.None togetherWith ExitTransition.None
-                    else (fadeIn(tween(520)) + scaleIn(tween(520), initialScale = 0.985f)) togetherWith fadeOut(tween(320))
-                },
-                contentKey = { Route.encode(it) },
-                label = "route",
-            ) { route ->
-                when (route) {
-                    Route.Home -> HomeScreen(session, voice, onVoice = { go(Route.Voice(it)) }, onChat = { go(Route.Chat) }, onOpen = { go(Route.Session(it)) }, onAlerts = { go(Route.Activity) }, onMenu = { menu = true }, onRepair = onRepair, onQuestion = { go(Route.Question(it)) })
-                    is Route.Voice -> VoiceScreen(session, voice, startListening = route.listen, onClose = { back() }, onChat = { go(Route.Chat) }, onSession = { go(Route.Session(it)) })
-                    Route.Chat -> ChatScreen(session, onClose = { back() }, onVoice = { go(Route.Voice(true)) }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) }, onQuestion = { go(Route.Question(it)) }, onBehavior = { title ->
-                        val b = session.behaviors.value?.behaviors?.let { all -> dev.herdertower.phone.api.BehaviorsApi.fromChatLine(title, all) }
-                        go(Route.Behaviors)
-                        if (b != null) go(Route.Behavior(b.id))
-                    }, focusPr = focusPr, onFocusedPr = { focusPr = null })
-                    Route.Spaces -> SpacesScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onSpace = { go(Route.Space(it)) })
-                    Route.Activity -> ActivityScreen(session, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
-                    is Route.Space -> SpaceScreen(session, route.name, onBack = { back() }, onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Screenshots(open = it)) })
-                    is Route.Session -> SessionScreen(session, route.address, onBack = { back() }, onShot = { go(Route.Screenshots(route.address, it)) }, onQuestion = { go(Route.Question(it)) })
-                    is Route.Question -> QuestionScreen(session, route.id, onClose = { back() }, onSession = { go(Route.Session(it)) })
-                    Route.Behaviors -> BehaviorsScreen(session, onBack = { back() }, onOpen = { go(Route.Behavior(it)) }, onAdd = { go(Route.Behavior(null)) })
-                    is Route.Behavior -> BehaviorScreen(session, route.id, onBack = { back() })
-                    is Route.Screenshots -> ScreenshotsScreen(session, route.session, route.open, onBack = { back() })
-                }
-            }
-            SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).navigationBarsPadding().padding(bottom = 96.dp))
-        }
-        if (menu) {
-            MenuSheet(session, theme, onTheme, onDismiss = { menu = false }, onGo = { menu = false; go(it) }, onRepair = { menu = false; onRepair() })
+
+    val top = stack.last()
+    // A new space's goal: kept here, so the talk button can write into it.
+    var goal by rememberSaveable { mutableStateOf("") }
+    val intoGoal = remember { TalkTarget.Into { said -> goal = if (goal.isBlank()) said else goal.trimEnd() + " " + said } }
+    // Where words said or typed on this screen go: a space's screens send to that space's own tower.
+    val target: TalkTarget = when (top) {
+        is Route.Space -> TalkTarget.Space(top.name)
+        is Route.Session -> missions.spaces.firstOrNull { m -> m.sessions.any { it.address == top.address } }?.let { TalkTarget.Space(it.name) } ?: TalkTarget.Main
+        Route.NewSpace -> intoGoal
+        else -> TalkTarget.Main
+    }
+    // A voice errand that went wrong says so wherever the user is.
+    val voiceError by voice.error.collectAsStateWithLifecycle()
+    LaunchedEffect(voiceError) {
+        voiceError?.let {
+            show(it)
+            voice.clearError()
         }
     }
-}
 
-@OptIn(ExperimentalMaterial3Api::class)
-@Composable
-private fun MenuSheet(session: TowerSession, theme: String, onTheme: (String) -> Unit, onDismiss: () -> Unit, onGo: (Route) -> Unit, onRepair: () -> Unit) {
-    val sheet = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-    val scope = rememberCoroutineScope()
-    val snack = LocalSnack.current
-    val context = LocalContext.current
-    val perms = rememberPermissions()
-    val state by session.state.collectAsStateWithLifecycle()
-    val spaces by session.spaces.collectAsStateWithLifecycle()
-    val jobs by session.jobs.collectAsStateWithLifecycle()
-    val voiceOn by session.voiceOn.collectAsStateWithLifecycle()
-    val creds by session.credentials.collectAsStateWithLifecycle()
-    val name by session.towerName.collectAsStateWithLifecycle()
-    var renaming by remember { mutableStateOf(false) }
-    var confirmUnpair by remember { mutableStateOf(false) }
-
-    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheet, containerColor = if (tc.dark) androidx.compose.ui.graphics.Color(0xFF17110E) else androidx.compose.ui.graphics.Color(0xFFFFF8F1)) {
-        Column(Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(horizontal = 24.dp).padding(bottom = 24.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
-            val held = spaces.spaces.sumOf { it.unread }
-            val running = jobs.count { it.open }
-            SheetRow(Icons.Filled.Workspaces, "Spaces", if (held > 0) "$held new" else plural(spaces.spaces.size, "space")) { onGo(Route.Spaces) }
-            SheetRow(Icons.Filled.Timeline, "Activity", if (running > 0) "$running running" else "Jobs and history") { onGo(Route.Activity) }
-            SheetRow(Icons.Filled.Forum, "Conversation", "Everything you and the tower said") { onGo(Route.Chat) }
-            val shots by session.screenshots.collectAsStateWithLifecycle()
-            val behaviorsOn by session.behaviorsSupported.collectAsStateWithLifecycle()
-            val behaviorData by session.behaviors.collectAsStateWithLifecycle()
-            if (behaviorsOn) SheetRow(Icons.Filled.Tune, "Behaviors", behaviorData?.let { "${it.behaviors.count { b -> b.enabled }} rules · how the tower works" } ?: "How the tower works") { onGo(Route.Behaviors) }
-            SheetRow(Icons.Filled.PhotoLibrary, "Screenshots", if (shots.isEmpty()) "What sessions show you" else plural(shots.size, "screenshot")) { onGo(Route.Screenshots()) }
-            Spacer(Modifier.height(10.dp))
-            val route by session.audioRoute.collectAsStateWithLifecycle()
-            Text("Replies to what you send", style = MaterialTheme.typography.labelLarge, color = tc.faint)
-            Segments(Modifier.fillMaxWidth()) {
-                listOf("phone" to "This phone", "mac" to "The Mac").forEach { (r, label) ->
-                    Segment(label, (route ?: "phone") == r) {
-                        scope.launch { session.setAudioRoute(r).onFailure { e -> snack("Couldn't switch: ${TowerSession.describe(e)}") } }
-                    }
-                }
-            }
-            Text(
-                if (route == "mac") "The Mac speaks; the phone shows the text." else "Heard here while the app is open (or for 2 minutes after you send); the Mac stays silent for them.",
-                style = MaterialTheme.typography.bodySmall, color = tc.muted,
-            )
-            Spacer(Modifier.height(10.dp))
-            Row(verticalAlignment = Alignment.CenterVertically) {
-                Column(Modifier.weight(1f)) {
-                    Text("Phone is the voice", style = MaterialTheme.typography.titleMedium, color = tc.text)
-                    Text(
-                        if (voiceOn) "Everything the tower says, alerts too, plays here, also with the screen off. The Mac stays silent."
-                        else "Off: alerts and the Mac's own turns are spoken on the Mac.",
-                        style = MaterialTheme.typography.bodySmall, color = tc.muted,
-                    )
-                }
-                Switch(voiceOn, { setVoice(it, session, perms, context) }, colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent))
-            }
-            // Phones (Samsung especially) stop background services to save battery: point to the exemption.
-            // The app's own settings page (Battery, then Unrestricted), not the direct exemption request,
-            // which needs a permission app stores only allow for a few kinds of app.
-            val power = context.getSystemService(android.os.PowerManager::class.java)
-            if (voiceOn && power != null && !power.isIgnoringBatteryOptimizations(context.packageName)) {
-                TextButton(onClick = {
-                    runCatching {
-                        context.startActivity(
-                            android.content.Intent(android.provider.Settings.ACTION_APPLICATION_DETAILS_SETTINGS)
-                                .setData("package:${context.packageName}".toUri()),
-                        )
-                    }
-                }) { Text("Keep the voice running in the background: Battery, then Unrestricted", color = tc.text) }
-            }
-            if (voiceOn) {
-                val hushWord by session.hushWord.collectAsStateWithLifecycle()
-                Spacer(Modifier.height(6.dp))
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Column(Modifier.weight(1f)) {
-                        Text("Say \"stop\" to stop", style = MaterialTheme.typography.titleMedium, color = tc.text)
-                        Text(
-                            "While it talks here, the phone listens for stop, hush or quiet.",
-                            style = MaterialTheme.typography.bodySmall, color = tc.muted,
-                        )
-                    }
-                    Switch(hushWord, { on -> if (on) perms.withMic { session.setHushWord(true) } else session.setHushWord(false) }, colors = SwitchDefaults.colors(checkedTrackColor = tc.accent, checkedThumbColor = tc.onAccent))
-                }
-            }
-            val qOn by session.questionsSupported.collectAsStateWithLifecycle()
-            val policy by session.questionPolicy.collectAsStateWithLifecycle()
-            if (qOn) {
-                Spacer(Modifier.height(10.dp))
-                Text("Questions sessions ask", style = MaterialTheme.typography.labelLarge, color = tc.faint)
-                Segments(Modifier.fillMaxWidth()) {
-                    listOf("normal" to "Normal", "keep-moving" to "Keep moving", "ask-everything" to "Ask me all").forEach { (p, label) ->
-                        Segment(label, (policy ?: "normal") == p) {
-                            scope.launch { session.setQuestionPolicy(p).onFailure { snack(TowerSession.describe(it)) } }
+    CompositionLocalProvider(
+        LocalSnack provides show, LocalMute provides mute, LocalStop provides stop,
+        LocalOpenSettings provides { go(Route.Settings) }, LocalReach provides connected,
+    ) {
+        Backdrop(orbPhase, needsYou = connected && waiting > 0) {
+            Column(Modifier.fillMaxSize()) {
+                Box(Modifier.weight(1f).fillMaxWidth()) {
+                    AnimatedContent(
+                        targetState = top,
+                        transitionSpec = {
+                            if (reduce) EnterTransition.None togetherWith ExitTransition.None
+                            else fadeIn(tween(220)) togetherWith fadeOut(tween(140))
+                        },
+                        contentKey = { Route.encode(it) },
+                        label = "route",
+                    ) { route ->
+                        when (route) {
+                            Route.Queue -> QueueScreen(
+                                session, onQuestion = { go(Route.Question(it)) }, onSession = { go(Route.Session(it)) }, onChat = { go(Route.Chat()) }, onRepair = onRepair,
+                                open = focusDecision, onOpened = { focusDecision = null },
+                            )
+                            Route.Spaces -> MissionsScreen(session, onSpace = { go(Route.Space(it)) }, onNew = { go(Route.NewSpace) })
+                            is Route.Space -> MissionScreen(
+                                session, route.name, onBack = { back() }, onSession = { go(Route.Session(it)) }, onQuestion = { go(Route.Question(it)) },
+                                onShot = { go(Route.Shots(open = it)) }, onChat = { go(Route.Chat(route.name)) },
+                            )
+                            is Route.Session -> SessionScreen(
+                                session, route.address, onBack = { back() }, onShot = { go(Route.Shots(route.address, it)) },
+                                onQuestion = { go(Route.Question(it)) }, onSession = { go(Route.Session(it)) },
+                            )
+                            Route.NewSpace -> NewSpaceScreen(
+                                session, goal, { goal = it }, onBack = { back() },
+                                onLaunched = { space -> stack = listOf(Route.Spaces, Route.Space(space)) },
+                                onAsked = { go(Route.Queue) },
+                            )
+                            Route.Record -> RecordScreen(session, onSession = { go(Route.Session(it)) }, onShot = { go(Route.Shots(open = it)) }, onChat = { go(Route.Chat()) })
+                            is Route.Shots -> ScreenshotsScreen(session, route.session, route.open, onBack = if (route.isTab) null else ({ back() }))
+                            Route.Settings -> SettingsScreen(session, theme, onTheme, onBack = { back() }, onRepair = onRepair, onBehaviors = { go(Route.Behaviors) })
+                            is Route.Chat -> ChatScreen(
+                                session, onClose = { back() },
+                                onVoice = {
+                                    voice.target = route.space?.let { TalkTarget.Space(it) } ?: TalkTarget.Main
+                                    voice.toggle()
+                                },
+                                space = route.space,
+                                onOpen = { go(Route.Session(it)) }, onShot = { go(Route.Shots(open = it)) },
+                                onBehavior = { title ->
+                                    val b = session.behaviors.value?.behaviors?.let { all -> dev.herdertower.phone.api.BehaviorsApi.fromChatLine(title, all) }
+                                    go(Route.Behaviors)
+                                    if (b != null) go(Route.Behavior(b.id))
+                                },
+                            )
+                            is Route.Question -> QuestionScreen(session, route.id, onClose = { back() }, onSession = { go(Route.Session(it)) })
+                            Route.Behaviors -> BehaviorsScreen(session, onBack = { back() }, onOpen = { go(Route.Behavior(it)) }, onAdd = { go(Route.Behavior(null)) })
+                            is Route.Behavior -> BehaviorScreen(session, route.id, onBack = { back() })
                         }
                     }
+                    // While a take runs: what the Mac has written down so far, over whatever screen is in front.
+                    ListeningOverlay(voice, orbPhase)
+                    SnackbarHost(snack, Modifier.align(Alignment.BottomCenter).padding(bottom = 8.dp))
                 }
-                Text(
-                    when (policy ?: "normal") {
-                        "keep-moving" -> "The tower answers borderline ones too; deploys, pushes, deleting and money still come to you."
-                        "ask-everything" -> "Nothing is answered for you: every question comes here."
-                        else -> "The tower answers routine ones (a quiet line in the chat) and leaves the rest to you."
-                    },
-                    style = MaterialTheme.typography.bodySmall, color = tc.muted,
-                )
-            }
-            Spacer(Modifier.height(10.dp))
-            Text("Mac microphone", style = MaterialTheme.typography.labelLarge, color = tc.faint)
-            Segments(Modifier.fillMaxWidth()) {
-                listOf("ptt" to "Press to talk", "handsfree" to "Hands-free", "off" to "Off").forEach { (m, label) ->
-                    Segment(label, state?.mode == m) {
-                        scope.launch { session.act { it.mode(m) }.onFailure { e -> snack(TowerSession.describe(e)) } }
+                if (top.bars) {
+                    // Above the keyboard while typing (the tabs give way to it), above the tabs otherwise.
+                    Column(Modifier.imePadding()) {
+                        TalkBar(
+                            session, voice, composer, target, input = top != Route.NewSpace,
+                            // Sent to the main tower from another screen: the queue is where its reply shows.
+                            onSent = { if (target == TalkTarget.Main && top != Route.Queue) go(Route.Queue) },
+                        )
+                        if (!WindowInsets.isImeVisible) BottomNav(Route.tabOf(stack), waiting) { go(Route.of(it)) }
+                        else Spacer(Modifier.navigationBarsPadding())
                     }
                 }
             }
-            Spacer(Modifier.height(6.dp))
-            Text("Look", style = MaterialTheme.typography.labelLarge, color = tc.faint)
-            Segments(Modifier.fillMaxWidth()) {
-                listOf("system" to "Auto", "dark" to "Dark", "light" to "Light").forEach { (t, label) -> Segment(label, theme == t) { onTheme(t) } }
-            }
-            Text("Orb drawing", style = MaterialTheme.typography.labelLarge, color = tc.faint)
-            var orbChoice by remember { mutableStateOf(session.settings.orbTier) }
-            Segments(Modifier.fillMaxWidth()) {
-                listOf("auto" to "Auto", "Full" to "Full", "Analytic" to "Simple", "Gradient" to "Gradient").forEach { (k, label) ->
-                    Segment(label, orbChoice == k) {
-                        orbChoice = k
-                        session.settings.orbTier = k
-                        dev.herdertower.phone.orb.OrbProbe.override = dev.herdertower.phone.orb.OrbTier.entries.firstOrNull { it.name == k }
-                    }
-                }
-            }
-            Spacer(Modifier.height(10.dp))
-            TextButton(onClick = { renaming = true }) { Text("Name this tower (${name.ifBlank { "not set" }})", color = tc.text) }
-            TextButton(onClick = onRepair) { Text("Pair again…", color = tc.text) }
-            TextButton(onClick = { confirmUnpair = true }) { Text("Unpair this phone", color = tc.failed) }
-            creds?.let { c ->
-                val link by session.link.collectAsStateWithLifecycle()
-                val via by session.activeRoute.collectAsStateWithLifecycle()
-                val v = via
-                Text(
-                    when {
-                        link is Link.Live && v != null -> "Connected ${if (v.tailscale) "over Tailscale" else "on Wi-Fi"} (${v.host.host})"
-                        link is Link.Live -> "Connected"
-                        else -> "Not connected"
-                    },
-                    Modifier.semantics { contentDescription = "Connection: " + (if (link is Link.Live && v != null) v.label else "not connected") },
-                    style = MaterialTheme.typography.labelMedium, color = tc.muted,
-                )
-                Text("${c.deviceName} · ${dev.herdertower.phone.api.Hosts.describe(c.hosts, c.magicDns)}", style = MaterialTheme.typography.labelSmall, color = tc.faint)
-                // Not connected: what each address did on the last try (refused, no answer, blocked by Android…).
-                val tries by session.routeTries.collectAsStateWithLifecycle()
-                if (link !is Link.Live && tries.isNotEmpty()) {
-                    Text("Last try: " + tries.joinToString(" · ") { it.line }, style = MaterialTheme.typography.labelSmall, color = tc.muted)
-                }
-            }
-            // What's under the hood on this phone (read it out when something looks wrong).
-            val orb by dev.herdertower.phone.orb.OrbProbe.report.collectAsStateWithLifecycle()
-            val frameMs by dev.herdertower.phone.orb.OrbProbe.frameMs.collectAsStateWithLifecycle()
-            val drawnSteps by dev.herdertower.phone.orb.OrbProbe.drawnSteps.collectAsStateWithLifecycle()
-            val playback by session.player.stats.collectAsStateWithLifecycle()
-            val take by dev.herdertower.phone.voice.Takes.last.collectAsStateWithLifecycle()
-            val hushOn by session.hushWord.collectAsStateWithLifecycle()
-            androidx.compose.foundation.text.selection.SelectionContainer {
-                Text(
-                    "Diagnostics: " + (orb?.line(frameMs, drawnSteps) ?: "probing the orb…") +
-                        "\n" + playback.line() + " · say-stop ${if (hushOn && voiceOn) "on" else "off"}" +
-                        "\n" + (take?.line() ?: "no take yet"),
-                    Modifier.padding(top = 6.dp), style = MaterialTheme.typography.labelSmall, color = tc.faint,
-                )
-            }
         }
-    }
-    if (renaming) {
-        var text by remember { mutableStateOf(name) }
-        AlertDialog(
-            onDismissRequest = { renaming = false },
-            title = { Text("Name this tower") },
-            text = { OutlinedTextField(text, { text = it.take(40) }, singleLine = true, label = { Text("The Mac's name") }) },
-            confirmButton = { TextButton(onClick = { session.renameTower(text); renaming = false }) { Text("Save") } },
-            dismissButton = { TextButton(onClick = { renaming = false }) { Text("Cancel") } },
-        )
-    }
-    if (confirmUnpair) {
-        AlertDialog(
-            onDismissRequest = { confirmUnpair = false },
-            title = { Text("Unpair this phone?") },
-            text = { Text("The tower revokes this phone's token, and the app forgets it. You can pair again with “tower phone pair”.") },
-            confirmButton = {
-                TextButton(onClick = {
-                    confirmUnpair = false
-                    onDismiss()
-                    scope.launch { session.unpair(tellTower = true) }
-                }) { Text("Unpair", color = tc.failed) }
-            },
-            dismissButton = { TextButton(onClick = { confirmUnpair = false }) { Text("Cancel") } },
-        )
-    }
-}
-
-@Composable
-private fun SheetRow(icon: ImageVector, title: String, detail: String, onClick: () -> Unit) {
-    Row(
-        Modifier.fillMaxWidth().clickable(role = Role.Button, onClick = onClick).padding(vertical = 12.dp),
-        verticalAlignment = Alignment.CenterVertically,
-        horizontalArrangement = Arrangement.spacedBy(16.dp),
-    ) {
-        Box(Modifier.size(40.dp), contentAlignment = Alignment.Center) { Icon(icon, null, tint = tc.accentHi.takeIf { tc.dark } ?: tc.accent) }
-        Column(Modifier.weight(1f)) {
-            Text(title, style = MaterialTheme.typography.titleMedium, color = tc.text, fontWeight = FontWeight.Medium)
-            Text(detail, style = MaterialTheme.typography.bodySmall, color = tc.muted)
-        }
-        Icon(Icons.AutoMirrored.Filled.ArrowForward, null, tint = tc.faint)
     }
 }
 
@@ -548,7 +379,7 @@ fun ConnectionNotice(link: Link, session: TowerSession, onRepair: () -> Unit, mo
     // Without the local network permission (Android 17+) retrying can't help: say what's missing instead.
     val localNet = rememberLocalNetwork { session.reconnect() }
     if (localNet.needed) return LocalNetworkNotice(localNet, modifier)
-    val notice = HomeModel.connectionNotice(link) ?: return
+    val notice = LinkModel.connectionNotice(link) ?: return
     val retry = notice.action == NoticeAction.Retry
     GlassCard(modifier.fillMaxWidth()) {
         Row(verticalAlignment = Alignment.CenterVertically) {
@@ -561,4 +392,3 @@ fun ConnectionNotice(link: Link, session: TowerSession, onRepair: () -> Unit, mo
         }
     }
 }
-

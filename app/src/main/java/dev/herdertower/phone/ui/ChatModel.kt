@@ -49,6 +49,7 @@ object ChatModel {
     fun entry(m: dev.herdertower.phone.api.ChatMessage): HistoryEntry = HistoryEntry(
         at = m.at,
         kind = when {
+            m.kind == "act" -> "act"
             m.mine -> "request"
             m.fromTower -> "answer"
             else -> m.kind ?: m.role
@@ -57,8 +58,8 @@ object ChatModel {
         text = m.text, attachments = m.attachmentPaths(), id = m.id, diff = m.diff,
     )
 
-    /** A message sent from here, shown until the thread brings it back. */
-    data class Pending(val text: String, val atMs: Long, val files: Int)
+    /** A message sent from here, shown until the thread brings it back; [space]: the space's tower it went to. */
+    data class Pending(val text: String, val atMs: Long, val files: Int, val space: String? = null)
 
     private fun norm(t: String) = t.removePrefix("[voice] ").replace(Regex("""\[(Image|Video) #\d+]|\[File #\d+: [^\]]*]"""), "").replace(Regex("""\s+"""), " ").trim()
 

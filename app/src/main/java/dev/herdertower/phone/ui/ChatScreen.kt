@@ -95,13 +95,22 @@ private sealed interface ChatRow {
 
 @Composable
 fun ChatScreen(
-    session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit, onQuestion: (String) -> Unit = {}, onBehavior: (String) -> Unit = {},
+    session: TowerSession, onClose: () -> Unit, onVoice: () -> Unit, onOpen: (String) -> Unit, onShot: (String) -> Unit, onBehavior: (String) -> Unit = {},
     /** A PR's key (`owner/repo#n`) whose chip to show (from its notification), and that it was shown. */
     focusPr: String? = null, onFocusedPr: () -> Unit = {},
+    /** A space's own conversation (with its own tower); null: the main one. */
+    space: String? = null,
 ) {
-    val questions by session.questions.collectAsStateWithLifecycle()
     val history by session.history.collectAsStateWithLifecycle()
-    val thread by session.thread.collectAsStateWithLifecycle()
+    val mainThread by session.thread.collectAsStateWithLifecycle()
+    val spaceChats by session.spaceChats.collectAsStateWithLifecycle()
+    val acts by session.acts.collectAsStateWithLifecycle()
+    LaunchedEffect(space) { if (space != null) session.loadSpaceChat(space) }
+    // The main conversation leaves out what was asked of a space's own tower; a space's shows only that (its requests without "In <space>: ").
+    val thread = remember(space, mainThread, spaceChats) {
+        if (space == null) mainThread.filter(dev.herdertower.phone.api.ChatApi::inMain)
+        else spaceChats[space].orEmpty().map { it.copy(text = dev.herdertower.phone.api.ChatApi.bare(it.text, space)) }
+    }
     val threadOn by session.threadSupported.collectAsStateWithLifecycle()
     val threadMore by session.threadMore.collectAsStateWithLifecycle()
     val state by session.state.collectAsStateWithLifecycle()
@@ -112,12 +121,14 @@ fun ChatScreen(
     val snack = LocalSnack.current
     val context = LocalContext.current
     val composer = context.tower.composer
-    val actions = rememberComposerActions(composer, onTalk = onVoice)
-    val thinking = link is Link.Live && (state?.phase == "thinking" || state?.phase == "transcribing")
+    val actions = rememberComposerActions(composer, onTalk = onVoice, space = space)
+    // The working line is the main tower's: a space's own tower doesn't say what it does.
+    val thinking = space == null && link is Link.Live && (state?.phase == "thinking" || state?.phase == "transcribing")
     // A tower from before `work`: the phone times the turn from when it saw it start.
     var since by remember { mutableLongStateOf(0L) }
     LaunchedEffect(thinking) { since = if (thinking) System.currentTimeMillis() else 0L }
-    val pendingSent by composer.pending.collectAsStateWithLifecycle()
+    val pendingAll by composer.pending.collectAsStateWithLifecycle()
+    val pendingSent = remember(pendingAll, space) { pendingAll.filter { it.space == space } }
     // The clock moves each second only while something timed shows (the working line, a message on its way);
     // otherwise once a minute is enough, and the whole screen isn't recomposed every second.
     val ticking = thinking || state?.work != null || pendingSent.isNotEmpty()
@@ -131,9 +142,9 @@ fun ChatScreen(
     var viewing by remember { mutableStateOf<Pair<List<Pic>, Int>?>(null) }
 
     // The tower's thread when it has one (the same as the Mac panel's); otherwise the history.
-    val useThread = threadOn == true
+    val useThread = threadOn == true || space != null
     val entries = remember(useThread, thread, history) { if (useThread) thread.map(ChatModel::entry) else history }
-    val work = state?.work?.takeIf { link is Link.Live && ChatModel.showWork(it, entries, now) }
+    val work = state?.work?.takeIf { space == null && link is Link.Live && ChatModel.showWork(it, entries, now) }
         ?: if (thinking && since > 0) dev.herdertower.phone.api.Work("Thinking", "", since, since, 0) else null
     // The reply in progress: what the tower says this turn, until the answer lands on the thread.
     val saying = state?.takeIf { work != null && it.said.isNotBlank() && it.saidMs >= work.sinceMs }?.said
@@ -168,7 +179,8 @@ fun ChatScreen(
         entries = entries,
         curated = useThread,
         pending = waiting,
-        canLoadMore = if (useThread) threadMore else history.isNotEmpty(),
+        canLoadMore = if (space != null) false else if (useThread) threadMore else history.isNotEmpty(),
+        title = if (space == null) "Conversation" else space,
         work = work,
         saying = saying,
         now = now,
@@ -193,6 +205,13 @@ fun ChatScreen(
         sentFiles = { e ->
             SentFiles(session, e) { pics, i -> viewing = pics to i }
         },
+        actCard = { e ->
+            val a = thread.firstOrNull { it.id == e.id }?.let { dev.herdertower.phone.api.ChatApi.actOf(it, acts) }
+            if (a != null) Row(Modifier.fillMaxWidth()) {
+                Spacer(Modifier.width(38.dp))
+                ActCard(a, session, Modifier.padding(end = 32.dp))
+            } else ReplyBubble(e)
+        },
         prChip = { e ->
             val p = prOfMessage[e.id]?.let { m -> prs[m.id]?.takeIf { dev.herdertower.phone.api.PrsApi.newer(m, it) } ?: m }
             if (p != null) PrChip(p, onMerge = { merging = p }, highlighted = highlight == e.id, at = e.at) else EventLine(e, acc, onOpen)
@@ -200,10 +219,6 @@ fun ChatScreen(
         focus = focus,
         onFocused = { focus = null },
         inputBar = {
-            // Questions left to the user stay in view above the input, until answered.
-            // A short screen (landscape, large text) keeps room for the input: the cards scroll in less.
-            val tall = with(androidx.compose.ui.platform.LocalDensity.current) { androidx.compose.ui.platform.LocalWindowInfo.current.containerSize.height.toDp() } >= 560.dp
-            QuestionCards(QuestionModel.forUser(questions), onQuestion, Modifier.padding(start = 12.dp, end = 12.dp, top = 6.dp).heightIn(max = if (tall) 260.dp else 96.dp).verticalScroll(rememberScrollState()), compact = true)
             Column(
                 Modifier
                     .padding(horizontal = 12.dp, vertical = 10.dp)
@@ -219,7 +234,7 @@ fun ChatScreen(
                 }
                 Row(verticalAlignment = Alignment.Bottom) {
                     AttachButton(actions, size = 44.dp)
-                    DraftField(composer, "Ask the tower", 1, actions.send, actions.add, Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 11.dp))
+                    DraftField(composer, if (space == null) "Ask the tower" else "Ask the $space tower", 1, actions.send, actions.add, Modifier.weight(1f).padding(horizontal = 10.dp, vertical = 11.dp))
                     DictateButton(composer, actions, size = 44.dp)
                     Spacer(Modifier.width(6.dp))
                     SendOrTalk(composer, session, actions, 48.dp)
@@ -306,10 +321,13 @@ fun ChatContent(
     activePills: @Composable (Modifier) -> Unit = {},
     /** A PR a session opened (`kind` pr): its chip. */
     prChip: @Composable (HistoryEntry) -> Unit = { EventLine(it, accounts, onOpen) },
+    /** What the tower opened for a request (`kind` act): its receipt, with Undo. */
+    actCard: @Composable (HistoryEntry) -> Unit = { ReplyBubble(it) },
     /** A message to scroll to (its id), once; [onFocused] after. */
     focus: String? = null,
     onFocused: () -> Unit = {},
     inputBar: @Composable () -> Unit,
+    title: String = "Conversation",
 ) {
     val list = rememberLazyListState()
     val rows = remember(entries) {
@@ -360,7 +378,7 @@ fun ChatContent(
 
     GlassScaffold(header = {
         HeaderClose(onClose)
-        Text("Chat", Modifier.padding(start = 4.dp, end = 10.dp), style = MaterialTheme.typography.titleMedium, color = tc.text, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, maxLines = 1)
+        Text(title, Modifier.padding(start = 4.dp, end = 10.dp), style = MaterialTheme.typography.titleMedium, color = tc.text, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold, maxLines = 1)
         Box(Modifier.weight(1f)) { activePills(Modifier.fillMaxWidth()) }
         StopSlot()
     }) {
@@ -380,8 +398,8 @@ fun ChatContent(
             if (rows.isEmpty()) {
                 item {
                     Column(Modifier.fillMaxWidth().padding(top = 120.dp), horizontalAlignment = Alignment.CenterHorizontally, verticalArrangement = Arrangement.spacedBy(8.dp)) {
-                        Text("Say hi to the tower", style = MaterialTheme.typography.headlineSmall, color = tc.text)
-                        Text("Type below, or tap the mic and talk.", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
+                        Text("Nothing said yet", style = MaterialTheme.typography.headlineSmall, color = tc.text)
+                        Text("What you ask the tower and what it answers is kept here.", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
                     }
                 }
             }
@@ -396,6 +414,7 @@ fun ChatContent(
                             "behavior" -> BehaviorChangeCard(r.e.text, r.e.diff) { onBehavior(r.e.text) }
                             "answer" -> ReplyBubble(r.e, replyShots)
                             "pr" -> prChip(r.e)
+                            "act" -> actCard(r.e)
                             "screenshot" -> if (r.e.id != null && !curated) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
                             else -> EventLine(r.e, accounts, onOpen)
                         }
@@ -460,7 +479,7 @@ fun ReplyBubble(e: HistoryEntry, shots: @Composable (List<ChatModel.ShotRef>, Mo
 
 /** While the brain works: its step ("Delegating to orb-rust") and how long the turn has taken, as the panel's working line. */
 @Composable
-private fun WorkingLine(work: dev.herdertower.phone.api.Work, now: Long) {
+fun WorkingLine(work: dev.herdertower.phone.api.Work, now: Long) {
     val reduce = LocalReduceMotion.current
     val (word, detail) = ChatModel.workLine(work, now)
     val elapsed = (now - work.sinceMs).coerceAtLeast(0)

@@ -334,7 +334,7 @@ def whisper(wav):
 def chat_message(e, i):
     """A history entry as a message of the main chat thread (GET /v1/chat, event chat), as docs/mobile-api.md."""
     kind = e["kind"]
-    role = {"request": "user", "answer": "tower", "screenshot": "screenshots", "pr": "pr"}.get(kind, "event")
+    role = {"request": "user", "answer": "tower", "act": "tower", "screenshot": "screenshots", "pr": "pr"}.get(kind, "event")
     atts = []
     for n, path in enumerate(e.get("attachments", []), 1):
         name = path.rsplit("/", 1)[-1]
@@ -342,11 +342,14 @@ def chat_message(e, i):
         atts.append({"n": n, "kind": k, "name": name, "path": path, "url": "/v1/attachments/" + "/".join(path.split("/")[-2:]) if k == "image" else None})
     m = {"id": f"h{i}", "at": e["at"], "updated_at": e["at"], "role": role, "kind": kind, "text": e.get("text", "") if kind != "screenshot" else "",
          "source": e.get("source", "phone:d_fake" if role == "user" else "tower"), "attachments": atts, "screenshots": []}
-    for k in ("session", "name", "account", "status"):
+    for k in ("session", "name", "account", "status", "space", "from", "from_name", "to_name"):
         if k in e:
             m[k] = e[k]
     if kind == "behavior":
         m["diff"] = e.get("diff", "")
+    if kind == "act":
+        m["act"] = ACTS.get(e["id"])
+        m["text"] = (m["act"] or {}).get("closing") or (m["act"] or {}).get("line", "")
     if kind == "pr":
         p = PRS.get(e["id"])
         m["space"] = e.get("space")
@@ -360,7 +363,7 @@ def chat_message(e, i):
 
 
 def thread():
-    return [chat_message(e, i + 1) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "watch", "alert", "summary", "screenshot", "answered", "behavior", "pr") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
+    return [chat_message(e, i + 1) for i, e in enumerate(HISTORY) if e["kind"] in ("request", "answer", "act", "watch", "alert", "summary", "screenshot", "answered", "behavior", "pr") or (e["kind"] == "job" and e.get("status") in ("done", "blocked"))]
 
 
 def add_history(e):
@@ -394,10 +397,12 @@ def speak(sentences):
     HUSHED[0] = False
 
 
-def reply_to(text, attachments=()):
+def reply_to(text, attachments=(), space=None):
     e = {"at": now(), "kind": "request", "text": "[voice] " + text}
     if attachments:
         e["attachments"] = list(attachments)
+    if space:
+        e["space"] = space
     add_history(e)
     if any(v for _, v in SUBS) and not STATE.get("muted"):
         cid = f"a{secrets.token_hex(3)}"
@@ -409,10 +414,20 @@ def reply_to(text, attachments=()):
     set_state(work={"word": "Reading", "detail": "web", "since_ms": t, "at_ms": now(), "done_ms": 0})
     time.sleep(2.5)
     said = brain_behavior(text)
-    answer = [said] if said else ["You said: " + text + ".", "This is the fake tower, so nothing really happened.", "Web is still on the checkout page.", "Api is waiting for your answer."]
+    shown = None
+    if said:
+        answer = [said]
+    elif QUIET[0]:
+        # A command gets a receipt with what was assumed, a question one reply: never a question back.
+        shown, answer = quiet_reply(text, space)
+    else:
+        answer = ["You said: " + text + ".", "This is the fake tower, so nothing really happened.", "Web is still on the checkout page.", "Api is waiting for your answer."]
     # While it speaks, what it says is the state's `said`; the answer lands on the thread after.
     speak(answer)
-    add_history({"at": now(), "kind": "answer", "text": " ".join(answer)})
+    out = {"at": now(), "kind": "answer", "text": shown or " ".join(answer)}
+    if space:
+        out["space"] = space
+    add_history(out)
     set_state(work=None)
 
 
@@ -433,6 +448,7 @@ def multipart(body, ctype):
 
 # Questions (docs/questions.md in herder-tower): sets that blocked sessions ask, recommendations, the 90/10 decision.
 QUESTIONS = {}
+Q_WHO = [("t3", "api"), ("t5", "web")]  # who asks the sets of questions_life
 QPOLICY = ["normal"]
 
 
@@ -440,6 +456,8 @@ def q_publish(op, qs):
     STATE["questions"] = [x for x in QUESTIONS.values()]
     STATE["question_policy"] = QPOLICY[0]
     publish("question", {"op": op, "id": qs["id"], "question": qs if op != "closed" else None})
+    if QUIET[0]:
+        d_changed()  # an escalated set is a decision in the queue
 
 
 def q_open(qs):
@@ -467,7 +485,8 @@ def opt(label, description=""):
 def questions_life():
     """An escalated three-question set whose recommendations take a few seconds, a permission prompt, and a
     routine question the tower answers by itself (a quiet 'answered' line in the chat)."""
-    q1 = {"id": "q3f1a9c", "session": "t3", "name": "api", "kind": "claude-ask", "title": "3 questions: Database, Features, Deploy",
+    (a_addr, a_name), (b_addr, b_name) = Q_WHO
+    q1 = {"id": "q3f1a9c", "session": a_addr, "name": a_name, "kind": "claude-ask", "title": "3 questions: Database, Features, Deploy",
           "detail": "", "context": "Set up the orders service",
           "tabs": [
               {"title": "Database", "question": "Which database should the orders service use?", "options": [opt("Postgres", "the shared cluster, with the other services"), opt("SQLite", "one file next to the service"), opt("DynamoDB", "managed, pay per request")], "multi": False, "allows_other": True, "answered": False},
@@ -475,7 +494,7 @@ def questions_life():
               {"title": "Deploy", "question": "Should I deploy it to production once the tests pass?", "options": [opt("Yes, deploy"), opt("Staging only"), opt("Don't deploy yet")], "multi": False, "allows_other": True, "answered": False}],
           "current_tab": 0, "submit_state": "answering", "recommendations": None, "decision": "escalate",
           "reason": "deploying to production is yours to decide", "status": "open", "error": None, "answered_with": None, "at_ms": now() - 60_000}
-    q2 = {"id": "q7c20e1", "session": "t5", "name": "web", "kind": "claude-permission", "title": "Run a command",
+    q2 = {"id": "q7c20e1", "session": b_addr, "name": b_name, "kind": "claude-permission", "title": "Run a command",
           "detail": "rm -rf build/ && npm run build:prod", "context": "Fix the checkout page",
           "tabs": [{"title": "", "question": "Do you want to proceed?", "options": [opt("Yes"), opt("Yes, and don't ask again for rm in this project"), opt("No, and tell Claude what to do differently")], "multi": False, "allows_other": False, "answered": False}],
           "current_tab": 0, "submit_state": "single", "recommendations": [{"tab": 0, "options": [
@@ -511,7 +530,7 @@ def questions_life():
     add_history({"at": now(), "kind": "answered", "session": "t1", "name": "docs", "text": "answered for you: Which test runner should I use? -> Vitest, because the project already uses Vite"})
     time.sleep(int(os.environ.get("FAKE_TEXT_QUESTION_S", "20")))
     # A session finished its turn with a question in plain text; the tower leaves it to the user.
-    q_open({"id": "qtx51d0", "session": "t5", "name": "web", "kind": "text", "title": "Open the PR now?", "detail": "", "context": "Fix the checkout page",
+    q_open({"id": "qtx51d0", "session": b_addr, "name": b_name, "kind": "text", "title": "Open the PR now?", "detail": "", "context": "Fix the checkout page",
             "tabs": [{"title": "", "question": "The checkout fix is done and tested. Want me to open the PR now, or wait for the design review?", "options": [], "multi": False, "allows_other": True, "answered": False}],
             "current_tab": 0, "submit_state": "single", "recommendations": [{"tab": 0, "options": [
                 {"label": "Wait for the design review", "why": "the design team asked to see it first", "choice": {"other": "Wait for the design review, then open the PR."}},
@@ -772,6 +791,685 @@ def brain_behavior(text):
     return None
 
 
+
+# --- Quiet Tower (herder-tower docs/quiet-tower.md, "Step 11: the phone") ---
+# The queue of decisions, spaces as missions, the thread between sessions, setups, launch and the tell level.
+# The data is the design's own example (docs/quiet-tower.html). `--legacy` turns all of it off: every new call
+# answers 404 and the state has no `decisions`, as a tower from before does, so the app's fallback can be tried.
+
+QUIET = [True]
+TELL = ["decisions"]
+VOICE = ["replies"]
+ACTS = {}            # id -> act: what the tower opened for a command, with what it assumed
+ACT_LINE = {}        # act id -> its chat message's history index
+DECISIONS = {}       # id -> decision as kept (the queue is made from these and the escalated question sets)
+MISSIONS = []
+QUIET_NAMES = ["B2C support", "eyz-mediaroom-serverless", "b2c", "b2c-tickets", "B2B ticketing", "eyzflow", "uiux"]
+CLOSED_TODAY = []
+THREADS = {}
+ACTIONS = {}         # id -> a launch or a close a phone started
+CLOSED_DECISIONS = []
+MODEL = {"program": "claude", "model": "claude-opus-5-5", "effort": "high",
+         "choices": {"models": [{"id": "claude-fable-5-2", "label": "Fable 5.2"}, {"id": "claude-opus-5-5", "label": "Opus 5.5"},
+                                {"id": "claude-sonnet-5-5", "label": "Sonnet 5.5"}, {"id": "claude-haiku-5-5", "label": "Haiku 5.5"}],
+                     "efforts": ["low", "medium", "high", "xhigh", "max"]},
+         "running": [{"brain": "tower", "space": None, "address": "t1", "model": "claude-opus-5-5", "effort": "high", "restart": False}],
+         "restart_needed": False, "locked_by_args": False, "locked": {"model": None, "effort": None}}
+SETUPS = [
+    {"name": "eyzflow + mediaroom on orca", "account": "orca", "repos": ["~/Work/eyz/eyzflow", "~/Work/eyz/eyz-mediaroom-serverless"]},
+    {"name": "landing page on orca", "account": "orca", "repos": ["~/Work/eyz/industrial-landing-page"]},
+    {"name": "herder-tower on default", "account": "default", "repos": ["~/Work/herder-tower"]},
+]
+PORT = [3018]
+
+
+def _ms(address, name, status, account, worktree, port, said):
+    branch = "/".join(reversed(worktree.split("@", 1))) if worktree and "@" in worktree else None
+    return {"address": address, "name": name, "status": status, "account": account, "worktree": worktree, "branch": branch, "port": port, "said": said}
+
+
+def model_says():
+    label = lambda m: next((c["label"] for c in MODEL["choices"]["models"] if c["id"] == m), m)
+    run = MODEL["running"][0]
+    says = f"The tower's brain runs on {label(run['model'])} at {run['effort']} effort."
+    if MODEL["restart_needed"]:
+        says += f" {label(MODEL['model'])} at {MODEL['effort']} effort applies when it restarts."
+    return dict(MODEL, says=says)
+
+
+def quiet_world():
+    """Replaces the made-up shop with the design's example: five missions, three decisions, a thread, a record."""
+    global SPACES
+    MISSIONS[:] = [
+        {"name": "sandbox", "goal": "A plan for the storefront live editor", "done_when": "the plan is written and all three sessions agree on it",
+         "standing": False, "state": "open", "follow": False, "mute": False, "report": None, "thread_count": 33,
+         "sessions": [_ms("s1", "eyzflow", "done", "orca", "eyzflow@sandbox", 3010, "Wrote the plan"),
+                      _ms("s2", "mediaroom", "done", "orca", "mediaroom@sandbox", 3011, "Answered the planning questions"),
+                      _ms("s3", "project", "done", "orca", "sandbox-project@sandbox", 3012, "Checked the estimate")],
+         "requests": [{"id": "a31", "title": "Plan the storefront live editor", "state": "done", "done": 3, "total": 3}],
+         "tower": {"name": "tower-sandbox", "status": "ready", "address": "t21"}},
+        {"name": "isa", "goal": "Voice clips for the Ingest tour, live", "done_when": "the release is out and the tour plays on production",
+         "standing": False, "state": "open", "follow": False, "mute": False, "report": None, "thread_count": 1,
+         "sessions": [_ms("s4", "eyzflow", "done", "orca", "eyzflow@isa", 3013, "Uploaded 12 clips to dev and production"),
+                      _ms("s5", "mediaroom", "working", "orca", "mediaroom@isa", 3014, "Runs the last step after the two merges")],
+         "requests": [{"id": "a32", "title": "Voice clips for the Ingest tour", "state": "working", "done": 5, "total": 6}],
+         "tower": {"name": "tower-isa", "status": "working", "address": "t22"}},
+        {"name": "industrial-landing-page", "goal": "New product drawings on the landing page", "done_when": "every section has its drawing and the page is live",
+         "standing": False, "state": "open", "follow": False, "mute": False, "report": None, "thread_count": 0,
+         "sessions": [_ms("s6", "landing", "working", "orca", "industrial-landing-page@landing", 3015, "Reworking the product drawings")],
+         "requests": [{"id": "a33", "title": "Rework the product drawings", "state": "working", "done": 0, "total": 1}]},
+        {"name": "M5 Pro", "goal": None, "done_when": None, "standing": True, "state": "open", "follow": False, "mute": False, "report": None, "thread_count": 0,
+         "sessions": [_ms("s7", "herder-tower · default", "done", "default", "herder-tower@m5-pro-1", None, "Merged the fix and restarted the tower"),
+                      _ms("s8", "herder-tower · orca", "working", "orca", "herder-tower@m5-pro-2", None, "Rethinking the Mac tower's UX")],
+         "requests": [{"id": "a34", "title": "Rethink the Mac tower's UX", "state": "working", "done": 0, "total": 1}]},
+        {"name": "Anna", "goal": "Support pictures on cases, in production", "done_when": "the release is live and the case shows its pictures",
+         "standing": False, "state": "ready", "follow": False, "mute": False, "thread_count": 1,
+         "report": "Support pictures are live on production. Released at 14:55 UTC, health check passing. Both sessions have finished.",
+         "sessions": [_ms("s9", "eyzflow", "done", "orca", "eyzflow@anna", 3016, "Checked the case on production"),
+                      _ms("s10", "mediaroom", "done", "orca", "mediaroom@anna", 3017, "Release live since 14:55 UTC")],
+         "requests": [{"id": "a35", "title": "Support pictures, released", "state": "done", "done": 2, "total": 2}]},
+    ]
+    STATE["agents"] = [{"address": x["address"], "name": x["name"], "status": "idle" if x["status"] == "done" else x["status"], "app": "claude-code", "account": x["account"]}
+                       for m in MISSIONS for x in m["sessions"]]
+    SPACES = [(m["name"], [x["address"] for x in m["sessions"]], m["goal"]) for m in MISSIONS]
+    DECISIONS.clear()
+    for d in [
+        {"id": "d-db", "key": "raised:sandbox:production-read", "kind": "permission", "space": "sandbox", "sessions": ["s1", "s2", "s3"],
+         "title": "Allow one read of the production database", "why": "Production data",
+         "detail": "psql $PROD_READONLY -c \"select id, status, updated_at from storefront_drafts limit 200\"",
+         "options": [{"label": "Allow once", "why": "", "pick": True}, {"label": "No", "why": "", "pick": False}], "prs": [], "first_ms": now() - 2 * MIN},
+        {"id": "d-pick", "key": "question:industrial-landing-page:which-microscope-drawing", "kind": "choice", "space": "industrial-landing-page", "sessions": ["s6"],
+         "title": "Which microscope drawing?", "why": "Design choice", "detail": "",
+         "options": [{"label": "B, magnified view", "why": "the tower's pick: it reads at small sizes", "pick": True}, {"label": "A", "why": "", "pick": False}, {"label": "C", "why": "", "pick": False}],
+         "prs": [], "first_ms": now() - 4 * MIN},
+        {"id": "d-pr", "key": "merge:example/mediaroom", "kind": "merge", "space": "isa", "sessions": [],
+         "title": "2 pull requests ready to merge", "why": "Merge", "detail": "",
+         "options": [],
+         "prs": [{"repo": "example/mediaroom", "number": 1273, "base": "dev"}, {"repo": "example/mediaroom", "number": 1277, "base": "main"}],
+         "first_ms": now() - 31 * MIN},
+    ]:
+        DECISIONS[d["id"]] = dict(d, question_id=None, last_ms=d["first_ms"], count=1, state="open")
+    THREADS.clear()
+    THREADS["sandbox"] = [
+        {"at": T0 - 26 * MIN, "from": "s3", "from_name": "project", "to": "s1", "to_name": "eyzflow", "text": "Four changes to the plan summary."},
+        {"at": T0 - 9 * MIN, "from": "s2", "from_name": "mediaroom", "to": "s1", "to_name": "eyzflow", "text": "Answers on stale writes and publish events."},
+        {"at": T0 - 6 * MIN, "from": "s2", "from_name": "mediaroom", "to": "s1", "to_name": "eyzflow", "text": "Answer on the read-only key question."},
+    ]
+    THREADS["isa"] = [{"at": T0 - 50 * MIN, "from": "s5", "from_name": "mediaroom", "to": "s4", "to_name": "eyzflow", "text": "The clips are ready and release #1277 is open."}]
+    THREADS["Anna"] = [{"at": T0 - 8 * 60 * MIN, "from": "s9", "from_name": "eyzflow", "to": "s10", "to_name": "mediaroom", "text": "Production check of the case passed."}]
+    n = 0
+    for sp, msgs in THREADS.items():
+        for msg in msgs:
+            n += 1
+            msg.update(id=f"t{n}", space=sp, delivered=True)
+    # The shots and the record of the same day.
+    pics = list(SHOT_PICS)
+    SHOT_PICS[f"{T0}-quiet-window.png"] = page((90, 110, 160), dark=True)
+    SHOT_PICS[f"{T0}-quiet-panel.png"] = page((120, 140, 200), dark=True)
+    SHOT_PICS[f"{T0}-anna-case.png"] = page((170, 90, 140))
+    shots = [
+        (f"{T0}-quiet-window.png", 12, "s8", "herder-tower · orca", "M5 Pro", "Quiet Tower: every state of the orb, the floating panel and the full window"),
+        (f"{T0}-quiet-panel.png", 14, "s8", "herder-tower · orca", "M5 Pro", "Quiet Tower: the floating panel above the full window it opens"),
+        (pics[0], 95, "s6", "landing", "industrial-landing-page", "The film-frames drawing, variant D2"),
+        (pics[1], 120, "s6", "landing", "industrial-landing-page", "The microscope drawing, variant B"),
+        (f"{T0}-anna-case.png", 8 * 60, "s9", "eyzflow", "Anna", "A case showing its support pictures on production"),
+        (pics[2], 9 * 60, "s4", "eyzflow", "isa", "The Ingest walk on dev with the highlight fixed"),
+    ]
+    SHOTS[:] = [{"id": i, "at": T0 - m * MIN, "session": a, "name": n, "space": sp, "account": "orca", "job": None, "caption": c,
+                 "path": "/tower/attachments/screenshots/" + i, "url": "/v1/screenshots/" + i} for (i, m, a, n, sp, c) in shots]
+    STATE["screenshots"] = SHOTS
+    STATE["said"] = "The plan for the storefront live editor is finished and checked."
+    JOBS[:] = [
+        {"job": "j31", "session": "s1", "name": "eyzflow", "space": "sandbox", "account": "orca", "status": "done", "asked": "Plan the storefront live editor", "summary": "Wrote the plan", "started_ms": T0 - 70 * MIN, "updated_ms": T0 - 16 * MIN},
+        {"job": "j32", "session": "s5", "name": "mediaroom", "space": "isa", "account": "orca", "status": "working", "asked": "Voice clips for the Ingest tour", "summary": "", "started_ms": T0 - 10 * 60 * MIN, "updated_ms": T0 - 31 * MIN},
+        {"job": "j33", "session": "s6", "name": "landing", "space": "industrial-landing-page", "account": "orca", "status": "working", "asked": "Rework the product drawings", "summary": "", "started_ms": T0 - 3 * 60 * MIN, "updated_ms": T0 - 4 * MIN},
+    ]
+    PRS.clear()
+    for pr in [
+        _pr("example/mediaroom", 1273, "feat: voice clips for the Ingest tour", "dev", "ingest-clips", [("CI / build", True), ("CI / test", True)], "s5", "mediaroom", "isa", 33, waiting=True),
+        _pr("example/mediaroom", 1277, "release: the Ingest tour with its voice clips", "main", "dev", [("CI / build", True), ("CI / test", True), ("e2e", True)], "s5", "mediaroom", "isa", 31, waiting=True),
+    ]:
+        PRS[f"{pr['repo']}#{pr['number']}"] = pr
+    H_ = lambda mins, kind, **kw: dict({"at": T0 - mins * MIN, "kind": kind}, **kw)
+    HISTORY[:] = sorted([
+        H_(10 * 60 + 40, "answered", session="s5", name="mediaroom", space="isa", text="answered for you: Where to start? -> Start with the small fix to the analysis description."),
+        H_(10 * 60 + 35, "job", session="s4", name="eyzflow", space="isa", status="done", text="Uploaded 12 clips to production and to dev.", account="orca"),
+        H_(9 * 60, "screenshot", session="s4", name="eyzflow", space="isa", account="orca", id=SHOTS[5]["id"], caption="3 screenshots of the Ingest walk on dev.", path=SHOTS[5]["path"], text="3 screenshots of the Ingest walk on dev."),
+        H_(8 * 60 + 10, "job", session="s10", name="mediaroom", space="Anna", status="done", text="Release live, health check passing.", account="orca"),
+        H_(7 * 60 + 20, "job", session="s10", name="mediaroom", space="Anna", status="done", text="The support pictures work is complete.", account="orca"),
+        H_(5 * 60, "job", session="s6", name="landing", space="industrial-landing-page", status="done", text="PR #40 is merged.", account="orca"),
+        H_(52, "request", text="Open a space named sandbox with three sessions on orca."),
+        H_(51, "answer", text="**Opened sandbox.** Three sessions on orca, each in its own worktree, introduced to each other."),
+        H_(26, "peer", session="s1", name="eyzflow", space="sandbox", text="Four changes to the plan summary.", **{"from": "s3", "from_name": "project", "to_name": "eyzflow"}),
+        H_(24, "job", session="s1", name="eyzflow", space="sandbox", status="done", text="Put all five additions into the plan.", account="orca"),
+        H_(9, "peer", session="s1", name="eyzflow", space="sandbox", text="Answers on stale writes and publish events.", **{"from": "s2", "from_name": "mediaroom", "to_name": "eyzflow"}),
+        H_(6, "peer", session="s1", name="eyzflow", space="sandbox", text="Answer on the read-only key question.", **{"from": "s2", "from_name": "mediaroom", "to_name": "eyzflow"}),
+        H_(3, "note", name="tower", space="sandbox", text="The plan for the storefront live editor is finished and checked."),
+    ], key=lambda e: e["at"])
+    Q_WHO[:] = [("s5", "mediaroom"), ("s6", "landing")]
+    d_sync()
+
+
+def space_of(address):
+    return next((m["name"] for m in MISSIONS if any(x["address"] == address for x in m["sessions"])), "")
+
+
+def name_of(address):
+    return next((x["name"] for m in MISSIONS for x in m["sessions"] if x["address"] == address), address)
+
+
+def d_of_question(q):
+    """An escalated question set as a decision: one tab with recommendations gives answers to tap; more tabs go to the stepper."""
+    recs = next((r["options"] for r in (q.get("recommendations") or []) if r["tab"] == 0), [])
+    one = len(q["tabs"]) == 1
+    perm = q["kind"] in ("claude-permission", "codex-menu")
+    return {"id": "d-" + q["id"], "key": "question:" + q["id"], "kind": "permission" if perm else "question", "space": space_of(q["session"]),
+            "sessions": [q["session"]], "title": q["title"] if perm or not one else q["tabs"][0]["question"],
+            "why": "Permission" if perm else (f"{len(q['tabs'])} questions" if not one else "Question"), "detail": q.get("detail", ""),
+            "options": [{"label": r["label"], "why": r.get("why", ""), "pick": i == 0} for i, r in enumerate(recs)] if one else [],
+            "prs": [], "question_id": q["id"], "first_ms": q["at_ms"], "last_ms": q["at_ms"], "count": 1,
+            "state": {"answering": "answering", "queued": "answering", "answered": "answered", "failed": "stopped"}.get(q["status"], "open")}
+
+
+def muted_spaces():
+    return {m["name"] for m in MISSIONS if m.get("mute")}
+
+
+def d_pr(p, d):
+    """A merge's PR as the decision lists it: what the confirm and merge calls need."""
+    k = f"{p['repo']}#{p['number']}"
+    full = PRS.get(k)
+    view = pr_view(full) if full else {}
+    checks = {"passing": "pass", "failing": "fail", "pending": "pending"}.get((view.get("checks") or {}).get("state"), "none")
+    failing = (view.get("checks") or {}).get("failing") or []
+    note = {"pass": "checks passing", "pending": "checks running", "none": "no checks ran"}.get(checks) or f"{len(failing)} check{'s' if len(failing) != 1 else ''} failing: {', '.join(failing)}"
+    return {"key": k, "repo": p["repo"], "number": p["number"], "base": p["base"], "title": view.get("title", ""), "url": view.get("url", f"https://github.com/{p['repo']}/pull/{p['number']}"),
+            "checks": checks, "note": note, "session": view.get("session"), "merge": view.get("merge") or {"can": True, "blocked": None, "needs_override": None, "warnings": []}}
+
+
+def d_view(d):
+    v = dict(d, sessions=[{"address": a, "name": name_of(a), "waiting": d["kind"] != "merge"} for a in d["sessions"]],
+             waiting=0 if d["kind"] == "merge" else len(d["sessions"]), muted=d["space"] in muted_spaces(), task=d.get("task"))
+    if d["kind"] == "merge":
+        v["prs"] = [d_pr(p, d) for p in d["prs"]]
+        prod = lambda b: b in ("main", "master", "production", "release")
+        v["options"] = [{"label": f"Merge #{p['number']} into {p['base']}", "why": p["note"], "pick": i == 0 and p["checks"] == "pass" and not prod(p["base"])} for i, p in enumerate(v["prs"])]
+    picks = [o["label"] for o in v["options"] if o.get("pick")]
+    v["pick"] = picks[0] if picks else None
+    v.pop("detail", None)
+    return v
+
+
+def d_all():
+    asked = [d_of_question(q) for q in QUESTIONS.values() if q.get("decision") == "escalate" and q["status"] != "answered"]
+    return [d for d in list(DECISIONS.values()) + asked if d["state"] in ("open", "answering")]
+
+
+def d_queue(space=None, with_muted=False):
+    """In order: sessions waiting x minutes waited, heaviest first, then the oldest. The main queue leaves muted spaces out."""
+    muted = muted_spaces()
+    ds = [d_view(d) for d in d_all() if (d["space"] == space if space else (with_muted or d["space"] not in muted))]
+    mins = lambda d: max(0, (now() - d["first_ms"]) // MIN)
+    return sorted(ds, key=lambda d: (-d["waiting"] * mins(d), d["first_ms"]))
+
+
+def d_count():
+    return len(d_queue())
+
+
+def m_view(m):
+    return dict(m, needs=sum(1 for d in d_all() if d["space"] == m["name"]), goal=m.get("goal") or "", done_when=m.get("done_when") or "", report=m.get("report") or "",
+                tower=m.get("tower"), quiet_since_ms=None, ready_since_ms=now() - 20 * MIN if m["state"] == "ready" else None,
+                auto_close_ms=now() + 4 * 60 * MIN if m["state"] == "ready" else None)
+
+
+def missions():
+    return {"spaces": [m_view(m) for m in MISSIONS], "quiet": QUIET_NAMES, "closed_today": CLOSED_TODAY}
+
+
+def d_event():
+    return {"count": d_count(), "decisions": d_queue(with_muted=True)}
+
+
+def d_sync():
+    STATE.pop("decisions", None)
+    STATE["decisions_count"] = d_count()
+    STATE["tell_level"] = TELL[0]
+    STATE["tell_voice"] = VOICE[0]
+    STATE["brain_model"] = model_says()
+    STATE["brains"] = [{"name": "tower", "space": None, "address": "t1", "status": "idle", "model": MODEL["running"][0]["model"], "effort": MODEL["running"][0]["effort"]}] + \
+        [{"name": m["tower"]["name"], "space": m["name"], "address": m["tower"].get("address"), "status": m["tower"]["status"], "model": MODEL["running"][0]["model"], "effort": MODEL["running"][0]["effort"]}
+         for m in MISSIONS if m.get("tower")]
+
+
+def d_changed():
+    """The queue changed: its event, the missions', and the state's count."""
+    d_sync()
+    publish("decisions", d_event())
+    publish("missions", missions())
+    set_state()
+
+
+def d_close(d, state, answer=None):
+    d["state"] = state
+    DECISIONS.pop(d["id"], None)
+    CLOSED_DECISIONS.insert(0, d)
+    add_history({"at": now(), "kind": "decision", "id": d["id"], "space": d["space"], "status": state, "why": d.get("why"), "record": True,
+                 "text": d["title"] + (f" -> {answer}" if answer else "")})
+    d_changed()
+
+
+def d_answer(d, body):
+    """A choice, a raise or a permission: the words go to the sessions that wait on it, and it closes."""
+    label = d["options"][body["choice"]]["label"] if "choice" in body else body.get("other", "")
+    print(f"decision {d['id']}: {label!r}", flush=True)
+    sent = [{"session": a, "name": name_of(a), "queue_id": i + 1, "sent": True} for i, a in enumerate(d["sessions"])]
+    # A choice answered in words can become a rule; a permission, production data and the like never.
+    can = d["kind"] in ("question", "choice") and not any(w in (d.get("why") or "").lower() for w in ("deploy", "delete", "production", "secret", "money"))
+    d["rule"] = f"Make this a rule: when a session in {d['space']} asks \"{d['title']}\", answer \"{label}\" without asking me." if can else None
+    d_close(d, "answered", label)
+    return {"ok": True, "id": d["id"], "state": "answered", "answer": label, "sent": sent, "errors": [], "rule": {"can": can, "text": d["rule"]}}
+
+
+def action_publish(a):
+    ACTIONS[a["id"]] = a
+    publish("action", dict(a))
+
+
+def new_action(kind, space, dev, plan=None):
+    a = {"id": "act_" + secrets.token_hex(4), "kind": kind, "space": space, "state": "running", "plan": plan, "receipt": None, "error": None,
+         "by": "phone:" + dev["id"], "started_ms": now(), "finished_ms": None}
+    action_publish(a)
+    return a
+
+
+def launch_plan(goal, setup, name, dry_run=True):
+    name = name or slug_space(goal)
+    made = not any(m["name"] == name for m in MISSIONS)
+    sess = []
+    for repo in setup["repos"]:
+        short = repo.rstrip("/").split("/")[-1].replace("eyz-", "").replace("-serverless", "")
+        sess.append({"name": f"{name}-{short}", "repo": repo, "address": None, "account": setup["account"], "worktree": f"{repo.rsplit('/', 1)[0]}/.tower-worktrees/{name}/{short}",
+                     "branch": f"{name}/{short}", "port": None, "task": None, "error": None})
+    first = SETUPS.index(setup) == 0
+    return {"space": name, "goal": goal, "made": made, "dry_run": dry_run, "agenda": None, "sessions": sess,
+            "assumed": {"setup": setup["name"], "setup_why": f"the first of {len(SETUPS)}" if first else "the one you picked",
+                        "account": setup["account"], "account_why": "the setup's", "name": name, "name_why": "the goal's first two words, small ones left out",
+                        "worktrees": True, "worktrees_why": "one per repo, on a branch of its own"}}
+
+
+def run_launch(a, plan):
+    """Opens the sessions one by one, as the real tower does (seconds each), saying each step."""
+    receipt = json.loads(json.dumps(plan))
+    receipt["dry_run"] = False
+    receipt["agenda"] = "a" + secrets.token_hex(2)
+    m = None
+    for i, x in enumerate(receipt["sessions"]):
+        time.sleep(1.4)
+        addr = f"s{len(STATE['agents']) + 1}"
+        short = x["repo"].rstrip("/").split("/")[-1].replace("eyz-", "").replace("-serverless", "")
+        x.update(address=addr, port=PORT[0], task=f"{receipt['agenda']}.{i + 1}")
+        PORT[0] += 1
+        STATE["agents"].append({"address": addr, "name": short, "status": "working", "app": "claude-code", "account": x["account"]})
+        if m is None:
+            m = next((y for y in MISSIONS if y["name"] == plan["space"]), None)
+            if m is None:
+                m = {"name": plan["space"], "goal": plan["goal"], "done_when": "", "standing": False, "state": "open", "follow": False, "mute": False,
+                     "report": None, "thread_count": 0, "sessions": [], "tower": {"name": "tower-" + plan["space"], "status": "starting", "address": None},
+                     "requests": [{"id": receipt["agenda"], "title": plan["goal"], "state": "open", "done": 0, "total": len(plan["sessions"])}]}
+                MISSIONS.append(m)
+        m["sessions"].append(_ms(addr, short, "working", x["account"], f"{short}@{plan['space']}", x["port"], "Reading the goal"))
+        a["receipt"] = receipt
+        action_publish(a)
+        d_changed()
+    if m and m.get("tower"):
+        m["tower"]["status"] = "ready"
+    # The launch became an act: it can be taken back.
+    asm = plan["assumed"]
+    act = {"id": "r" + secrets.token_hex(6), "kind": "launch", "at_ms": now(), "by": a["by"], "space": plan["space"],
+           "line": f"Launched {plan['space']}: {len(receipt['sessions'])} sessions, each in its own worktree.",
+           "sessions": [{"address": x["address"], "name": x["name"], "label": f"{plan['space']} › {x['repo'].rstrip('/').split('/')[-1]}", "worktree": x["worktree"], "branch": x["branch"]} for x in receipt["sessions"]],
+           "assumed": [{"what": k, "value": str(asm[k]) if k != "worktrees" else "one each", "why": asm.get(k + "_why")} for k in ("setup", "account", "name", "worktrees") if asm.get(k) is not None],
+           "request": None, "state": "done", "undo": {"possible": True, "why": None}, "closing": None, "undone_ms": None}
+    ACTS[act["id"]] = act
+    receipt["act"] = act["id"]
+    publish("act", act)
+    a.update(state="done", finished_ms=now())
+    action_publish(a)
+    add_history({"at": now(), "kind": "note", "name": "tower", "space": plan["space"], "record": True,
+                 "text": f"Launched {plan['space']}: {len(plan['sessions'])} sessions on {plan['sessions'][0]['account'] if plan['sessions'] else ''}, each in its own worktree."})
+    d_changed()
+    print(f"launched {plan['space']}", flush=True)
+
+
+def run_close(a, m):
+    time.sleep(1.5)
+    kept = [{"path": f"~/Work/.tower-worktrees/{m['name']}/{x['name']}", "branch": x.get("branch"), "repo": None, "why": "uncommitted work"} for x in m["sessions"] if x["status"] == "working"]
+    removed = [f"~/Work/.tower-worktrees/{m['name']}/{x['name']}" for x in m["sessions"] if x["status"] != "working"]
+    if m in MISSIONS:
+        MISSIONS.remove(m)
+    CLOSED_TODAY.append(m["name"])
+    for k in [k for k, d in DECISIONS.items() if d["space"] == m["name"]]:
+        d_close(DECISIONS[k], "stopped")
+    STATE["agents"] = [x for x in STATE["agents"] if x["address"] not in {y["address"] for y in m["sessions"]}]
+    a.update(state="done", finished_ms=now(), receipt={
+        "closed": m["name"], "sessions_ended": [{"address": x["address"], "name": x["name"]} for x in m["sessions"]], "sessions_left": [],
+        "herdr_space": "closed", "worktrees_removed": removed, "kept_worktrees": kept, "requests_closed": [r["id"] for r in m.get("requests", [])],
+        "tower_ended": [m["tower"]["name"]] if m.get("tower") else [], "report": m.get("report") or ""})
+    action_publish(a)
+    add_history({"at": now(), "kind": "space", "space": m["name"], "status": "closed", "record": True, "text": f"Closed {m['name']}."})
+    d_changed()
+
+
+def quiet_reply(text, space):
+    """What the quiet tower says back: (what the chat shows, the sentences it speaks)."""
+    low = text.lower()
+    if "open" in low and "session" in low:
+        where = space or "M5 Pro"
+        m = next((x for x in MISSIONS if x["name"] == where), None)
+        if m:
+            a = f"s{len(STATE['agents']) + 1}"
+            label = f"{where} › herder-tower 2"
+            wt = f"herder-tower@{slug_space(where)}-{len(m['sessions']) + 1}"
+            m["sessions"].append(_ms(a, label, "working", "orca", wt, None, "Reading its introduction"))
+            STATE["agents"].append({"address": a, "name": label, "status": "working", "app": "claude-code", "account": "orca"})
+            d_changed()
+            # The receipt: what was opened and what was assumed, right after the request, with an undo.
+            act = {"id": "r" + secrets.token_hex(6), "kind": "start", "at_ms": now(), "by": "tower-" + where if space else "tower", "space": space,
+                   "line": f"Opened herder-tower 2 in {where}.", "sessions": [{"address": a, "name": "herder-tower-2", "label": label, "worktree": "~/Work/.tower-worktrees/" + wt, "branch": wt.replace("@", "/")}],
+                   "assumed": [{"what": "account", "value": "orca", "why": "the space's sessions run on it"},
+                               {"what": "model", "value": "default model", "why": "none was asked for: a session starts on its account's model"},
+                               {"what": "folder", "value": "herder-tower", "why": "the best match for what was asked"},
+                               {"what": "worktree", "value": "its own", "why": "the space's sessions each have one"}],
+                   "request": {"at": now(), "text": text}, "state": "done", "undo": {"possible": True, "why": None}, "closing": None, "undone_ms": None}
+            ACTS[act["id"]] = act
+            e = {"at": now(), "kind": "act", "id": act["id"]}
+            if space:
+                e["space"] = space
+            add_history(e)
+            ACT_LINE[act["id"]] = len(HISTORY)
+            publish("act", act)
+        tail = ", introduced to the others" if space else ""
+        return (f"It's reading its introduction now{tail}." if m else f"**Opened in {where}.** One session in its own worktree{tail}.",
+                [f"Opened in {where}.", f"One session in its own worktree{tail}."])
+    q = d_queue(space) if space else d_queue()
+    openq = [d for d in q if d["state"] in ("open", "stopped")]
+    busy = [x["name"] for m in MISSIONS if (not space or m["name"] == space) for x in m["sessions"] if x["status"] == "working"]
+    head = (f"{len(openq)} need{'s' if len(openq) == 1 else ''} you" if openq else "Nothing needs you") + (" here" if space else "") + (f", {len(busy)} working" if busy else "") + "."
+    lines = [("" if space else d["space"] + ": ") + d["title"] for d in openq]
+    return ("**" + head + "**" + "".join("\n- " + l for l in lines), [head] + lines[:2])
+
+
+def slug_space(goal):
+    small = {"a", "an", "the", "of", "for", "to", "in", "on", "and", "with", "as", "at", "by"}
+    words = [w for w in re.sub(r"[^a-z0-9 ]", "", goal.lower()).split() if w not in small]
+    base = "-".join(words[:2]) or "new-space"
+    name, n = base, 2
+    while any(m["name"] == name for m in MISSIONS):
+        name, n = f"{base}-{n}", n + 1
+    return name
+
+
+def act_changed(act):
+    publish("act", act)
+    i = ACT_LINE.get(act["id"])
+    if i:
+        publish("chat", {"op": "update", "message": chat_message(HISTORY[i - 1], i)})
+
+
+def act_undo(act, force):
+    """Ends what the act opened: a session at work would lose it (409 held) unless forced; then its worktree is kept."""
+    gone = {x["address"] for x in act["sessions"]}
+    working = [x for m in MISSIONS for x in m["sessions"] if x["address"] in gone and x["status"] == "working"]
+    if working and not force:
+        return None, [{"address": x["address"], "name": x["name"], "why": "has work in its worktree that is nowhere else: 1 uncommitted change (notes.txt)"} for x in working]
+    for m in MISSIONS:
+        m["sessions"] = [x for x in m["sessions"] if x["address"] not in gone]
+    STATE["agents"] = [x for x in STATE["agents"] if x["address"] not in gone]
+    kept = [{"path": x["worktree"], "why": "1 uncommitted change (notes.txt)"} for x in act["sessions"] if working]
+    closing = "Closed it." + (" Kept its worktree: 1 uncommitted change." if kept else " Nothing else changed.")
+    act.update(state="undone", undo={"possible": False, "why": None}, closing=closing, undone_ms=now())
+    act_changed(act)
+    d_changed()
+    return {"act": act, "closing": closing, "sessions_ended": sorted(gone), "worktrees_removed": [] if kept else [x["worktree"] for x in act["sessions"]],
+            "kept_worktrees": kept, "space_closed": False}, None
+
+
+def quiet_route(h, method, seg, q, b):
+    """The Quiet Tower calls (docs/mobile-api.md, "The Quiet Tower"); True when handled."""
+    body = json.loads(b or b"{}") if method in ("POST", "PUT") and not h.headers.get("Content-Type", "").startswith("multipart/") else {}
+    if seg == ["decisions"] and method == "GET":
+        space = q.get("space")
+        r = {"space": space, "count": len(d_queue(space)) if space else d_count(), "decisions": d_queue(space)}
+        if q.get("all") == "1":
+            r["closed"] = [d_view(d) for d in CLOSED_DECISIONS[:50]]
+        h.send(200, r)
+        return True
+    if len(seg) >= 2 and seg[0] == "decisions":
+        did = seg[1]
+        d = DECISIONS.get(did) or next((x for x in CLOSED_DECISIONS if x["id"] == did), None)
+        qs = QUESTIONS.get(did[2:]) if did.startswith("d-") else None
+        if d is None and qs is None:
+            h.err(404, "no_decision", "no decision with that id")
+            return True
+        if len(seg) == 2 and method == "GET":
+            h.send(200, {"decision": d_view(d) if d else d_of_question(qs)})
+            return True
+        if len(seg) == 2 and method == "DELETE":
+            if d and d["state"] not in ("open", "answering"):
+                h.send(200, {"dismissed": did, "state": d["state"]})
+                return True
+            if d:
+                d_close(d, "dismissed")
+            if qs:
+                q_close(qs["id"])
+            h.send(200, {"dismissed": did, "state": "dismissed"})
+            return True
+        if seg[2:] == ["answer"] and method == "POST":
+            if qs:  # the question set's own answer, typed into the session
+                view = d_of_question(qs)
+                if "answers" in body:
+                    answers = body["answers"]
+                else:
+                    recs = next((r["options"] for r in (qs.get("recommendations") or []) if r["tab"] == 0), [])
+                    choice = recs[body["choice"]]["choice"] if "choice" in body and body["choice"] < len(recs) else {"other": body.get("other", "")}
+                    answers = [{"tab": 0, "choice": choice}]
+                print(f"decision {view['id']} (question {qs['id']}): {json.dumps(answers)}", flush=True)
+                q_update(qs["id"], status="answering", answered_with=answers)
+
+                def finish():
+                    time.sleep(2)
+                    q_update(qs["id"], status="answered")
+                    time.sleep(0.5)
+                    q_close(qs["id"])
+                threading.Thread(target=finish, daemon=True).start()
+                h.send(200, {"ok": True, "id": did, "state": "answering", "answered": [{"session": qs["session"], "question": qs["id"], "status": "answering"}], "errors": []})
+                return True
+            if d["state"] not in ("open", "answering"):
+                h.err(409, "closed", f"{did} is {d['state']} already", state=d["state"])
+                return True
+            if d["kind"] == "merge":
+                h.err(400, "merge", "a merge is merged through its PRs' confirm and merge calls", prs=[f"{p['repo']}#{p['number']}" for p in d["prs"]])
+                return True
+            if "choice" in body and not (0 <= body["choice"] < len(d["options"])) or ("choice" not in body and not (body.get("other") or "").strip()):
+                h.err(400, "bad_answer", "no such option, or no words")
+                return True
+            h.send(200, d_answer(d, body))
+            return True
+        if seg[2:] == ["rule"] and method == "POST":
+            if d is None or d["state"] in ("open", "answering"):
+                h.err(409, "not_answered", "it is still open")
+                return True
+            if not d.get("rule"):
+                h.err(409, "no_rule", "no rule is offered for it")
+                return True
+            print(f"rule for {did}: {d['rule']}", flush=True)
+            threading.Thread(target=reply_to, args=(d["rule"], (), d["space"] or None), daemon=True).start()
+            h.send(202, {"sent": d["rule"], "space": d["space"] or None})
+            return True
+        if seg[2:] == ["interpret"] and method == "POST":
+            words = (body.get("text") or "").lower()
+            i = next((i for i, o in enumerate(d["options"]) if o["label"].lower() in words), 0 if "first" in words else 1 if "second" in words else None)
+            h.send(200, {"tab": 0, "choice": {"options": [i] if i is not None else [], "other": None if i is not None else body.get("text")},
+                         "answer": {"choice": i} if i is not None else ({"other": body.get("text")} if words else None)})
+            return True
+    if seg == ["missions"] and method == "GET":
+        h.send(200, missions())
+        return True
+    if len(seg) == 3 and seg[0] == "spaces" and method == "POST":
+        m = next((x for x in MISSIONS if x["name"].lower() == seg[1].lower()), None)
+        if m is None:
+            h.err(404, "no_space", f"no space called \"{seg[1]}\"")
+            return True
+        if seg[2] == "goal":
+            for k in ("goal", "done_when", "standing"):
+                if k in body and body[k] is not None:
+                    m[k] = body[k]
+            d_changed()
+            v = m_view(m)
+            h.send(200, {"space": m["name"], "goal": v["goal"], "done_when": v["done_when"], "standing": m["standing"], "state": m["state"], "report": v["report"], "mission": v})
+            return True
+        if seg[2] in ("follow", "mute"):
+            if not isinstance(body.get("on"), bool):
+                h.err(400, "bad_on", "on is true or false")
+                return True
+            m[seg[2]] = body["on"]
+            d_changed()
+            h.send(200, {"space": m["name"], seg[2]: m[seg[2]], "mission": m_view(m)})
+            return True
+        if seg[2] == "close":
+            working = [x for x in m["sessions"] if x["status"] in ("working", "blocked")]
+            if working and not body.get("force"):
+                names = ", ".join(f"{x['name']} ({x['address']})" for x in working)
+                h.err(409, "busy", f"\"{m['name']}\" isn't closed: {names} {'is' if len(working) == 1 else 'are'} working. Wait for them, or send {{\"force\": true}} (their work in progress is cut off).",
+                      sessions=[{"address": x["address"], "name": x["name"], "status": x["status"]} for x in working])
+                return True
+            running = next((a for a in ACTIONS.values() if a["kind"] == "close" and a["space"] == m["name"] and a["state"] == "running"), None)
+            if running:
+                h.err(409, "closing", f"\"{m['name']}\" is being closed", action=running["id"])
+                return True
+            a = new_action("close", m["name"], h.device())
+            threading.Thread(target=run_close, args=(a, m), daemon=True).start()
+            h.send(202, {"action": a})
+            return True
+        return False
+    if seg == ["thread"] and method == "GET":
+        msgs = THREADS.get(q.get("space", ""), []) if q.get("space") else sorted((x for v in THREADS.values() for x in v), key=lambda x: x["at"])
+        before = q.get("before")
+        if before:
+            i = next((i for i, x in enumerate(msgs) if x["id"] == before), len(msgs))
+            msgs = msgs[:i]
+        lim = min(200, int(q.get("limit", 50)))
+        h.send(200, {"space": q.get("space"), "messages": msgs[-lim:], "more": len(msgs) > lim})
+        return True
+    if seg == ["setups"] and method == "GET":
+        h.send(200, {"setups": SETUPS})
+        return True
+    if seg == ["launch"] and method == "POST":
+        goal = (body.get("goal") or "").strip()
+        if not goal:
+            h.err(400, "empty", "a space needs a goal")
+            return True
+        want = (body.get("setup") or "").lower()
+        setup = next((x for x in SETUPS if want and want in x["name"].lower()), None) if want else SETUPS[0]
+        if setup is None:
+            h.err(404, "no_setup", f"no setup called \"{body.get('setup')}\"")
+            return True
+        plan = launch_plan(goal, setup, body.get("name"), dry_run=bool(body.get("dry_run")))
+        if body.get("dry_run"):
+            h.send(200, plan)
+            return True
+        running = next((a for a in ACTIONS.values() if a["kind"] == "launch" and a["state"] == "running"), None)
+        if running:
+            h.err(409, "launching", f"\"{running['space']}\" is being launched: one at a time", action=running["id"])
+            return True
+        a = new_action("launch", plan["space"], h.device(), plan=plan)
+        threading.Thread(target=run_launch, args=(a, plan), daemon=True).start()
+        print(f"launching {plan['space']} with {setup['name']}", flush=True)
+        h.send(202, {"action": a})
+        return True
+    if seg == ["acts"] and method == "GET":
+        h.send(200, {"acts": sorted(ACTS.values(), key=lambda a: -a["at_ms"])[:50]})
+        return True
+    if len(seg) >= 2 and seg[0] == "acts":
+        act = ACTS.get(seg[1])
+        if act is None:
+            h.err(404, "no_act", "no act with that id")
+            return True
+        if len(seg) == 2 and method == "GET":
+            h.send(200, {"act": act})
+            return True
+        if seg[2:] == ["undo"] and method == "POST":
+            if act["state"] == "undone":
+                h.err(409, "undone", f"{act['id']} is undone already", state="undone")
+                return True
+            r, held = act_undo(act, bool(body.get("force")))
+            if held:
+                names = ", ".join(f"{x['name']} ({x['address']}) {x['why']}" for x in held)
+                h.err(409, "held", f"not undone: {names}. Send {{\"force\": true}} to undo it anyway.", sessions=held)
+                return True
+            print(f"undid {act['id']}", flush=True)
+            h.send(200, r)
+            return True
+    if seg == ["actions"] and method == "GET":
+        h.send(200, {"actions": sorted(ACTIONS.values(), key=lambda a: -a["started_ms"])[:50]})
+        return True
+    if len(seg) == 2 and seg[0] == "actions" and method == "GET":
+        a = ACTIONS.get(seg[1])
+        h.send(200, {"action": a}) if a else h.err(404, "no_action", "no action with that id")
+        return True
+    if seg == ["tell"]:
+        if method == "POST":
+            if "level" in body and body["level"] not in ("decisions", "results", "everything"):
+                h.err(400, "bad_level", "level is decisions, results or everything")
+                return True
+            if "voice" in body and body["voice"] not in ("off", "decisions", "replies"):
+                h.err(400, "bad_voice", "voice is off, decisions or replies")
+                return True
+            r = {}
+            if "level" in body:
+                r["was"], TELL[0] = TELL[0], body["level"]
+            if "voice" in body:
+                r["voice_was"], VOICE[0] = VOICE[0], body["voice"]
+                STATE["muted"] = VOICE[0] == "off"
+            STATE["tell_level"], STATE["tell_voice"] = TELL[0], VOICE[0]
+            set_state()
+            h.send(200, dict(r, level=TELL[0], voice=VOICE[0]))
+            return True
+        h.send(200, {"level": TELL[0], "voice": VOICE[0]})
+        return True
+    if seg == ["model"]:
+        if method == "POST":
+            ids = {c["id"]: c["id"] for c in MODEL["choices"]["models"]} | {c["label"]: c["id"] for c in MODEL["choices"]["models"]}
+            if "model" in body and body["model"] not in ids:
+                h.err(400, "bad_model", f"no model called \"{body['model']}\"")
+                return True
+            if "effort" in body and body["effort"] not in MODEL["choices"]["efforts"]:
+                h.err(400, "bad_effort", "effort is " + ", ".join(MODEL["choices"]["efforts"]) + f": not \"{body['effort']}\"")
+                return True
+            if "model" in body:
+                MODEL["model"] = ids[body["model"]]
+            if "effort" in body:
+                MODEL["effort"] = body["effort"]
+            restarted = []
+            if body.get("restart"):
+                for r in MODEL["running"]:
+                    r.update(model=MODEL["model"], effort=MODEL["effort"], restart=False)
+                    restarted.append(r["brain"])
+                restarted += [m["tower"]["name"] for m in MISSIONS if m.get("tower")]
+            for r in MODEL["running"]:
+                r["restart"] = (r["model"], r["effort"]) != (MODEL["model"], MODEL["effort"])
+            MODEL["restart_needed"] = any(r["restart"] for r in MODEL["running"])
+            d_sync()
+            set_state()
+            print(f"model {MODEL['model']} at {MODEL['effort']}" + (f", restarted {restarted}" if restarted else ""), flush=True)
+            h.send(200, dict(model_says(), restarted=restarted))
+            return True
+        h.send(200, dict(model_says(), restarted=[]))
+        return True
+    return False
+
+
 class H(BaseHTTPRequestHandler):
     protocol_version = "HTTP/1.1"
 
@@ -815,6 +1513,16 @@ class H(BaseHTTPRequestHandler):
             PRS[k].update(d)
             pr_changed(k, "update" if PRS[k]["state"] == "open" else "closed")
             return self.send(200, {"pr": pr_view(PRS[k])})
+        if (method, seg) == ("POST", ["fake", "decision"]) and QUIET[0]:
+            # Raise a decision (to see its card and its notification): {"title": "…", "space": "sandbox", "why": "…", "options": [{"label": "Yes", "pick": true}, {"label": "No"}], "sessions": ["s1"]}.
+            d = json.loads(self.body() or b"{}")
+            did = d.get("id") or "d-" + secrets.token_hex(3)
+            DECISIONS[did] = {"id": did, "key": d.get("key", did), "kind": d.get("kind", "raised"), "space": d.get("space", "sandbox"), "sessions": d.get("sessions", []),
+                              "title": d.get("title", "A decision"), "why": d.get("why", ""), "detail": d.get("detail", ""),
+                              "options": [{"label": o.get("label", ""), "why": o.get("why", ""), "pick": bool(o.get("pick"))} for o in d.get("options", [])],
+                              "prs": d.get("prs", []), "question_id": None, "first_ms": now(), "last_ms": now(), "count": 1, "state": "open"}
+            d_changed()
+            return self.send(200, {"decision": d_view(DECISIONS[did])})
         if (method, seg) == ("POST", ["pair"]):
             b = json.loads(self.body() or b"{}")
             if b.get("code") != CODE:
@@ -824,7 +1532,7 @@ class H(BaseHTTPRequestHandler):
             TOKENS[tok] = dev
             save_tokens()
             print(f"paired {dev['name']} ({dev['id']})", flush=True)
-            return self.send(200, {"token": tok, "device": dev, "fingerprint": FP, "api": 1})
+            return self.send(200, {"token": tok, "device": dev, "fingerprint": FP, "api": 1, **({"features": ["quiet", "acts"]} if QUIET[0] else {})})
         dev = self.device()
         if dev is None:
             return self.err(401, "unauthorized", "unknown token")
@@ -836,9 +1544,13 @@ class H(BaseHTTPRequestHandler):
         if seg[:1] in (["questions"], ["questions-policy"]):
             if questions_route(self, method, seg, q, self.body() if method in ("POST", "PUT") else b""):
                 return
+        if QUIET[0] and (seg[:1] in (["decisions"], ["missions"], ["thread"], ["setups"], ["launch"], ["tell"], ["actions"], ["model"], ["acts"]) or (len(seg) == 3 and seg[0] == "spaces")):
+            if quiet_route(self, method, seg, q, self.body() if method in ("POST", "PUT") else b""):
+                return
         if method == "GET":
             if seg == ["hello"]:
-                return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS), "audio_route": ROUTE.get(dev["id"], "phone")})
+                return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS), "audio_route": ROUTE.get(dev["id"], "phone"),
+                                       **({"features": ["quiet", "acts"]} if QUIET[0] else {})})
             if seg == ["device", "audio"]:
                 return self.send(200, {"route": ROUTE.get(dev["id"], "phone")})
             if seg == ["audio"]:
@@ -857,9 +1569,14 @@ class H(BaseHTTPRequestHandler):
             if seg == ["history"]:
                 before = int(q.get("before_ms", 2**62))
                 lim = int(q.get("limit", 100))
-                return self.send(200, {"entries": [e for e in HISTORY if e["at"] < before][-lim:]})
+                sp = q.get("space")
+                return self.send(200, {"entries": [e for e in HISTORY if e["at"] < before and (not sp or (e.get("space") or "").lower() == sp.lower())][-lim:]})
             if seg == ["chat"]:
                 t = thread()
+                if QUIET[0] and q.get("space"):
+                    t = [m for m in t if m.get("space") == q["space"] and m["kind"] in ("request", "answer", "receipt")]
+                elif QUIET[0] and q.get("main") == "1":
+                    t = [m for m in t if not (m.get("space") and m["kind"] in ("request", "answer"))]
                 b = q.get("before")
                 if b:
                     at = next((m["at"] for m in t if m["id"] == b), None)
@@ -888,12 +1605,18 @@ class H(BaseHTTPRequestHandler):
             b = self.body()
             if seg == ["ask"]:
                 ctype = self.headers.get("Content-Type", "")
+                space = None
                 if ctype.startswith("multipart/"):
                     t, files = multipart(b, ctype)
                     paths = [f"/tower/attachments/{now()}-phone/{i + 1}-{n}" for i, (n, _) in enumerate(files)]
+                    m = re.search(rb'name="space"\r\n\r\n([^\r]*)', b)
+                    space = m.group(1).decode() if m else None
                 else:
-                    t, paths = json.loads(b)["text"], []
-                threading.Thread(target=reply_to, args=(t, paths), daemon=True).start()
+                    d = json.loads(b)
+                    t, paths, space = d["text"], [], d.get("space")
+                if space:
+                    print(f"ask for the {space} tower: {t!r}", flush=True)
+                threading.Thread(target=reply_to, args=(t, paths, space), daemon=True).start()
                 return self.send(202, {"sent": t, "attachments": paths})
             if len(seg) == 3 and seg[0] == "agents" and seg[2] == "answer":
                 d = json.loads(b)
@@ -974,8 +1697,12 @@ class H(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            out("hello", {"api": 1, "device": dev["id"], "voice": voice})
+            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts"]} if QUIET[0] else {})})
             out("state", STATE)
+            if QUIET[0]:
+                # Right after the first state: the whole open list (a muted space's marked), then the missions.
+                out("decisions", d_event())
+                out("missions", missions())
             last = time.time()
             while True:
                 try:
@@ -1024,11 +1751,17 @@ if __name__ == "__main__":
     ap.add_argument("--link-host", default="10.0.2.2", help="the address the phone should use (10.0.2.2 = this Mac, from the emulator)")
     ap.add_argument("--hosts", default="", help="every address, as the Tailscale-era link: lan:<ip>:<port>,tailscale:<ip>:<port> (e.g. a LAN that isn't there, then 10.0.2.2 as the tailnet)")
     ap.add_argument("--dns", default="", help="the MagicDNS name to put in the link and the state")
+    ap.add_argument("--legacy", action="store_true", help="a tower from before the Quiet Tower: no decisions, missions, thread, setups, launch or tell (404), the shop's made-up data")
     a = ap.parse_args()
+    QUIET[0] = not a.legacy
+    if QUIET[0]:
+        quiet_world()
     crt, key, FP = cert()
     ctx = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
     ctx.load_cert_chain(crt, key)
     load_tokens()
+    # On connect the app asks for a dozen things at once: a backlog of 5 (the default) drops some of them.
+    ThreadingHTTPServer.request_queue_size = 128
     srv = ThreadingHTTPServer((a.host, a.port), H)
     srv.socket = ctx.wrap_socket(srv.socket, server_side=True)
     link = f"herdertower://pair?h={a.link_host}&p={a.port}&c={CODE}&fp={FP}"
@@ -1046,7 +1779,10 @@ if __name__ == "__main__":
         ts = next((h for h in hs if h["kind"] == "tailscale"), None)
         STATE["lan_hosts"] = hs
         STATE["tailscale"] = {"installed": True, "running": ts is not None, "state": "running" if ts else "stopped", "ip": ts and ts["host"], "dns_name": a.dns or None}
-    threading.Thread(target=questions_life, daemon=True).start()
-    threading.Thread(target=pr_life, daemon=True).start()
+    # FAKE_QUESTIONS=0: no question sets come up (the queue stays the design's three decisions).
+    if os.environ.get("FAKE_QUESTIONS", "1") != "0":
+        threading.Thread(target=questions_life, daemon=True).start()
+    if not QUIET[0]:
+        threading.Thread(target=pr_life, daemon=True).start()
     print(f"fake tower on https://{a.host}:{a.port}\ncode {CODE}\nfingerprint {' '.join(FP[i:i+4] for i in range(0, 64, 4))}\nLINK {link}", flush=True)
     srv.serve_forever()

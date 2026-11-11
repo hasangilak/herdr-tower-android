@@ -11,6 +11,24 @@ import dev.herdertower.phone.api.Question
 import dev.herdertower.phone.api.QuestionsApi
 import dev.herdertower.phone.api.TabAnswer
 import dev.herdertower.phone.api.Agent
+import dev.herdertower.phone.api.Act
+import dev.herdertower.phone.api.BrainModel
+import dev.herdertower.phone.api.HeldSession
+import dev.herdertower.phone.api.UndoResult
+import dev.herdertower.phone.api.BusySession
+import dev.herdertower.phone.api.LaunchPlan
+import dev.herdertower.phone.api.TowerAction
+import dev.herdertower.phone.api.Decision
+import dev.herdertower.phone.api.DecisionAnswered
+import dev.herdertower.phone.api.DecisionsApi
+import dev.herdertower.phone.api.FilePart
+import dev.herdertower.phone.api.Mission
+import dev.herdertower.phone.api.MissionsApi
+import dev.herdertower.phone.api.MissionsResponse
+import dev.herdertower.phone.api.Setup
+import dev.herdertower.phone.api.ThreadMessage
+import dev.herdertower.phone.api.VoiceResult
+import dev.herdertower.phone.voice.TalkTarget
 import dev.herdertower.phone.api.CertificateMismatchException
 import dev.herdertower.phone.api.ChatApi
 import dev.herdertower.phone.api.ChatMessage
@@ -58,6 +76,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.collectLatest
 import kotlinx.coroutines.flow.combine
 import kotlinx.coroutines.flow.distinctUntilChanged
+import kotlinx.coroutines.flow.emitAll
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import kotlinx.coroutines.withTimeoutOrNull
@@ -251,10 +270,8 @@ class TowerSession(
 
     fun setForeground(fg: Boolean) {
         _foreground.value = fg
-        if (fg) {
-            notices.clearAll()
-            prNotices.clearAll()
-        }
+        // On screen, the cards show: their notifications go.
+        if (fg) decisionNotices.clearAll()
     }
 
     fun setVoice(on: Boolean) {
@@ -281,6 +298,9 @@ class TowerSession(
 
     /** The stream was dropped on purpose to move to another route. */
     private class RouteChanged : java.io.IOException("Moving to another route.")
+
+    /** The tower ended the stream. */
+    private class StreamEnded : java.io.IOException("The tower closed the connection.")
 
     /** After a network change has settled: is the route in use still there, and is the LAN back? */
     private suspend fun recheckRoute() {
@@ -434,8 +454,17 @@ class TowerSession(
                     is Pick.Nowhere -> throw UnreachableException(p.message, null)
                 }
                 // The stream, until it ends or the route is to change (network change, see recheckRoute).
-                merge(c.events(voice), kick.receiveAsFlow().map<Unit, TowerEvent> { throw RouteChanged() }).collect { ev ->
+                // A stream the tower ends itself (it stopped, or restarted) ends this too: merged as it is, the
+                // route kicks (which never end) would keep the collect open on nothing, and the app "live" on a dead stream.
+                val events = kotlinx.coroutines.flow.flow {
+                    emitAll(c.events(voice))
+                    throw StreamEnded()
+                }
+                merge(events, kick.receiveAsFlow().map<Unit, TowerEvent> { throw RouteChanged() }).collect { ev ->
                     if (ev is TowerEvent.Hello) {
+                        // What this tower has is checked once, on connecting: the Quiet Tower, or the calls from before it.
+                        quiet(ev.hello.quiet)
+                        _actsSupported.value = ev.hello.acts
                         live = true
                         route?.let {
                             _activeRoute.value = ActiveRoute(it)
@@ -507,6 +536,9 @@ class TowerSession(
                     _questionsSupported.value = true
                     setQuestions(ev.state.questions)
                 }
+                ev.state.tellLevel?.let { _tell.value = it }
+                ev.state.tellVoice?.let { _tellVoice.value = it }
+                ev.state.brainModel?.let { _model.value = it }
                 if (before != null && before.agents.map { it.address to it.status } != ev.state.agents.map { it.address to it.status }) refreshSoon()
             }
             is TowerEvent.History -> {
@@ -515,8 +547,13 @@ class TowerSession(
             }
             is TowerEvent.Chat -> {
                 _threadSupported.value = true
-                _thread.value = ChatApi.merge(_thread.value, listOf(ev.message))
-                PrsApi.of(ev.message)?.let { setPrs(listOf(it)) }
+                val m = ev.message
+                m.act?.let(::setAct)
+                if (ChatApi.inMain(m)) _thread.value = ChatApi.merge(_thread.value, listOf(m))
+                m.space?.takeIf { it.isNotBlank() && ChatApi.inSpace(m, it) }?.let { sp ->
+                    _spaceChats.value = _spaceChats.value + (sp to ChatApi.merge(_spaceChats.value[sp].orEmpty(), listOf(m)))
+                }
+                PrsApi.of(m)?.let { setPrs(listOf(it)) }
             }
             is TowerEvent.PrChanged -> {
                 _prsSupported.value = true
@@ -538,8 +575,566 @@ class TowerSession(
                 _questionsSupported.value = true
                 setQuestions(QuestionsApi.apply(_questions.value, ev.change))
             }
+            is TowerEvent.DecisionsChanged -> {
+                _decisionsSupported.value = true
+                ev.decisions?.let { setDecisions(it.decisions) } ?: scope.launch { loadDecisions() }
+            }
+            is TowerEvent.MissionsChanged -> {
+                _missionsSupported.value = true
+                ev.missions?.let { _missions.value = it } ?: scope.launch { loadMissions() }
+            }
+            is TowerEvent.ThreadAdded -> {
+                val sp = ev.event.space ?: ev.event.message.space
+                if (sp != null) _spaceThreads.value[sp]?.let { t -> _spaceThreads.value = _spaceThreads.value + (sp to t.with(listOf(ev.event.message))) }
+            }
+            is TowerEvent.ActionChanged -> setAction(ev.action)
+            is TowerEvent.ActChanged -> setAct(ev.act)
             is TowerEvent.Hello, TowerEvent.Ping, is TowerEvent.Unknown -> {}
         }
+    }
+
+    // The queue: the decisions only the user can make
+
+    private val _decisions = MutableStateFlow<List<Decision>>(emptyList())
+    /** What waits for the user, in the tower's order (muted spaces left out: they are in the space's own view). */
+    val decisions: StateFlow<List<Decision>> = _decisions.asStateFlow()
+
+    private val _decisionsSupported = MutableStateFlow<Boolean?>(null)
+    /**
+     * Whether the tower has the queue (`/v1/decisions`). False: a tower from
+     * before it, and the queue is made here from its questions and its
+     * waiting PRs. Null: not known yet.
+     */
+    val decisionsSupported: StateFlow<Boolean?> = _decisionsSupported.asStateFlow()
+
+    private val decisionNotices = DecisionNotices(context)
+
+    /** What this phone did to a decision the tower doesn't show yet (id to state and until when), as [localStatus] for questions. */
+    private val decisionHold = mutableMapOf<String, Pair<String, Long>>()
+    /** Why the last answer from here didn't go in, by decision. */
+    private val decisionErrors = mutableMapOf<String, String>()
+
+    /** Every open decision as the tower last gave it (muted ones marked), or as it was made here, before this phone's own marks on it. */
+    private var queue: List<Decision> = emptyList()
+
+    private fun setDecisions(list: List<Decision>) {
+        queue = list
+        showDecisions()
+        decisionNotices.follow(held(queue), background = !_foreground.value)
+        deriveMissions()
+    }
+
+    /** The main queue with this phone's marks: shown again whenever one of them changes. */
+    private fun showDecisions() {
+        _decisions.value = held(DecisionsApi.main(queue))
+    }
+
+    /** [list] as this phone shows it: an answer on its way stays "answering", a failed one says why. */
+    private fun held(list: List<Decision>): List<Decision> {
+        val now = System.currentTimeMillis()
+        decisionHold.entries.removeAll { it.value.second < now }
+        return list.map { d ->
+            val state = decisionHold[d.id]?.first?.takeIf { d.state == "open" }
+            val error = decisionErrors[d.id]
+            when {
+                state != null -> d.copy(state = state, error = null)
+                error != null && d.error == null && d.open -> d.copy(error = error)
+                else -> d
+            }
+        }
+    }
+
+    /** A tower without the queue: the same queue from what it does have. */
+    private fun deriveDecisions() {
+        if (_decisionsSupported.value != false) return
+        setDecisions(DecisionsApi.fromLegacy(_questions.value, _prs.value.values, ::spaceOf, System.currentTimeMillis()))
+    }
+
+    /** The space a session is in, as far as the phone knows. */
+    private fun spaceOf(address: String): String? =
+        _missions.value.spaces.firstOrNull { m -> m.sessions.any { it.address == address } }?.name
+            ?: _spaces.value.spaces.firstOrNull { sp -> sp.sessions.any { it.address == address } }?.space
+
+    /**
+     * Reads the queue. A read that fails for a moment (the Mac busy, the
+     * network hiccuping) is tried again: the queue is what notifies, also
+     * with the app in the background, where nothing else would read it again.
+     */
+    private suspend fun loadDecisions() {
+        if (_decisionsSupported.value == false) return
+        for (wait in RELOAD_WAITS_MS) {
+            val c = client ?: return
+            try {
+                val list = c.decisions().decisions
+                _decisionsSupported.value = true
+                // The main queue leaves a muted space's out: those the event brought stay (they're seen, never notified).
+                setDecisions(list + queue.filter { it.muted && list.none { d -> d.id == it.id } })
+                return
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: UnauthorizedException) {
+                return block(Link.Revoked(e.message))
+            } catch (e: TowerApiException) {
+                if (e.status == 404) {
+                    _decisionsSupported.value = false
+                    deriveDecisions()
+                }
+                return
+            } catch (e: Exception) {
+                Log.i(TAG, "decisions: ${e.javaClass.simpleName}")
+            }
+            if (wait < 0 || _link.value !is Link.Live) return
+            delay(wait)
+        }
+    }
+
+    /** One space's own decisions (a muted space's aren't in the queue), in order. */
+    suspend fun spaceDecisions(space: String): List<Decision> {
+        if (_decisionsSupported.value == true) {
+            act { it.decisions(space) }.onSuccess { return held(it.decisions) }
+        }
+        return held(queue.filter { it.space == space })
+    }
+
+    /** Answers [d] with its option [index]; the tower carries it out. A merge goes through its PR's own two steps instead. */
+    suspend fun answerDecision(d: Decision, index: Int): Result<Unit> {
+        val option = d.options.getOrNull(index) ?: return Result.failure(IllegalArgumentException("That answer isn't there any more."))
+        if (d.kind == "merge" && !d.legacy) return Result.failure(IllegalStateException("A merge is done from its pull request: open the app to see what merging would do."))
+        DecisionsApi.legacyQuestionId(d.id)?.let { qid ->
+            val q = _questions.value.firstOrNull { it.id == qid } ?: act { it.question(qid) }.getOrElse { return Result.failure(it) }
+            val choice = DecisionsApi.legacyChoice(q, option.label) ?: return Result.failure(IllegalStateException("The question changed: open it to answer."))
+            return answerQuestion(qid, listOf(TabAnswer(0, choice)))
+        }
+        return sendDecision(d.id, d, option.label) { it.answerDecision(d.id, DecisionsApi.choiceBody(index)) }
+    }
+
+    /** Answers [d] in the user's own words. */
+    suspend fun answerDecisionOther(d: Decision, text: String): Result<Unit> {
+        DecisionsApi.legacyQuestionId(d.id)?.let { qid ->
+            return answerQuestion(qid, listOf(TabAnswer(0, dev.herdertower.phone.api.Choice.Own(text))))
+        }
+        return sendDecision(d.id, d, text) { it.answerDecision(d.id, DecisionsApi.otherBody(text)) }
+    }
+
+    private suspend fun sendDecision(id: String, d: Decision? = null, words: String? = null, call: suspend (TowerClient) -> DecisionAnswered): Result<Unit> {
+        decisionHold[id] = "answering" to Long.MAX_VALUE
+        decisionErrors.remove(id)
+        showDecisions()
+        return act { call(it) }.map { r ->
+            // A question's answer may still be going in ("answering"): the decisions event says when it's over.
+            decisionHold[id] = r.state.ifBlank { "answered" } to System.currentTimeMillis() + ANSWERED_HOLD_MS
+            showDecisions()
+            decisionNotices.answered(id)
+            linger()
+            // The answer can become a standing rule: offered once, beside the queue.
+            r.rule?.takeIf { it.can && !it.text.isNullOrBlank() }?.let { rule ->
+                _ruleOffers.value = _ruleOffers.value.filterNot { it.id == id } + RuleOffer(id, d?.space.orEmpty(), d?.title.orEmpty(), rule.text!!, words)
+            }
+            Unit
+        }.recoverCatching { e ->
+            val over = DecisionsApi.closedBy(e) ?: throw e
+            // Answered on another screen or in the session meanwhile: the card goes, nothing was sent.
+            decisionHold[id] = over to System.currentTimeMillis() + ANSWERED_HOLD_MS
+            showDecisions()
+            decisionNotices.answered(id)
+            scope.launch { loadDecisions() }
+            throw DecisionOver(DecisionsApi.closedWords(over))
+        }.onFailure { e ->
+            if (e is DecisionOver) return@onFailure
+            decisionHold.remove(id)
+            decisionErrors[id] = describe(e)
+            showDecisions()
+        }
+    }
+
+    /** Not the user's after all: it leaves the queue (a merge's PRs make no decision again while they wait). */
+    suspend fun dismissDecision(d: Decision): Result<Unit> {
+        DecisionsApi.legacyQuestionId(d.id)?.let { return dismissQuestion(it) }
+        if (d.legacy) return Result.failure(IllegalStateException("Merge or close the pull requests: they wait until then."))
+        return act { it.dismissDecision(d.id) }.onSuccess {
+            decisionNotices.answered(d.id)
+            setDecisions(queue.filterNot { it.id == d.id })
+        }
+    }
+
+    /** An answer tapped on a decision's notification (the app may not be on screen, or even running). */
+    suspend fun answerFromNotice(id: String, index: Int, label: String) {
+        val d = _decisions.value.firstOrNull { it.id == id }
+        val result = when {
+            d != null -> answerDecision(d, d.options.indexOfFirst { it.label.take(40) == label }.takeIf { it >= 0 } ?: index)
+            // The process was started for this tap: no queue yet. The tower's own ids answer by index; one made here by its label.
+            DecisionsApi.legacyQuestionId(id) != null -> answerDecision(Decision(id = id, options = List(index + 1) { dev.herdertower.phone.api.DecisionOption(label) }), index)
+            else -> sendDecision(id) { it.answerDecision(id, DecisionsApi.choiceBody(index)) }
+        }
+        // Over already (answered elsewhere): nothing left to say on it.
+        result.onSuccess { decisionNotices.answered(id) }.onFailure { if (it is DecisionOver) decisionNotices.answered(id) else noticeFailed(id, describe(it)) }
+    }
+
+    fun noticeFailed(id: String, why: String) {
+        decisionNotices.failed(_decisions.value.firstOrNull { it.id == id } ?: Decision(id = id, title = "A decision waits for you"), why)
+    }
+
+    /**
+     * The check the background worker makes (DecisionCheck, every 15
+     * minutes while paired): with no stream open (the app closed, the phone
+     * not the voice), the queue is read once, so a new decision notifies all
+     * the same. With the stream open it has nothing to do: the stream follows
+     * the queue. Returns what it did, for the log and the tests.
+     */
+    suspend fun checkInBackground(): String {
+        val creds = _creds.value ?: return "not paired"
+        if (_blocked.value != null) return "blocked: ${_blocked.value}"
+        if (_link.value is Link.Live) return "the stream is open"
+        val c = when (val p = pick(creds)) {
+            is Pick.Found -> clientAt(creds, p.host)
+            is Pick.Mismatch -> {
+                block(Link.CertificateChanged(p.got))
+                return "another certificate"
+            }
+            is Pick.Nowhere -> return "unreachable: ${p.message}"
+        }
+        return try {
+            val quiet = c.hello().features.orEmpty().contains("quiet")
+            if (quiet) {
+                _decisionsSupported.value = true
+                val list = c.decisions().decisions
+                setDecisions(list + queue.filter { it.muted && list.none { d -> d.id == it.id } })
+                "${list.size} open"
+            } else {
+                // A tower from before the queue: what needs the user is its escalated questions and its waiting PRs.
+                _decisionsSupported.value = false
+                setQuestions(c.questions())
+                runCatching { setPrs(c.prs()) }
+                deriveDecisions()
+                "${_decisions.value.size} open (made here)"
+            }
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UnauthorizedException) {
+            block(Link.Revoked(e.message))
+            "revoked"
+        } catch (e: Exception) {
+            "failed: ${e.javaClass.simpleName}"
+        }
+    }
+
+    /** What this tower has, from its hello: the Quiet Tower's calls, or the queue and missions made here from the ones before it. */
+    private fun quiet(on: Boolean) {
+        _decisionsSupported.value = on
+        _missionsSupported.value = on
+        if (!on) {
+            deriveMissions()
+            deriveDecisions()
+        }
+    }
+
+    // Make it a rule: an answer given here, as a standing rule
+
+    /** An answer that can become a rule: [text] is what the tower would be asked; [answer] the words given. */
+    data class RuleOffer(val id: String, val space: String, val title: String, val text: String, val answer: String?)
+
+    private val _ruleOffers = MutableStateFlow<List<RuleOffer>>(emptyList())
+    /** Answers just given that the tower offers to make standing rules, oldest first. */
+    val ruleOffers: StateFlow<List<RuleOffer>> = _ruleOffers.asStateFlow()
+
+    /** Asks the tower of the decision's space to add the rule; it arrives as a behavior change. */
+    suspend fun makeRule(o: RuleOffer): Result<Unit> = act { it.decisionRule(o.id, o.answer) }.map { }.also { r ->
+        // Sent, or not to be offered any more (409 no_rule, not_answered): the offer goes either way but for a network failure.
+        if (r.isSuccess || (r.exceptionOrNull() as? TowerApiException)?.status == 409) dropRule(o)
+        if (r.isSuccess) linger()
+    }
+
+    fun dropRule(o: RuleOffer) {
+        _ruleOffers.value = _ruleOffers.value.filterNot { it.id == o.id }
+    }
+
+    // Acts: what the tower opened for a command, and taking it back
+
+    private val _actsSupported = MutableStateFlow(false)
+    /** Whether the tower keeps acts (receipts with undo), rules from answers and a voice level. */
+    val actsSupported: StateFlow<Boolean> = _actsSupported.asStateFlow()
+
+    private val _acts = MutableStateFlow<Map<String, Act>>(emptyMap())
+    /** Every act seen (in the chat, from its event, or undone here), as it last stood. */
+    val acts: StateFlow<Map<String, Act>> = _acts.asStateFlow()
+
+    private fun setAct(a: Act) {
+        if (a.id.isNotBlank()) _acts.value = _acts.value + (a.id to a)
+    }
+
+    /**
+     * Ends what an act opened. While a session of it would lose work it
+     * fails with [ActHeld] (ask, then [force]); undone already, it is read
+     * again and shown as it is.
+     */
+    suspend fun undoAct(id: String, force: Boolean = false): Result<UndoResult> = act { it.undoAct(id, force) }
+        .onSuccess { r ->
+            setAct(r.act)
+            scope.launch {
+                loadMissions()
+                loadDecisions()
+            }
+        }
+        .recoverCatching { e ->
+            val t = e as? TowerApiException ?: throw e
+            when {
+                t.status == 409 && t.code == "held" ->
+                    throw ActHeld(t.list("sessions") { dev.herdertower.phone.api.TowerJson.decodeFromJsonElement(HeldSession.serializer(), it) }, t.message)
+                t.status == 409 && t.code == "undone" -> {
+                    quietly { c -> c.acts().forEach(::setAct) }
+                    throw IllegalStateException("It was undone already.")
+                }
+                else -> throw e
+            }
+        }
+
+    // Spaces as missions
+
+    private val _missions = MutableStateFlow(MissionsResponse())
+    /** Every open space as a mission, the quiet ones and today's closed ones by name. */
+    val missions: StateFlow<MissionsResponse> = _missions.asStateFlow()
+
+    private val _missionsSupported = MutableStateFlow<Boolean?>(null)
+    /** Whether the tower has missions (`/v1/missions`); false: they're made here from its spaces and jobs. */
+    val missionsSupported: StateFlow<Boolean?> = _missionsSupported.asStateFlow()
+
+    private fun deriveMissions() {
+        if (_missionsSupported.value != false) return
+        _missions.value = MissionsApi.fromSpaces(_spaces.value, _jobs.value, _decisions.value)
+    }
+
+    private suspend fun loadMissions() {
+        if (_missionsSupported.value == false) return
+        val c = client ?: return
+        try {
+            _missions.value = c.missions()
+            _missionsSupported.value = true
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: UnauthorizedException) {
+            block(Link.Revoked(e.message))
+        } catch (e: TowerApiException) {
+            if (e.status == 404) {
+                _missionsSupported.value = false
+                deriveMissions()
+                // The queue names each decision's space from these.
+                deriveDecisions()
+            }
+        } catch (e: Exception) {
+            Log.i(TAG, "missions: ${e.javaClass.simpleName}")
+        }
+    }
+
+    /** Runs a change to one space and shows the mission the tower answers with (or reads them all again). */
+    private suspend fun changeMission(call: suspend (TowerClient) -> Mission?): Result<Unit> = act(call).map { m ->
+        if (m == null) loadMissions()
+        else _missions.value = _missions.value.let { all -> all.copy(spaces = if (all.spaces.any { it.name == m.name }) all.spaces.map { if (it.name == m.name) m else it } else all.spaces + m) }
+    }
+
+    suspend fun setGoal(space: String, goal: String, doneWhen: String?, standing: Boolean): Result<Unit> =
+        changeMission { it.setGoal(space, goal, doneWhen.orEmpty(), standing) }
+
+    suspend fun followSpace(space: String, on: Boolean): Result<Unit> = changeMission { it.follow(space, on) }
+
+    /** Muted, a space's decisions stay in its own tower: off the queue. The queue is read again. */
+    suspend fun muteSpace(space: String, on: Boolean): Result<Unit> = changeMission { it.muteSpace(space, on) }.onSuccess { loadDecisions() }
+
+    /**
+     * Closes a space: the tower answers at once with the action that ends its
+     * sessions and removes its worktrees, followed in [actions]. While a
+     * session there works or waits for the user it fails with [SpaceBusy]
+     * (ask, then [force]: their work in progress is cut off).
+     */
+    suspend fun closeSpace(space: String, force: Boolean = false): Result<TowerAction> = act { it.closeSpace(space, force) }
+        .recoverCatching { e ->
+            val busy = e as? TowerApiException
+            when {
+                busy?.status == 409 && busy.code == "busy" ->
+                    throw SpaceBusy(busy.list("sessions") { dev.herdertower.phone.api.TowerJson.decodeFromJsonElement(BusySession.serializer(), it) }, busy.message)
+                busy?.status == 409 && busy.code == "closing" -> busy.word("action")?.let { id -> act { it.action(id) }.getOrThrow() } ?: throw e
+                else -> throw e
+            }
+        }
+        .onSuccess(::follow)
+
+    // A space's thread: what its sessions wrote each other
+
+    /** What a space's sessions wrote each other ([more]: older ones remain), as far as loaded. */
+    data class SpaceThread(val messages: List<ThreadMessage> = emptyList(), val more: Boolean = false) {
+        fun with(add: List<ThreadMessage>): SpaceThread = copy(messages = (messages + add).distinctBy { it.id.ifBlank { "${it.at}:${it.from}:${it.text.hashCode()}" } }.sortedBy { it.at })
+    }
+
+    private val _spaceThreads = MutableStateFlow<Map<String, SpaceThread>>(emptyMap())
+    /** The threads of the spaces looked at, kept up to date by the `thread` event. */
+    val spaceThreads: StateFlow<Map<String, SpaceThread>> = _spaceThreads.asStateFlow()
+
+    suspend fun loadSpaceThread(space: String, limit: Int = 50): Result<SpaceThread> = act { it.thread(space, limit) }.map { r ->
+        val t = SpaceThread(r.messages, r.more).let { fresh -> _spaceThreads.value[space]?.let { fresh.with(it.messages) } ?: fresh }
+        _spaceThreads.value = _spaceThreads.value + (space to t)
+        t
+    }
+
+    /** The messages before the oldest loaded. */
+    suspend fun olderSpaceThread(space: String, limit: Int = 50): Result<Int> {
+        val t = _spaceThreads.value[space] ?: return loadSpaceThread(space, limit).map { it.messages.size }
+        val oldest = t.messages.firstOrNull()?.id?.takeIf { it.isNotBlank() } ?: return Result.success(0)
+        return act { it.thread(space, limit, before = oldest) }.map { r ->
+            _spaceThreads.value = _spaceThreads.value + (space to t.with(r.messages).copy(more = r.more))
+            r.messages.size
+        }
+    }
+
+    // A space's own conversation (its own tower's)
+
+    private val _spaceChats = MutableStateFlow<Map<String, List<ChatMessage>>>(emptyMap())
+    /** Each space's own conversation as far as loaded (requests, answers, receipts), kept up to date by the `chat` event. */
+    val spaceChats: StateFlow<Map<String, List<ChatMessage>>> = _spaceChats.asStateFlow()
+
+    suspend fun loadSpaceChat(space: String, limit: Int = 60) {
+        if (_missionsSupported.value != true) return
+        quietly { c ->
+            val page = c.chat(limit = limit, space = space).messages.filter { ChatApi.inSpace(it, space) }
+            page.mapNotNull { it.act }.forEach(::setAct)
+            _spaceChats.value = _spaceChats.value + (space to ChatApi.merge(_spaceChats.value[space].orEmpty(), page))
+        }
+    }
+
+    suspend fun setups(): Result<List<Setup>> = act { it.setups() }
+
+    /** What launching [goal] would do (a dry run): the space's name, its sessions, and what the tower assumed. */
+    suspend fun launchPlan(goal: String, setup: String?, name: String? = null): Result<LaunchPlan> = act { it.launchPlan(goal, setup, name) }
+
+    /**
+     * A space from one sentence: the tower answers at once with the action
+     * that opens its sessions, followed in [actions] until it is done. A
+     * launch already under way is the one followed.
+     */
+    suspend fun launch(goal: String, setup: String?, name: String? = null): Result<TowerAction> = act { it.launch(goal, setup, name) }
+        .recoverCatching { e ->
+            val running = (e as? TowerApiException)?.takeIf { it.status == 409 && it.code == "launching" }?.word("action") ?: throw e
+            act { it.action(running) }.getOrThrow()
+        }
+        .onSuccess {
+            follow(it)
+            linger()
+        }
+
+    // Launches and closes: actions
+
+    private val _actions = MutableStateFlow<Map<String, TowerAction>>(emptyMap())
+    /** The launches and closes this phone started, as each last stood, by id. */
+    val actions: StateFlow<Map<String, TowerAction>> = _actions.asStateFlow()
+
+    private fun setAction(a: TowerAction) {
+        val before = _actions.value[a.id]
+        _actions.value = _actions.value + (a.id to a)
+        // Over: the spaces and the queue as they are now (the action events come before theirs, or instead of them).
+        if (!a.running && before?.running != false) scope.launch {
+            loadMissions()
+            loadDecisions()
+            // A launch became an act: its undo shows in the new space.
+            a.launch?.act?.takeIf { _actsSupported.value }?.let { id -> quietly { c -> setAct(c.act(id)) } }
+        }
+    }
+
+    /**
+     * Follows an action: its events move it, and it is asked about every few
+     * seconds as well (a stream that dropped, or a tower that sends no action
+     * events), until it is over or the tower no longer knows it.
+     */
+    private fun follow(a: TowerAction) {
+        setAction(a)
+        if (!a.running) return
+        scope.launch {
+            val until = System.currentTimeMillis() + ACTION_WATCH_MS
+            while (_actions.value[a.id]?.running == true && System.currentTimeMillis() < until) {
+                delay(ACTION_POLL_MS)
+                if (_actions.value[a.id]?.running != true) break
+                val c = client ?: break
+                try {
+                    setAction(c.action(a.id))
+                } catch (e: CancellationException) {
+                    throw e
+                } catch (e: TowerApiException) {
+                    // A restarted tower forgets its actions: what it did is in the missions.
+                    if (e.status == 404) {
+                        loadMissions()
+                        break
+                    }
+                } catch (e: Exception) {
+                    Log.i(TAG, "action: ${e.javaClass.simpleName}")
+                }
+            }
+        }
+    }
+
+    // The brains' model
+
+    private val _model = MutableStateFlow<BrainModel?>(null)
+    /** What the tower's brains run on; null: not known (or a tower from before the setting). */
+    val model: StateFlow<BrainModel?> = _model.asStateFlow()
+
+    /** Another model or effort (it applies when a brain starts), and/or [restart] every brain now. */
+    suspend fun setModel(model: String? = null, effort: String? = null, restart: Boolean? = null): Result<BrainModel> =
+        act { it.setModel(model, effort, restart) }.onSuccess { _model.value = it }
+
+    /** Reads the model again (after a restart, the brains say what they run on). */
+    suspend fun loadModel() {
+        if (_missionsSupported.value != true) return
+        quietly { _model.value = it.model() }
+    }
+
+    // How much the tower tells the user
+
+    private val _tell = MutableStateFlow<String?>(null)
+    /** `decisions`, `results` or `everything`; null: a tower from before the setting. */
+    val tell: StateFlow<String?> = _tell.asStateFlow()
+
+    suspend fun setTell(level: String): Result<Unit> {
+        val before = _tell.value
+        _tell.value = level
+        return act { it.setTell(level = level) }.map { t ->
+            _tell.value = t.level
+            t.voice?.let { _tellVoice.value = it }
+            Unit
+        }.onFailure { _tell.value = before }
+    }
+
+    private val _tellVoice = MutableStateFlow<String?>(null)
+    /** What the tower says out loud: `off`, `decisions` or `replies`; null: a tower from before the setting. */
+    val tellVoice: StateFlow<String?> = _tellVoice.asStateFlow()
+
+    suspend fun setTellVoice(voice: String): Result<Unit> {
+        val before = _tellVoice.value
+        _tellVoice.value = voice
+        return act { it.setTell(voice = voice) }.map { t -> _tellVoice.value = t.voice ?: voice }.onFailure { _tellVoice.value = before }
+    }
+
+    // Asking
+
+    /** [text] for [space]'s tower; a tower from before spaces had their own gets the space in words. */
+    private fun forSpace(text: String, space: String?): String =
+        if (space != null && _missionsSupported.value == false) "In the space $space: $text" else text
+
+    /** Sends words (and files) to the main tower, or with [space] to that space's own. */
+    suspend fun ask(text: String, files: List<FilePart> = emptyList(), space: String? = null): Result<Unit> =
+        act { it.ask(forSpace(text, space), files, space) }.map { }
+
+    /**
+     * A take from the talk button: to the main tower as it is; for a space,
+     * written down by the Mac first and then sent with that space; into a
+     * field (a new space's goal), only written down.
+     */
+    suspend fun take(wav: ByteArray, target: TalkTarget): Result<VoiceResult> = when (target) {
+        TalkTarget.Main -> act { it.voice(wav) }
+        is TalkTarget.Space -> act { c ->
+            val heard = c.transcribe(wav).heard.trim()
+            if (heard.isEmpty()) VoiceResult("", false) else {
+                c.ask(forSpace(heard, target.name), target.name)
+                VoiceResult(heard, true)
+            }
+        }
+        is TalkTarget.Into -> act { c -> VoiceResult(c.transcribe(wav).heard.trim(), false).also { if (it.heard.isNotEmpty()) target.take(it.heard) } }
     }
 
     // Behaviors
@@ -586,8 +1181,6 @@ class TowerSession(
     /** `normal`, `keep-moving` or `ask-everything`; null until the tower says (or it has no questions). */
     val questionPolicy: StateFlow<String?> = _questionPolicy.asStateFlow()
 
-    private val notices = QuestionNotices(context)
-
     /**
      * What this phone did to a question the tower doesn't show yet (id to
      * status and until when): a `state` sent before the answer landed would
@@ -600,7 +1193,7 @@ class TowerSession(
         localStatus.entries.removeAll { it.value.second < now }
         val shown = list.map { q -> localStatus[q.id]?.takeIf { q.status == "open" }?.let { q.copy(status = it.first) } ?: q }
         _questions.value = shown
-        notices.follow(shown, background = !_foreground.value)
+        deriveDecisions()
     }
 
     suspend fun setQuestionPolicy(policy: String): Result<String> =
@@ -610,12 +1203,17 @@ class TowerSession(
     suspend fun answerQuestion(id: String, answers: List<TabAnswer>): Result<Unit> {
         localStatus[id] = "answering" to Long.MAX_VALUE
         _questions.value = _questions.value.map { if (it.id == id) it.copy(status = "answering", error = null) else it }
+        // A tower without the queue: the question's card there follows.
+        deriveDecisions()
         return act { it.answerQuestion(id, answers) }.onSuccess {
             localStatus[id] = "answered" to System.currentTimeMillis() + ANSWERED_HOLD_MS
             _questions.value = _questions.value.map { if (it.id == id && it.status == "answering") it.copy(status = "answered") else it }
+            deriveDecisions()
+            linger()
         }.onFailure { e ->
             localStatus.remove(id)
             _questions.value = _questions.value.map { if (it.id == id) it.copy(status = "failed", error = describe(e)) else it }
+            deriveDecisions()
         }
     }
 
@@ -641,13 +1239,11 @@ class TowerSession(
     /** Whether the tower tracks PRs (`/v1/prs`). */
     val prsSupported: StateFlow<Boolean> = _prsSupported.asStateFlow()
 
-    private val prNotices = PrNotices(context)
-
     private fun setPrs(more: List<Pr>) {
         val next = PrsApi.merge(_prs.value, more)
         if (next == _prs.value) return
         _prs.value = next
-        prNotices.follow(next.values, background = !_foreground.value)
+        deriveDecisions()
     }
 
     private suspend fun loadPrs() {
@@ -681,6 +1277,16 @@ class TowerSession(
         scope.launch { loadThread() }
         scope.launch { loadPrs() }
         scope.launch { loadQuestions() }
+        scope.launch { loadDecisions() }
+        scope.launch { loadMissions() }
+        scope.launch {
+            if (_missionsSupported.value == true) quietly { c ->
+                val t = c.tell()
+                _tell.value = t.level
+                t.voice?.let { _tellVoice.value = it }
+            }
+        }
+        scope.launch { loadModel() }
         scope.launch { loadBehaviors() }
         scope.launch {
             quietly { r -> setRouteLocal(r.audioRoute().route) }
@@ -703,9 +1309,18 @@ class TowerSession(
         val a = async { quietly { _spaces.value = it.spaces() } }
         val b = async { quietly { _jobs.value = it.jobs(status = "all", limit = 100).jobs } }
         val c = async { quietly { _screenshots.value = mergeShots(_screenshots.value, it.screenshots(limit = 60).screenshots) } }
+        // The queue and the missions are pushed, and read again here all the same: a missed event mustn't leave a
+        // decision unseen, and what a failed first look left unknown is asked again.
+        val d = async { if (_missionsSupported.value != false) loadMissions() }
+        val e = async { if (_decisionsSupported.value != false) loadDecisions() }
         a.await()
         b.await()
         c.await()
+        d.await()
+        e.await()
+        // A tower from before missions: they follow its spaces and jobs.
+        deriveMissions()
+        deriveDecisions()
     }
 
     suspend fun refreshAgents(all: Boolean = false) {
@@ -720,9 +1335,10 @@ class TowerSession(
     private suspend fun loadThread() {
         val c = client ?: return
         try {
-            val page = c.chat(limit = 60)
+            val page = c.chat(limit = 60, main = _missionsSupported.value == true)
             _threadSupported.value = true
             setPrs(page.messages.mapNotNull(PrsApi::of))
+            page.messages.mapNotNull { it.act }.forEach(::setAct)
             // The newest page joins what's loaded when they overlap; after a gap (or another tower) it replaces it.
             val joins = page.messages.isEmpty() || _thread.value.any { it.id == page.messages.first().id }
             _thread.value = if (joins) ChatApi.merge(_thread.value, page.messages) else ChatApi.merge(emptyList(), page.messages)
@@ -742,7 +1358,7 @@ class TowerSession(
         val oldest = _thread.value.firstOrNull() ?: return 0
         var n = 0
         quietly { c ->
-            val page = c.chat(before = oldest.id.ifBlank { oldest.at.toString() }, limit = limit)
+            val page = c.chat(before = oldest.id.ifBlank { oldest.at.toString() }, limit = limit, main = _missionsSupported.value == true)
             n = page.messages.size
             _thread.value = ChatApi.merge(_thread.value, page.messages)
             setPrs(page.messages.mapNotNull(PrsApi::of))
@@ -988,10 +1604,25 @@ class TowerSession(
         _questions.value = emptyList()
         _questionsSupported.value = false
         _questionPolicy.value = null
-        notices.forget()
         _prs.value = emptyMap()
         _prsSupported.value = false
-        prNotices.forget()
+        decisionHold.clear()
+        decisionErrors.clear()
+        queue = emptyList()
+        _decisions.value = emptyList()
+        _decisionsSupported.value = null
+        decisionNotices.forget()
+        _missions.value = MissionsResponse()
+        _missionsSupported.value = null
+        _tell.value = null
+        _model.value = null
+        _actions.value = emptyMap()
+        _acts.value = emptyMap()
+        _actsSupported.value = false
+        _ruleOffers.value = emptyList()
+        _tellVoice.value = null
+        _spaceThreads.value = emptyMap()
+        _spaceChats.value = emptyMap()
         images.clear() // another tower's pictures could share an id
         lastClip = null
         _route.value = null
@@ -1020,8 +1651,13 @@ class TowerSession(
         const val LINGER_MS = 120_000L
         /** How long a `state` that disagrees with a mute just set is taken as stale. */
         private const val MUTE_HOLD_MS = 3_000L
+        /** After a read of the queue fails: how long before each further try (the last, negative: give up until the next refresh). */
+        private val RELOAD_WAITS_MS = longArrayOf(2_000, 5_000, -1)
         /** How long an answer sent from here shows as answered while the tower still says open. */
         private const val ANSWERED_HOLD_MS = 5_000L
+        /** How often an action is asked about while it runs, and for how long at most. */
+        private const val ACTION_POLL_MS = 2_000L
+        private const val ACTION_WATCH_MS = 15 * 60_000L
 
         /** The stream to keep open: the voice whenever this phone is it (on screen or not), else the feed while on screen or lingering. */
         fun streamMode(voice: Boolean, foreground: Boolean, lingering: Boolean): StreamMode = when {
@@ -1055,3 +1691,12 @@ class TowerSession(
         }
     }
 }
+
+/** An answer came too late: the decision is over already (answered on another screen or in its session, dismissed, or its sessions gone). */
+class DecisionOver(message: String) : Exception(message)
+
+/** A close the tower held back: these sessions work, or wait for the user. Closing anyway cuts their work in progress off. */
+class SpaceBusy(val sessions: List<BusySession>, message: String) : Exception(message)
+
+/** An undo the tower held back: these sessions would lose work. Undoing anyway ends them all the same (a worktree with changes is still kept). */
+class ActHeld(val sessions: List<HeldSession>, message: String) : Exception(message)

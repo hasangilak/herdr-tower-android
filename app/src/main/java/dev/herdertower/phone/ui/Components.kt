@@ -64,24 +64,6 @@ fun AccountBadge(account: String, isDefault: Boolean, modifier: Modifier = Modif
     }
 }
 
-/** A space's account: the one its Claude sessions share, or "mixed" with a dot per account. */
-@Composable
-fun SpaceAccountBadge(accounts: List<String>, default: String?) {
-    val distinct = accounts.distinct().sorted()
-    when (distinct.size) {
-        0 -> {}
-        1 -> AccountBadge(distinct[0], distinct[0] == default)
-        else -> Row(
-            Modifier.clip(CircleShape).border(1.dp, tc.edge, CircleShape).padding(horizontal = 8.dp, vertical = 3.dp),
-            horizontalArrangement = Arrangement.spacedBy(4.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            distinct.take(3).forEach { Dot(if (it == default) tc.muted else Color(0xFF000000 or AccountHue.of(it)), size = 5.dp) }
-            Text("mixed", style = MaterialTheme.typography.labelSmall, color = tc.muted)
-        }
-    }
-}
-
 /** A round glass icon button (the top bar's alerts and menu). */
 @Composable
 fun RoundIcon(icon: ImageVector, label: String, modifier: Modifier = Modifier, badge: Int = 0, size: Dp = 44.dp, onClick: () -> Unit) {
@@ -182,19 +164,6 @@ fun GlassCard(modifier: Modifier = Modifier, highlighted: Boolean = false, onCli
             .then(if (onClick != null) Modifier.clickable(onClick = onClick) else Modifier)
             .padding(18.dp),
     ) { content() }
-}
-
-/** One word for the tower's phase and its colour. */
-@Composable
-fun phaseWord(phase: String?): Pair<String, Color> = when (phase) {
-    "listening", "armed" -> "Listening" to tc.working
-    "speaking", "announcing" -> "Speaking" to tc.accentHi
-    "transcribing" -> "Understanding" to tc.accentHi
-    "thinking" -> "Thinking" to tc.accentHi
-    "blocked" -> "Needs you" to tc.blocked
-    "standby" -> "Standby" to tc.done
-    null, "off" -> "Not connected" to tc.idle
-    else -> "Ready" to tc.done
 }
 
 fun statusWord(status: String): String = when (status) {

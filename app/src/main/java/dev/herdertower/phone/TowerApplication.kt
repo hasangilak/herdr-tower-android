@@ -77,7 +77,11 @@ class TowerApplication : Application() {
                 clip to (on && word && mic && phase == VoiceController.Phase.Idle && !dict)
             }.collect { (clip, enabled) -> hush.follow(clip, enabled) }
         }
-        ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, e ->
+        // A decision notifies with the app closed too: a check every 15 minutes while paired, none otherwise.
+        kotlinx.coroutines.MainScope().launch {
+            session.credentials.collect { dev.herdertower.phone.data.DecisionCheck.follow(this@TowerApplication, paired = it != null) }
+        }
+                ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, e ->
             when (e) {
                 Lifecycle.Event.ON_START -> session.setForeground(true)
                 Lifecycle.Event.ON_STOP -> session.setForeground(false)
