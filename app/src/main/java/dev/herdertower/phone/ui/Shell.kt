@@ -391,7 +391,11 @@ fun ConnectionNotice(link: Link, session: TowerSession, onRepair: () -> Unit, mo
                     Text(if (retry) "Retry now" else "Pair again", color = tc.text, fontWeight = FontWeight.Medium)
                 }
             }
-            // Not on any network the tower was seen on: pair again here (the scanner opens), or try once more.
+            // Not on any network the tower was seen on: what the search on this Wi-Fi did, then pair again here or try once more.
+            val search by session.search.collectAsStateWithLifecycle()
+            if (notice.scan) search?.let {
+                Text("Looked for the Mac on this Wi-Fi at ${clock(it.atMs)}: ${it.note}.", Modifier.padding(start = 18.dp, top = 6.dp), style = MaterialTheme.typography.bodySmall, color = tc.muted)
+            }
             if (notice.scan) Row(Modifier.padding(start = 18.dp, top = 6.dp), horizontalArrangement = androidx.compose.foundation.layout.Arrangement.spacedBy(8.dp)) {
                 PillButton("Scan the QR", primary = true, onClick = onRepair)
                 PillButton("Retry now", onClick = session::reconnect)

@@ -262,6 +262,9 @@ fun SettingsScreen(session: TowerSession, theme: String, onTheme: (String) -> Un
                         }
                     }
                     Words("This phone is ${c.deviceName.ifBlank { "paired" }} there. Back on one of these networks it connects by itself; on a new one it looks for the Mac first.")
+                    // What the last search for the Mac on this Wi-Fi did (Bonjour), so a try that fails says why.
+                    val search by session.search.collectAsStateWithLifecycle()
+                    search?.let { Words("Looked for the Mac on this Wi-Fi at ${clock(it.atMs)}: ${it.note}.") }
                 }
                 FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     PillButton("Name it") { renaming = true }

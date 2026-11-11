@@ -377,9 +377,10 @@ class TowerSessionTest {
     /** Bonjour on this network: the towers it finds, and how often it was asked. */
     private class FakeFinder(val found: () -> List<FoundTower>) : TowerFinder {
         var asked = 0
-        override suspend fun find(fingerprint: String, timeoutMs: Long): List<FoundTower> {
+        override suspend fun find(fingerprint: String, timeoutMs: Long): FindResult {
             asked++
-            return found().filter { true }
+            val f = found()
+            return FindResult(f, if (f.isEmpty()) "no tower advertised on this Wi-Fi" else "found it at ${f[0].host.host}:${f[0].host.port}")
         }
     }
 
@@ -403,6 +404,41 @@ class TowerSessionTest {
         assertEquals(here.id, s.activeRoute.value?.host?.id)
         assertTrue("stored for next time", store.saved?.hosts?.any { it.id == here.id } == true)
         assertTrue("answered just now", s.credentials.value!!.hosts.first { it.id == here.id }.lastOkMs != null)
+    }
+
+    private class WifiNet(val ranges: Set<String> = emptySet()) : PhoneNet {
+        override fun vpnOn() = false
+        override fun tailscaleInstalled() = false
+        override fun onWifi() = true
+        override fun localRanges() = ranges
+    }
+
+    @Test fun aPortThatRefusesOnWifiIsLookedForByBonjourAndTheSearchSaysWhatItDid() {
+        // As the live test: home and office stored; the Mac's port moved, so home refuses; the office is elsewhere.
+        val home = dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort())
+        val office = dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort())
+        val moved = dev.herdertower.phone.api.TowerHost("lan", server.hostName, server.port)
+        val finder = FakeFinder { listOf(FoundTower(moved, null)) }
+        val creds = Credentials(home.host, home.port, fp, "htk_test", "d_test", "test phone", listOf(home, office), null)
+        val s = TowerSession(FakeContext(), FakeStore(creds), Settings(FakeContext()), WifiNet(), finder)
+        sessions += s
+        s.setForeground(true)
+        until(timeoutMs = 15_000, what = "live at the moved port") { s.link.value == Link.Live(false) }
+        assertEquals(moved.id, s.activeRoute.value?.host?.id)
+        assertEquals("refused counts as no answer: the search ran", 1, finder.asked)
+        assertTrue(s.search.value?.note, s.search.value?.note?.endsWith("connected, no pairing again") == true)
+    }
+
+    @Test fun aSearchThatFindsNothingSaysSo() {
+        val home = dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort())
+        val office = dev.herdertower.phone.api.TowerHost("lan", "127.0.0.1", closedPort())
+        val finder = FakeFinder { emptyList() }
+        val creds = Credentials(home.host, home.port, fp, "htk_test", "d_test", "test phone", listOf(home, office), null)
+        val s = TowerSession(FakeContext(), FakeStore(creds), Settings(FakeContext()), WifiNet(), finder)
+        sessions += s
+        s.setForeground(true)
+        until(timeoutMs = 15_000, what = "the retry card") { s.link.value is Link.Retrying }
+        assertEquals("no tower advertised on this Wi-Fi", s.search.value?.note)
     }
 
     @Test fun anotherMacsTowerOrNoneFoundLeavesTheCard() {

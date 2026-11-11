@@ -429,25 +429,40 @@ class TowerSession(
      * again. Null: not on Wi-Fi, searched a moment ago, or not found.
      */
     private suspend fun discover(c: Credentials): TowerHost? {
-        if (net.onWifi() == false) return null
+        if (net.onWifi() == false) {
+            _search.value = Search(System.currentTimeMillis(), "not on Wi-Fi: no search")
+            return null
+        }
         val now = System.currentTimeMillis()
         if (now - lastDiscoveryMs < DISCOVERY_EVERY_MS) return null
         lastDiscoveryMs = now
-        val found = runCatching { finder.find(c.fingerprint, DISCOVERY_MS) }.getOrDefault(emptyList())
-        for (f in found) {
+        _search.value = Search(now, "looking for the Mac on this Wi-Fi…")
+        val result = runCatching { finder.find(c.fingerprint, DISCOVERY_MS) }.getOrElse { FindResult.none("the search failed: ${it.javaClass.simpleName}") }
+        for (f in result.found) {
             val t = probe(c, f.host)
             _routeTries.value = _routeTries.value.filterNot { it.host.id == t.host.id } + t
-            if (t.outcome != RouteOutcome.Answered) continue
+            if (t.outcome != RouteOutcome.Answered) {
+                _search.value = Search(now, "${result.note}, but it ${t.outcome.words}")
+                continue
+            }
             val cur = _creds.value ?: return null
             val next = cur.copy(hosts = Hosts.refresh(cur.hosts, listOf(f.host.copy(lastOkMs = System.currentTimeMillis())), null))
             store.save(next)
             _creds.value = next
             f.name?.let { if (settings.towerName.isBlank()) _towerName.value = it }
+            _search.value = Search(now, "${result.note}: connected, no pairing again")
             Log.i(TAG, "found the tower on this network by Bonjour")
             return f.host
         }
+        if (result.found.isEmpty()) _search.value = Search(now, result.note.ifBlank { "found nothing" })
         return null
     }
+
+    /** What the last Bonjour search did, in words, and when: shown in Settings and on the card, so a try that fails says why. */
+    data class Search(val atMs: Long, val note: String)
+
+    private val _search = MutableStateFlow<Search?>(null)
+    val search: StateFlow<Search?> = _search.asStateFlow()
 
     /** The tower answered at [h]: noted on the stored address (its "last answered"). */
     private fun answeredAt(h: TowerHost) {
@@ -1811,7 +1826,7 @@ class TowerSession(
         /** How often an action is asked about while it runs, and for how long at most. */
         private const val ACTION_POLL_MS = 2_000L
         /** A Bonjour search: how long it listens, and how often at most. */
-        private const val DISCOVERY_MS = 4_000L
+        private const val DISCOVERY_MS = 6_000L
         private const val DISCOVERY_EVERY_MS = 30_000L
         private const val ACTION_WATCH_MS = 15 * 60_000L
 
