@@ -1688,6 +1688,8 @@ class H(BaseHTTPRequestHandler):
             if seg == ["mode"]:
                 set_state(mode=json.loads(b)["mode"])
                 return self.send(200, {"mode": STATE["mode"]})
+            if seg == ["voice"] and q.get("space") and QUIET[0] and not any(m["name"].lower() == q["space"].lower() for m in MISSIONS):
+                return self.err(404, "no_space", f"no space called \"{q['space']}\"")
             if seg in (["voice"], ["transcribe"]):
                 if b[:4] != b"RIFF" and not self.headers.get("Content-Type", "").startswith("multipart/"):
                     return self.err(415, "bad_audio", "send audio/wav")
@@ -1697,9 +1699,10 @@ class H(BaseHTTPRequestHandler):
                     heard = f"a {secs:.1f} second take"
                 if seg == ["transcribe"] or q.get("send") == "0":
                     return self.send(200, {"heard": heard, "sent": False})
+                sp = q.get("space")
                 set_state(heard=heard, heard_ms=now())
-                threading.Thread(target=reply_to, args=(heard,), daemon=True).start()
-                return self.send(200, {"heard": heard, "sent": True})
+                threading.Thread(target=reply_to, args=(heard, (), sp), daemon=True).start()
+                return self.send(200, {"heard": heard, "sent": True, **({"space": sp} if sp else {})})
         if (method, seg) == ("PUT", ["device", "audio"]):
             r = json.loads(self.body() or b"{}").get("route")
             if r not in ("phone", "mac"):

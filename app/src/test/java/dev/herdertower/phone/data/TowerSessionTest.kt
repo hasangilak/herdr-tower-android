@@ -813,11 +813,12 @@ class TowerSessionTest {
         assertTrue(calls.any { it == """POST /v1/ask {"text":"In the space sandbox: open one more session here","space":"sandbox"}""" })
     }
 
-    @Test fun aTakeForASpaceIsWrittenDownThenSentWithIt() = runBlocking {
+    @Test fun aTakeForASpaceGoesToThatSpacesTower() = runBlocking {
         extra = { r ->
-            when (r.url.encodedPath) {
-                "/v1/transcribe" -> json("""{"heard":" open one more session here ","sent":false}""")
-                "/v1/voice" -> json("""{"heard":"what's left?","sent":true}""")
+            when {
+                r.url.encodedPath == "/v1/transcribe" -> json("""{"heard":" open one more session here ","sent":false}""")
+                r.url.encodedPath == "/v1/voice" && r.url.queryParameter("space") == "sandbox" -> json("""{"heard":"open one more session here","sent":true,"space":"sandbox"}""")
+                r.url.encodedPath == "/v1/voice" -> json("""{"heard":"what's left?","sent":true}""")
                 else -> null
             }
         }
@@ -825,20 +826,60 @@ class TowerSessionTest {
         s.setForeground(true)
         until(what = "live") { s.link.value == Link.Live(false) && s.missionsSupported.value == true }
         val wav = dev.herdertower.phone.voice.Wav.encode(ByteArray(3200))
+        // A Quiet Tower takes it with the space: one call, nothing written down first.
         val forSpace = s.take(wav, dev.herdertower.phone.voice.TalkTarget.Space("sandbox")).getOrThrow()
         assertEquals("open one more session here", forSpace.heard)
-        assertTrue(forSpace.sent)
-        assertTrue(calls.any { it == """POST /v1/ask {"text":"open one more session here","space":"sandbox"}""" })
+        assertEquals("sandbox", forSpace.space)
+        assertTrue(calls.any { it.startsWith("POST /v1/voice?space=sandbox") })
+        assertTrue(calls.none { it.startsWith("POST /v1/ask") || it.startsWith("POST /v1/transcribe") })
         // The main tower takes the take itself.
         val main = s.take(wav, dev.herdertower.phone.voice.TalkTarget.Main).getOrThrow()
         assertEquals("what's left?", main.heard)
-        assertTrue(calls.count { it.startsWith("POST /v1/voice") } == 1)
+        assertEquals(2, calls.count { it.startsWith("POST /v1/voice") })
         // Into a field: written down only, sent nowhere.
         var goal = ""
         val into = s.take(wav, dev.herdertower.phone.voice.TalkTarget.Into { goal = it }).getOrThrow()
         assertFalse(into.sent)
         assertEquals("open one more session here", goal)
-        assertEquals(1, calls.count { it.startsWith("POST /v1/ask") })
+        assertEquals(0, calls.count { it.startsWith("POST /v1/ask") })
+    }
+
+    @Test fun aTowerFromBeforeTheQuietOneGetsASpacesTakeWrittenDownAndAsked() = runBlocking {
+        extra = { r ->
+            when (r.url.encodedPath) {
+                "/v1/transcribe" -> json("""{"heard":" open one more session here ","sent":false}""")
+                "/v1/missions", "/v1/decisions" -> notFound
+                else -> null
+            }
+        }
+        answers = listOf({ stream(hello(quiet = false), state(muted = false)) })
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "an older tower") { s.missionsSupported.value == false }
+        val wav = dev.herdertower.phone.voice.Wav.encode(ByteArray(3200))
+        val r = s.take(wav, dev.herdertower.phone.voice.TalkTarget.Space("sandbox")).getOrThrow()
+        assertTrue(r.sent)
+        assertTrue(calls.any { it == """POST /v1/ask {"text":"In the space sandbox: open one more session here","space":"sandbox"}""" })
+        assertTrue(calls.none { it.startsWith("POST /v1/voice") })
+    }
+
+    @Test fun aSpacesConversationPagesBack() = runBlocking {
+        extra = { r ->
+            if (r.url.encodedPath != "/v1/chat" || r.url.queryParameter("space") != "sandbox") null
+            else if (r.url.queryParameter("before") == null) json("""{"messages":[{"id":"h40","role":"user","kind":"request","text":"And the tests?","space":"sandbox"},{"id":"h41","role":"tower","kind":"act","text":"Opened eyzflow 2.","space":"sandbox","act":{"id":"r9","line":"Opened eyzflow 2.","undo":{"possible":true}}}],"more":true}""")
+            else json("""{"messages":[{"id":"h12","role":"user","kind":"request","text":"What is left here?","space":"sandbox"}],"more":false}""")
+        }
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "live") { s.missionsSupported.value == true }
+        s.loadSpaceChat("sandbox")
+        assertEquals(listOf("h40", "h41"), s.spaceChats.value["sandbox"]?.map { it.id })
+        assertEquals("its act is known", true, s.acts.value["r9"]?.undo?.possible)
+        assertEquals(true, s.spaceChatMore.value["sandbox"])
+        assertEquals(1, s.loadOlderSpaceChat("sandbox"))
+        assertTrue(calls.any { it.startsWith("GET /v1/chat?before=h40") && "space=sandbox" in it })
+        assertEquals(listOf("h12", "h40", "h41"), s.spaceChats.value["sandbox"]?.map { it.id })
+        assertEquals(false, s.spaceChatMore.value["sandbox"])
     }
 
     @Test fun launchingASpaceAndChangingOne() = runBlocking {

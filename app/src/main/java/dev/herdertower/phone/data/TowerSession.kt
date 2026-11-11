@@ -1010,13 +1010,35 @@ class TowerSession(
     /** Each space's own conversation as far as loaded (requests, answers, receipts), kept up to date by the `chat` event. */
     val spaceChats: StateFlow<Map<String, List<ChatMessage>>> = _spaceChats.asStateFlow()
 
+    private val _spaceChatMore = MutableStateFlow<Map<String, Boolean>>(emptyMap())
+    /** Whether a space's conversation has older messages than those loaded. */
+    val spaceChatMore: StateFlow<Map<String, Boolean>> = _spaceChatMore.asStateFlow()
+
     suspend fun loadSpaceChat(space: String, limit: Int = 60) {
         if (_missionsSupported.value != true) return
         quietly { c ->
-            val page = c.chat(limit = limit, space = space).messages.filter { ChatApi.inSpace(it, space) }
-            page.mapNotNull { it.act }.forEach(::setAct)
-            _spaceChats.value = _spaceChats.value + (space to ChatApi.merge(_spaceChats.value[space].orEmpty(), page))
+            val page = c.chat(limit = limit, space = space)
+            val msgs = page.messages.filter { ChatApi.inSpace(it, space) }
+            msgs.mapNotNull { it.act }.forEach(::setAct)
+            val had = _spaceChats.value[space].orEmpty()
+            _spaceChats.value = _spaceChats.value + (space to ChatApi.merge(had, msgs))
+            if (had.isEmpty()) _spaceChatMore.value = _spaceChatMore.value + (space to (page.more ?: (page.messages.size >= limit)))
         }
+    }
+
+    /** Pages a space's conversation back: the messages before the oldest loaded. Returns how many came. */
+    suspend fun loadOlderSpaceChat(space: String, limit: Int = 50): Int {
+        val oldest = _spaceChats.value[space]?.firstOrNull()?.id?.takeIf { it.isNotBlank() } ?: return 0
+        var n = 0
+        quietly { c ->
+            val page = c.chat(before = oldest, limit = limit, space = space)
+            val msgs = page.messages.filter { ChatApi.inSpace(it, space) }
+            n = msgs.size
+            msgs.mapNotNull { it.act }.forEach(::setAct)
+            _spaceChats.value = _spaceChats.value + (space to ChatApi.merge(_spaceChats.value[space].orEmpty(), msgs))
+            _spaceChatMore.value = _spaceChatMore.value + (space to (page.more ?: (page.messages.size >= limit)))
+        }
+        return n
     }
 
     suspend fun setups(): Result<List<Setup>> = act { it.setups() }
@@ -1147,7 +1169,8 @@ class TowerSession(
      */
     suspend fun take(wav: ByteArray, target: TalkTarget): Result<VoiceResult> = when (target) {
         TalkTarget.Main -> act { it.voice(wav) }
-        is TalkTarget.Space -> act { c ->
+        // A Quiet Tower takes a space's take itself (POST /v1/voice?space=); one from before it: written down, then asked with the space.
+        is TalkTarget.Space -> if (_missionsSupported.value == true) act { it.voice(wav, target.name) } else act { c ->
             val heard = c.transcribe(wav).heard.trim()
             if (heard.isEmpty()) VoiceResult("", false) else {
                 c.ask(forSpace(heard, target.name), target.name)
@@ -1675,6 +1698,7 @@ class TowerSession(
         _tellVoice.value = null
         _spaceThreads.value = emptyMap()
         _spaceChats.value = emptyMap()
+        _spaceChatMore.value = emptyMap()
         images.clear() // another tower's pictures could share an id
         lastClip = null
         _route.value = null

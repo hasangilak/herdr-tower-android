@@ -105,6 +105,7 @@ fun ChatScreen(
     val mainThread by session.thread.collectAsStateWithLifecycle()
     val spaceChats by session.spaceChats.collectAsStateWithLifecycle()
     val acts by session.acts.collectAsStateWithLifecycle()
+    val spaceMore by session.spaceChatMore.collectAsStateWithLifecycle()
     LaunchedEffect(space) { if (space != null) session.loadSpaceChat(space) }
     // The main conversation leaves out what was asked of a space's own tower; a space's shows only that (its requests without "In <space>: ").
     val thread = remember(space, mainThread, spaceChats) {
@@ -179,14 +180,14 @@ fun ChatScreen(
         entries = entries,
         curated = useThread,
         pending = waiting,
-        canLoadMore = if (space != null) false else if (useThread) threadMore else history.isNotEmpty(),
+        canLoadMore = if (space != null) spaceMore[space] == true else if (useThread) threadMore else history.isNotEmpty(),
         title = if (space == null) "Conversation" else space,
         work = work,
         saying = saying,
         now = now,
         accounts = acc,
         onClose = onClose,
-        onLoadOlder = { scope.launch { if (useThread) session.loadOlderThread() else if (session.loadOlder() == 0) snack("That's everything.") } },
+        onLoadOlder = { scope.launch { if (space != null) session.loadOlderSpaceChat(space) else if (useThread) session.loadOlderThread() else if (session.loadOlder() == 0) snack("That's everything.") } },
         rowShots = { e -> shotsById[e.id].orEmpty().takeIf { it.isNotEmpty() }?.let { shots -> ShotStrip(session, shots) { onShot(it.id) } } },
         onOpen = onOpen,
         onBehavior = onBehavior,

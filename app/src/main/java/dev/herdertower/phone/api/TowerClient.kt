@@ -458,6 +458,10 @@ class TowerClient(
     /** `POST /v1/voice`: one recorded take as WAV; returns what the Mac heard. */
     suspend fun voice(wav: ByteArray): VoiceResult = post(VoiceResult.serializer(), wav.toRequestBody(WAV), "voice", client = slow)
 
+    /** `POST /v1/voice?space=`: a take for that space's own tower (a Quiet Tower). `404 no_space` before anything is transcribed. */
+    suspend fun voice(wav: ByteArray, space: String): VoiceResult =
+        call(slow, request(url("voice", query = mapOf("space" to space))).post(wav.toRequestBody(WAV)).build(), VoiceResult.serializer())
+
     /** `GET /v1/audio/{id}`: a reply clip's WAV bytes. */
     suspend fun audio(clip: AudioClip): ByteArray = bytes(clip.url, listOf("audio", clip.id), "audio/wav")
 

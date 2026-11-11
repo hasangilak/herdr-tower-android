@@ -290,7 +290,7 @@ data class ModeRequest(val mode: String)
 data class Mute(val muted: Boolean = false)
 
 @Serializable
-data class VoiceResult(val heard: String = "", val sent: Boolean = false)
+data class VoiceResult(val heard: String = "", val sent: Boolean = false, val space: String? = null)
 
 @Serializable
 data class ErrorDetail(
