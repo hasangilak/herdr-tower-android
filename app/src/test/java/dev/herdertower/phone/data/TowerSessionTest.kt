@@ -691,6 +691,28 @@ class TowerSessionTest {
         assertEquals(before, calls.count { it.startsWith("GET /v1/hello") })
     }
 
+    @Test fun aSwipedNotificationDismissesTheDecisionOnTheTower() = runBlocking {
+        extra = { r ->
+            when {
+                r.url.encodedPath == "/v1/decisions" && r.method == "GET" -> json("""{"count":2,"decisions":[${decision("d1")},${decision("d2")}]}""")
+                r.url.encodedPath == "/v1/decisions/d1" && r.method == "DELETE" -> json("""{"dismissed":"d1","state":"dismissed"}""")
+                // Answered on the Mac meanwhile: over already, which is what was wanted.
+                r.url.encodedPath == "/v1/decisions/d2" && r.method == "DELETE" -> json("""{"error":{"code":"no_decision","message":"no decision with that id"}}""", 404)
+                else -> null
+            }
+        }
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "the queue") { s.decisions.value.size == 2 }
+        s.discardFromNotice("d1").getOrThrow()
+        assertTrue(calls.any { it.startsWith("DELETE /v1/decisions/d1") })
+        assertEquals(listOf("d2"), s.decisions.value.map { it.id })
+        assertTrue(s.discardFromNotice("d2").isSuccess)
+        // A merge made here from PRs (an older tower) has nothing to dismiss there.
+        assertTrue(s.discardFromNotice("legacy-m:isa|o/app").isSuccess)
+        assertTrue(calls.none { it.contains("legacy-m") })
+    }
+
     @Test fun anAnswerThatCanBeARuleIsOfferedOnce() = runBlocking {
         extra = { r ->
             when (r.url.encodedPath) {

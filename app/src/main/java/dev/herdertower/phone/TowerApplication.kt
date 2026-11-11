@@ -77,7 +77,9 @@ class TowerApplication : Application() {
                 clip to (on && word && mic && phase == VoiceController.Phase.Idle && !dict)
             }.collect { (clip, enabled) -> hush.follow(clip, enabled) }
         }
-        // A decision notifies with the app closed too: a check every 15 minutes while paired, none otherwise.
+        // A decision's notification showing with the app away is checked every minute, so it goes once it's over on the Mac.
+        session.onNoticeShowing = { dev.herdertower.phone.data.DecisionCheck.watch(this) }
+                // A decision notifies with the app closed too: a check every 15 minutes while paired, none otherwise.
         kotlinx.coroutines.MainScope().launch {
             session.credentials.collect { dev.herdertower.phone.data.DecisionCheck.follow(this@TowerApplication, paired = it != null) }
         }

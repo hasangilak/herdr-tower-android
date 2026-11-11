@@ -87,6 +87,9 @@ class DecisionNotices internal constructor(
         out.active().forEach(out::cancel)
     }
 
+    /** The decisions whose notification shows now: while any does, the phone keeps checking whether they are over. */
+    fun showing(): Set<String> = out.active()
+
     /** Answered from its notification: it goes at once, before the queue says so. */
     fun answered(id: String) {
         out.cancel(id)
@@ -167,6 +170,14 @@ class DecisionNotices internal constructor(
                 b.addAction(NotificationCompat.Action.Builder(0, label, answer).setAuthenticationRequired(true).build())
             }
             b.addAction(0, "Open", open)
+            // Swiped away (or Clear all): the decision is dismissed on the tower too, so it doesn't wait there.
+            b.setDeleteIntent(
+                PendingIntent.getBroadcast(
+                    context, (d.id + "#discard").hashCode(),
+                    Intent(context, Receiver::class.java).setAction(ACTION_DISCARD).putExtra(EXTRA_ID, d.id),
+                    PendingIntent.FLAG_IMMUTABLE or PendingIntent.FLAG_UPDATE_CURRENT,
+                ),
+            )
             nm?.notify(TAG + d.id, NOTE_ID, b.build())
         }
 
@@ -184,6 +195,7 @@ class DecisionNotices internal constructor(
     /** An answer tapped on a notification: sent in the background, the notification gone when it went in. */
     class Receiver : BroadcastReceiver() {
         override fun onReceive(context: Context, intent: Intent) {
+            if (intent.action == ACTION_DISCARD) return discard(context, intent)
             if (intent.action != ACTION_ANSWER) return
             val id = intent.getStringExtra(EXTRA_ID) ?: return
             val index = intent.getIntExtra(EXTRA_CHOICE, -1)
@@ -201,6 +213,20 @@ class DecisionNotices internal constructor(
                 }
             }
         }
+
+        /** The notification was swiped away: dismiss the decision on the tower. Nothing is posted again if that fails. */
+        private fun discard(context: Context, intent: Intent) {
+            val id = intent.getStringExtra(EXTRA_ID) ?: return
+            val pending = goAsync()
+            val session = context.tower.session
+            session.scope.launch {
+                try {
+                    withTimeoutOrNull(9_000) { session.discardFromNotice(id) }
+                } finally {
+                    pending.finish()
+                }
+            }
+        }
     }
 
     companion object {
@@ -213,6 +239,7 @@ class DecisionNotices internal constructor(
         private const val TITLE_FITS = 30
         const val ACTION_OPEN = "dev.herdertower.phone.DECISION"
         const val ACTION_ANSWER = "dev.herdertower.phone.DECISION_ANSWER"
+        const val ACTION_DISCARD = "dev.herdertower.phone.DECISION_DISCARD"
         const val EXTRA_ID = "decision"
         const val EXTRA_CHOICE = "choice"
         const val EXTRA_LABEL = "label"

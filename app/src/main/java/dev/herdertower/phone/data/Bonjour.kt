@@ -15,6 +15,17 @@ import java.net.Inet4Address
 import java.util.concurrent.Executors
 import kotlin.coroutines.resume
 
+/** What a `_herdr-tower._tcp` advertisement's TXT must say for this phone to take it (docs/mobile-api.md, "Finding the Mac by Bonjour"). */
+object BonjourTxt {
+    /** `v=1` and `fp` equal to the pinned fingerprint (lowercased, `:` stripped). The name is never matched: it can be renamed on a clash. */
+    fun accepts(txt: Map<String, ByteArray?>, pinned: String): Boolean {
+        if (txt["v"]?.toString(Charsets.UTF_8)?.trim() != "1") return false
+        val fp = txt["fp"]?.toString(Charsets.UTF_8)?.let(Fingerprint::normalize) ?: return false
+        val want = Fingerprint.normalize(pinned) ?: return false
+        return Fingerprint.matches(fp, want)
+    }
+}
+
 /** A tower found on this network: its LAN address, and the Mac's name as it advertises it. */
 data class FoundTower(val host: TowerHost, val name: String?)
 
@@ -54,9 +65,8 @@ class NsdTowerFinder(private val context: Context) : TowerFinder {
             withTimeoutOrNull(timeoutMs) {
                 for (s in seen) {
                     val r = resolve(nsd, s) ?: continue
-                    val fp = r.attributes["fp"]?.toString(Charsets.UTF_8)?.let(Fingerprint::normalize) ?: continue
-                    // Another Mac's tower on this network: not ours.
-                    if (!Fingerprint.matches(fp, want)) continue
+                    // v=1 with this tower's fingerprint only: another Mac's tower on this network is not ours.
+                    if (!BonjourTxt.accepts(r.attributes, want)) continue
                     val ip = addresses(r).firstOrNull() ?: continue
                     found += FoundTower(
                         TowerHost(TowerHost.LAN, ip, r.port, seenRange = Hosts.rangeOf(ip)),

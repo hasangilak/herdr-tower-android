@@ -694,6 +694,8 @@ class TowerSession(
         queue = list
         showDecisions()
         decisionNotices.follow(held(queue), background = !_foreground.value)
+        // A notification shows with the app away: keep an eye on it, so it goes soon after the decision is over.
+        if (!_foreground.value && noticesShowing()) onNoticeShowing?.invoke()
         deriveMissions()
     }
 
@@ -842,6 +844,28 @@ class TowerSession(
         // Over already (answered elsewhere): nothing left to say on it.
         result.onSuccess { decisionNotices.answered(id) }.onFailure { if (it is DecisionOver) decisionNotices.answered(id) else noticeFailed(id, describe(it)) }
     }
+
+    /**
+     * A decision's notification was swiped away: it is dismissed on the tower
+     * too, so the Mac stops showing it. One made here from a question set
+     * dismisses that set; a merge made here from PRs has nothing to dismiss.
+     */
+    suspend fun discardFromNotice(id: String): Result<Unit> {
+        val d = queue.firstOrNull { it.id == id } ?: Decision(id = id)
+        if (d.legacy && DecisionsApi.legacyQuestionId(id) == null) return Result.success(Unit)
+        return dismissDecision(d)
+            .recoverCatching { e ->
+                // Over already on the tower: what was wanted.
+                if (e is TowerApiException && (e.status == 404 || e.status == 409)) Unit else throw e
+            }
+            .onFailure { Log.i(TAG, "not dismissed on the tower: ${it.javaClass.simpleName}") }
+    }
+
+    /** Called when a decision's notification shows with the app away: the phone then checks every minute whether it is over. */
+    var onNoticeShowing: (() -> Unit)? = null
+
+    /** Whether a decision's notification shows now. */
+    fun noticesShowing(): Boolean = runCatching { decisionNotices.showing().isNotEmpty() }.getOrDefault(false)
 
     fun noticeFailed(id: String, why: String) {
         decisionNotices.failed(_decisions.value.firstOrNull { it.id == id } ?: Decision(id = id, title = "A decision waits for you"), why)
