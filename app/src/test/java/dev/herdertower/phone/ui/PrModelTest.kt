@@ -58,6 +58,23 @@ class PrModelTest {
         assertNull(PrModel.mergeButton(open.copy(state = "closed")))
     }
 
+    @Test fun theReviewScoreAndTheTowersMerge() {
+        val needs = dev.herdertower.phone.api.PrScore(needsReview = true, line = "Needs review: a database migration (db/migrations/0042_tickets.sql)")
+        assertEquals("Needs review: a database migration (db/migrations/0042_tickets.sql)" to true, PrModel.score(needs))
+        assertEquals("Low risk: no migration" to false, PrModel.score(dev.herdertower.phone.api.PrScore(line = "Low risk: no migration")))
+        assertNull("no score, no line", PrModel.score(null))
+        assertTrue(PrModel.describe(open.copy(score = needs)).endsWith("Needs review: a database migration (db/migrations/0042_tickets.sql)"))
+        // Merged by the tower itself (auto-merge on).
+        val byTower = open.copy(state = "merged", base = "dev", mergedBy = "tower")
+        assertEquals("Merged by the tower", PrModel.mergedPill(byTower))
+        assertEquals("Merged into dev by the tower", PrModel.closedLine(byTower))
+        assertEquals("Merged", PrModel.mergedPill(byTower.copy(mergedBy = "mac")))
+        // The tower tried and couldn't: it says why, while the PR is open.
+        val failed = open.copy(auto = dev.herdertower.phone.api.PrAuto("failed", "GitHub refused: a required review is missing"))
+        assertEquals("The tower couldn't merge it: GitHub refused: a required review is missing", PrModel.autoFailed(failed))
+        assertNull(PrModel.autoFailed(open))
+    }
+
     @Test fun mergedAndClosedLines() {
         assertEquals("Merged into main from the Mac", PrModel.closedLine(open.copy(state = "merged", mergedBy = "mac")))
         assertEquals("Merged into main from a phone", PrModel.closedLine(open.copy(state = "merged", mergedBy = "phone:d_1")))

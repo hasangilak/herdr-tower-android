@@ -8,6 +8,27 @@ import org.junit.Test
 
 /** The PR shapes as herder-tower's docs/mobile-api.md ("PRs") writes them. */
 class PrsTest {
+    /** A PR with its review score and the tower's own merge, as the doc's "Review scores" writes them. */
+    @Test fun aScoreAndTheTowersOwnMerge() {
+        val p = TowerJson.decodeFromString(Pr.serializer(), """{"key":"eyzhub/eyz-mediaroom-serverless#1250","repo":"eyzhub/eyz-mediaroom-serverless","number":1250,
+            "state":"open","base":"main",
+            "score":{"needs_review":true,"line":"Needs review: a database migration (db/migrations/0042_tickets.sql)",
+                     "reasons":["a database migration (db/migrations/0042_tickets.sql)"],"flags":["migration"],"planned":"p3#1","sha":"0dcd66e"},
+            "auto":null}""")
+        assertTrue(p.score!!.needsReview)
+        assertEquals(listOf("migration"), p.score!!.flags)
+        assertEquals("p3#1", p.score!!.planned)
+        assertNull(p.auto)
+        val merged = TowerJson.decodeFromString(Pr.serializer(), """{"key":"o/app#41","state":"merged","merged_by":"tower",
+            "score":{"needs_review":false,"line":"Low risk: no migration, breaking change, secrets, infrastructure or auth"},
+            "auto":{"state":"merged","why":"low risk, into dev; its checks passed and its reviewer agreed","sha":"9f2c","at_ms":1794238500000}}""")
+        assertEquals("tower", merged.mergedBy)
+        assertEquals("merged", merged.auto?.state)
+        assertFalse(merged.score!!.needsReview)
+        // A PR found before scores has none.
+        assertNull(TowerJson.decodeFromString(Pr.serializer(), """{"key":"o/app#1"}""").score)
+    }
+
     /** The doc's example, as written. */
     private val docPr = """
         {

@@ -292,6 +292,10 @@ fun DecisionCard(
                 else -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (DecisionModel.answerable(d)) d.options.forEachIndexed { i, o ->
                         BigAnswer(o.label, primary = o.pick, why = o.why) { host.answer(d, i) }
+                        // A merge's row: its PR's review score under its button (amber: needs review; cyan: low risk).
+                        if (d.kind == "merge") PrModel.score(d.prs.getOrNull(i)?.score)?.let { (line, needs) ->
+                            ScoreLine(line, needs, Modifier.padding(start = 16.dp, end = 8.dp))
+                        }
                     }
                     when (DecisionModel.fallback(d)) {
                         DecisionModel.Fallback.Questions -> BigAnswer(if (d.why.endsWith("questions")) "Answer the ${d.why}" else "Answer", primary = true) { d.questionId?.let(onQuestion) }
@@ -316,10 +320,14 @@ private fun perPr(d: Decision): Boolean = d.kind == "merge" && d.options.size ==
 /** One of a merge's pull requests: its number, where it goes, its checks; Merge when each is merged by itself. */
 @Composable
 private fun PrRow(pr: DecisionPr, merge: (() -> Unit)?, onOpen: () -> Unit) {
-    Row(
+    Column(
         Modifier.fillMaxWidth().clip(RoundedCornerShape(12.dp)).background(tc.card)
             .clickable(role = Role.Button, onClickLabel = "Open #${pr.number} on GitHub", onClick = onOpen)
             .padding(start = 12.dp, end = if (merge != null) 6.dp else 12.dp, top = 8.dp, bottom = 8.dp),
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+    Row(
+        Modifier.fillMaxWidth(),
         verticalAlignment = Alignment.CenterVertically,
         horizontalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -339,6 +347,8 @@ private fun PrRow(pr: DecisionPr, merge: (() -> Unit)?, onOpen: () -> Unit) {
             )
         }
         if (merge != null) PillButton("Merge", onClick = merge)
+    }
+    PrModel.score(pr.score)?.let { (line, needs) -> ScoreLine(line, needs) }
     }
 }
 

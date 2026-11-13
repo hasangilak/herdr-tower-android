@@ -35,12 +35,16 @@ data class Pr(
     @SerialName("found_ms") val foundMs: Long = 0,
     @SerialName("checked_ms") val checkedMs: Long = 0,
     @SerialName("closed_ms") val closedMs: Long? = null,
-    /** `mac`, `phone:<device>` or `github`, once merged. */
+    /** `mac`, `phone:<device>`, `tower` (its own merge of a low-risk PR) or `github`, once merged. */
     @SerialName("merged_by") val mergedBy: String? = null,
     /** The last time the Mac couldn't ask GitHub about it. */
     val error: String? = null,
     /** Whether the Merge button works now, and what it warns about. */
     val merge: PrGate = PrGate(),
+    /** Whether it needs a human code review (a tower with `scores`); null on a PR found before scores. */
+    val score: PrScore? = null,
+    /** The tower's own merge of it (auto-merge on): merged, or failed and why. */
+    val auto: PrAuto? = null,
 ) {
     val open: Boolean get() = state == "open"
 
@@ -50,6 +54,33 @@ data class Pr(
     /** Its key as the tower writes it, also when only the parts came. */
     val id: String get() = key.ifBlank { if (repo.isNotBlank() && number > 0) "$repo#$number" else "" }
 }
+
+/**
+ * A PR's review score (docs/mobile-api.md, "Review scores"): it **needs
+ * review** for a migration, a breaking change or anything on the escalate
+ * list, else it is low risk. [line] is what the chip says.
+ */
+@Serializable
+data class PrScore(
+    @SerialName("needs_review") val needsReview: Boolean = false,
+    val line: String = "",
+    val reasons: List<String> = emptyList(),
+    /** `migration`, `breaking`, `secrets`, `infrastructure`, `auth`, `deploy`, `data`, `money`, `dependencies`, `security`, `escalate`. */
+    val flags: List<String> = emptyList(),
+    /** The plan's prediction it carries (`p3#1`), when a plan predicted it. */
+    val planned: String? = null,
+    /** The head commit whose files were read. */
+    val sha: String? = null,
+)
+
+/** The tower's own merge of a PR: `merged` or `failed`, and why. */
+@Serializable
+data class PrAuto(
+    val state: String = "",
+    val why: String? = null,
+    val sha: String? = null,
+    @SerialName("at_ms") val atMs: Long? = null,
+)
 
 @Serializable
 data class PrChecks(

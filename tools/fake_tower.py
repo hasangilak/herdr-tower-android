@@ -175,6 +175,8 @@ def pr_gate(p):
         warnings.append("No checks ran on it.")
     if p["mergeable"] == "unknown" and p["state"] == "open":
         warnings.append("GitHub hasn't worked out yet whether it merges cleanly.")
+    if (p.get("score") or {}).get("needs_review"):
+        warnings.append(p["score"]["line"])
     return {"can": blocked is None, "blocked": blocked, "needs_override": needs, "warnings": warnings}
 
 
@@ -929,8 +931,19 @@ def quiet_world():
     for pr in [
         _pr("example/mediaroom", 1273, "feat: voice clips for the Ingest tour", "dev", "ingest-clips", [("CI / build", True), ("CI / test", True)], "s5", "mediaroom", "isa", 33, waiting=True),
         _pr("example/mediaroom", 1277, "release: the Ingest tour with its voice clips", "main", "dev", [("CI / build", True), ("CI / test", True), ("e2e", True)], "s5", "mediaroom", "isa", 31, waiting=True),
+        _pr("example/landing", 42, "feat: the microscope drawing, variant B", "dev", "drawing-microscope-b", [("CI / build", True), ("CI / test", True)],
+            "s6", "landing", "industrial-landing-page", 40, state="merged", merged_by="tower"),
     ]:
         PRS[f"{pr['repo']}#{pr['number']}"] = pr
+    # Review scores (feature scores): the release into main needs review, the rest are low risk; the tower merged #42 itself.
+    low = {"needs_review": False, "line": "Low risk: no migration, breaking change, secrets, infrastructure or auth", "reasons": [], "flags": []}
+    PRS["example/mediaroom#1273"].update(score=dict(low, planned="p3#1", sha=PRS["example/mediaroom#1273"]["head_sha"]))
+    PRS["example/mediaroom#1277"].update(score={"needs_review": True, "line": "Needs review: a deploy or release (release: dev into main)",
+                                                 "reasons": ["a deploy or release (release: dev into main)"], "flags": ["deploy"], "planned": "p3#2",
+                                                 "sha": PRS["example/mediaroom#1277"]["head_sha"]})
+    PRS["example/landing#42"].update(score=dict(low, planned="p4#1", sha=PRS["example/landing#42"]["head_sha"]),
+                                     auto={"state": "merged", "why": "low risk, into dev; its checks passed and its reviewer agreed", "sha": PRS["example/landing#42"]["head_sha"], "at_ms": T0 - 35 * MIN})
+    STATE["auto_merge"] = True
     H_ = lambda mins, kind, **kw: dict({"at": T0 - mins * MIN, "kind": kind}, **kw)
     HISTORY[:] = sorted([
         H_(10 * 60 + 40, "answered", session="s5", name="mediaroom", space="isa", text="answered for you: Where to start? -> Start with the small fix to the analysis description."),
@@ -947,6 +960,10 @@ def quiet_world():
         H_(6, "peer", session="s1", name="eyzflow", space="sandbox", text="Answer on the read-only key question.", **{"from": "s2", "from_name": "mediaroom", "to_name": "eyzflow"}),
         H_(3, "note", name="tower", space="sandbox", text="The plan for the storefront live editor is finished and checked."),
     ], key=lambda e: e["at"])
+    # The PRs' chips in the conversation.
+    for k, pr in PRS.items():
+        HISTORY.append({"at": pr["found_ms"], "kind": "pr", "id": k, "session": pr["session"], "name": pr["name"], "space": pr["space"], "text": pr["title"]})
+    HISTORY.sort(key=lambda e: e["at"])
     Q_WHO[:] = [("s5", "mediaroom"), ("s6", "landing")]
     d_sync()
 
@@ -985,7 +1002,8 @@ def d_pr(p, d):
     failing = (view.get("checks") or {}).get("failing") or []
     note = {"pass": "checks passing", "pending": "checks running", "none": "no checks ran"}.get(checks) or f"{len(failing)} check{'s' if len(failing) != 1 else ''} failing: {', '.join(failing)}"
     return {"key": k, "repo": p["repo"], "number": p["number"], "base": p["base"], "title": view.get("title", ""), "url": view.get("url", f"https://github.com/{p['repo']}/pull/{p['number']}"),
-            "checks": checks, "note": note, "session": view.get("session"), "merge": view.get("merge") or {"can": True, "blocked": None, "needs_override": None, "warnings": []}}
+            "checks": checks, "note": note, "session": view.get("session"), "merge": view.get("merge") or {"can": True, "blocked": None, "needs_override": None, "warnings": []},
+            **({"score": view["score"]} if view.get("score") else {})}
 
 
 def d_view(d):
@@ -1567,7 +1585,7 @@ class H(BaseHTTPRequestHandler):
             nv = network_view() if QUIET[0] else {}
             nv.pop("tailscale", None)
             return self.send(200, {"token": tok, "device": {"id": dev["id"], "name": dev["name"]}, "fingerprint": FP, "api": 1, "repaired": bool(old),
-                                   **({"features": ["quiet", "acts", "pairing"], **nv} if QUIET[0] else {})})
+                                   **({"features": ["quiet", "acts", "pairing", "scores"], **nv} if QUIET[0] else {})})
         dev = self.device()
         if dev is None:
             return self.err(401, "unauthorized", "unknown token")
@@ -1587,7 +1605,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, network_view())
             if seg == ["hello"]:
                 return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS), "audio_route": ROUTE.get(dev["id"], "phone"),
-                                       **({"features": ["quiet", "acts", "pairing"]} if QUIET[0] else {})})
+                                       **({"features": ["quiet", "acts", "pairing", "scores"]} if QUIET[0] else {})})
             if seg == ["device", "audio"]:
                 return self.send(200, {"route": ROUTE.get(dev["id"], "phone")})
             if seg == ["audio"]:
@@ -1745,7 +1763,7 @@ class H(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts", "pairing"], **network_view()} if QUIET[0] else {})})
+            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts", "pairing", "scores"], **network_view()} if QUIET[0] else {})})
             out("state", STATE)
             if QUIET[0]:
                 # Right after the first state: the whole open list (a muted space's marked), then the missions.

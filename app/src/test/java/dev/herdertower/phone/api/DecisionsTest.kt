@@ -46,6 +46,9 @@ class DecisionsTest {
         assertEquals("o/app#12", pr.key)
         assertEquals("1 check failing: lint", pr.note)
         assertEquals("1 check failing: lint.", pr.merge?.needsOverride)
+        // With scores, each of a merge's PRs says whether it needs review.
+        val scored = TowerJson.decodeFromString(DecisionPr.serializer(), """{"key":"o/app#12","repo":"o/app","number":12,"base":"dev","score":{"needs_review":false,"line":"Low risk: no migration"}}""")
+        assertEquals("Low risk: no migration", scored.score?.line)
         assertTrue(DecisionsApi.failing(Decision(kind = "merge", prs = listOf(pr.copy(checks = "pass")))))
     }
 

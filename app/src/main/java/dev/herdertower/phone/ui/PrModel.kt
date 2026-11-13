@@ -69,12 +69,23 @@ object PrModel {
             pr.mergedBy == null -> ""
             pr.mergedBy == "mac" -> " from the Mac"
             pr.mergedBy == "github" -> " on GitHub"
+            pr.mergedBy == "tower" -> " by the tower"
             pr.mergedBy.startsWith("phone:") -> " from a phone"
             else -> ""
         }
         "closed" -> "Closed without merging"
         else -> null
     }
+
+    /** The merged chip's pill: "Merged by the tower" when the tower merged it itself (auto-merge), else "Merged". */
+    fun mergedPill(pr: Pr): String = if (pr.mergedBy == "tower") "Merged by the tower" else "Merged"
+
+    /** The review score's line and whether it needs review (amber) or is low risk (cyan); null without a score. */
+    fun score(s: dev.herdertower.phone.api.PrScore?): Pair<String, Boolean>? =
+        s?.line?.takeIf { it.isNotBlank() }?.let { it to s.needsReview }
+
+    /** The tower tried to merge it itself and couldn't: why. */
+    fun autoFailed(pr: Pr): String? = pr.auto?.takeIf { it.state == "failed" && pr.open }?.let { "The tower couldn't merge it" + (it.why?.let { w -> ": $w" } ?: "") }
 
     /** Whether the Merge button shows (an open PR), and if it works: null, or why not. */
     fun mergeButton(pr: Pr): MergeButton? = when {
@@ -101,6 +112,7 @@ object PrModel {
             add(checks(pr).first)
             mergeable(pr)?.let { add(it.first) }
         }
+        score(pr.score)?.let { add(it.first) }
     }.joinToString(", ")
 
     /** The warnings the sheet shows: the tower's, and the production one first even if an older tower didn't send it. */

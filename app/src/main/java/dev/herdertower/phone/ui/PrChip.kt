@@ -141,7 +141,7 @@ fun PrChip(pr: Pr, onMerge: () -> Unit, modifier: Modifier = Modifier, highlight
                 when (phase) {
                     PrModel.Phase.Waiting -> Pill("Waiting for you", tc.blocked)
                     PrModel.Phase.Draft -> Pill("Draft", tc.faint)
-                    PrModel.Phase.Merged -> Pill("Merged", tc.done)
+                    PrModel.Phase.Merged -> Pill(PrModel.mergedPill(pr), tc.done)
                     PrModel.Phase.Closed -> Pill("Closed", tc.faint)
                     else -> if (at > 0) Text(clock(at), style = MaterialTheme.typography.labelSmall, color = tc.faint)
                 }
@@ -164,6 +164,9 @@ fun PrChip(pr: Pr, onMerge: () -> Unit, modifier: Modifier = Modifier, highlight
                     PrModel.mergeable(pr)?.let { (m, mt) -> StatusBit(m, mt) }
                 }
             }
+            // Whether a person should read it before it merges: amber when it needs review, cyan when low risk.
+            PrModel.score(pr.score)?.let { (line, needs) -> ScoreLine(line, needs) }
+            PrModel.autoFailed(pr)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis) }
             pr.error?.takeIf { pr.open }?.let {
                 Text("The Mac couldn't ask GitHub lately: $it", style = MaterialTheme.typography.labelSmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
@@ -176,6 +179,15 @@ fun PrChip(pr: Pr, onMerge: () -> Unit, modifier: Modifier = Modifier, highlight
             }
         }
     }
+}
+
+/** A PR's review score in a line: amber when it needs review, cyan when low risk (the chip and the merge card's rows). */
+@Composable
+fun ScoreLine(line: String, needsReview: Boolean, modifier: Modifier = Modifier) {
+    Text(
+        line, modifier, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Medium,
+        color = if (needsReview) tc.decisionInk else tc.live, maxLines = 3, overflow = TextOverflow.Ellipsis,
+    )
 }
 
 @Composable
