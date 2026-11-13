@@ -62,6 +62,10 @@ fun MissionsScreen(session: TowerSession, onSpace: (String) -> Unit, onNew: () -
     val state by session.state.collectAsStateWithLifecycle()
     val scores by session.scoresSupported.collectAsStateWithLifecycle()
     val plan = remember(state?.plan) { dev.herdertower.phone.api.PlansApi.parse(state?.plan)?.takeIf { it.status != "closed" } }
+    // Each space's release track (a tower with releases): its summary under the space's name, "prod 14:20 · 1 on dev".
+    val releasesOn by session.releasesSupported.collectAsStateWithLifecycle()
+    val tracks = remember(state?.releases, releasesOn) { if (releasesOn) dev.herdertower.phone.api.ReleasesApi.parse(state?.releases) else emptyMap() }
+    fun summary(space: String) = dev.herdertower.phone.api.ReleasesApi.of(tracks, space)?.summary?.takeIf { it.isNotBlank() }
     val scope = rememberCoroutineScope()
     var refreshing by remember { mutableStateOf(false) }
     var quietOpen by rememberSaveable { mutableStateOf(false) }
@@ -79,7 +83,7 @@ fun MissionsScreen(session: TowerSession, onSpace: (String) -> Unit, onNew: () -
                 items(list, key = { "s:" + it.name }) { m ->
                     SignRow(
                         sign = { MoodGlyph(MissionsApi.mood(m), m.needs, m.mute) },
-                        name = m.name, right = MissionsApi.progress(m), sub = MissionsApi.line(m),
+                        name = m.name, right = MissionsApi.progress(m), sub = MissionsApi.line(m), note = summary(m.name),
                         onClick = { onSpace(m.name) },
                     )
                 }
@@ -99,7 +103,7 @@ fun MissionsScreen(session: TowerSession, onSpace: (String) -> Unit, onNew: () -
                         }
                     }
                     if (quietOpen) items(missions.quiet, key = { "q:$it" }) { name ->
-                        SignRow(sign = { MoodGlyph(Mood.Quiet) }, name = name, right = "quiet", sub = "", onClick = { onSpace(name) })
+                        SignRow(sign = { MoodGlyph(Mood.Quiet) }, name = name, right = "quiet", sub = "", note = summary(name), onClick = { onSpace(name) })
                     }
                 }
                 if (missions.closedToday.isNotEmpty()) item(key = "closed") {

@@ -227,6 +227,94 @@ def impact_line(i):
     return f"Nothing outside depends on what it changes ({what}; searched {k} repo{'' if k == 1 else 's'}{clean})"
 
 
+MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+
+
+def when_local(ms):
+    """releases::when: "14:20" today, "Nov 12 14:20" another day, in this Mac's local time."""
+    t, n = time.localtime(ms / 1000), time.localtime(now() / 1000)
+    hm = f"{t.tm_hour:02d}:{t.tm_min:02d}"
+    return hm if (t.tm_year, t.tm_yday) == (n.tm_year, n.tm_yday) else f"{MONTHS[t.tm_mon - 1]} {t.tm_mday} {hm}"
+
+
+def repo_track_view(r):
+    """A repo's track as the tower's Track::view writes it: on_prod, on_dev_not_prod, lines, each change's stage_line."""
+    nums = lambda l: ", ".join(f"#{n}" for n in l)
+    on_prod = []
+    for c in r["changes"]:
+        if c["stage"] == "released":
+            at = c.get("released_ms") or 0
+            g = next((x for x in on_prod if x["since_ms"] == at), None)
+            if g:
+                g["prs"].append(c["number"])
+            else:
+                on_prod.append({"since_ms": at, "prs": [c["number"]]})
+    on_prod.sort(key=lambda x: -x["since_ms"])
+    dev = [c["number"] for c in r["changes"] if c["stage"] in ("merged", "deployed")]
+    lines = [f"On {r['prod']} since {when_local(g['since_ms'])}: {nums(g['prs'])}" for g in on_prod]
+    if dev:
+        lines.append(f"On {r['dev']}, not on {r['prod']}: {nums(dev)}")
+    for rel in r["releases"]:
+        if rel["state"] == "open":
+            lines.append(f"Release under way: #{rel['number']} {rel['head']} → {rel['base']}" + (f", carries {nums(rel['carried'])}" if rel["carried"] else ""))
+    opened = [c["number"] for c in r["changes"] if c["stage"] == "open"]
+    if opened:
+        lines.append(f"Open: {nums(opened)}")
+    lines += [f"#{c['number']} went to {c['base']} without {r['dev']} first, against the dev-then-prod rule" for c in r["changes"] if c.get("skipped_dev")]
+
+    def stage_line(c):
+        since = lambda k: f" since {when_local(c[k])}" if c.get(k) else ""
+        return {"open": f"open, into {c['base']}", "merged": f"merged into {r['dev']}{since('merged_ms')}, not deployed yet",
+                "deployed": f"on {r['dev']} (deployed{since('deployed_ms')})",
+                "released": f"on {r['prod']}{since('released_ms')}, straight from its branch" if c.get("skipped_dev")
+                else f"on {r['prod']}{since('released_ms')}" + (f" (release #{c['release']})" if c.get("release") else "")}.get(c["stage"], "closed without merging")
+    return dict(r, lines=lines, on_prod=on_prod, on_dev_not_prod=dev, changes=[dict(c, stage_line=stage_line(c)) for c in r["changes"]])
+
+
+def track_view(space, repos):
+    """Track::view: the repos and the summary, "prod 14:20 · 1 on dev"."""
+    rv = [repo_track_view(r) for r in repos]
+    last = max((g["since_ms"] for r in rv for g in r["on_prod"]), default=None)
+    on_dev = sum(len(r["on_dev_not_prod"]) for r in rv)
+    opened = sum(1 for r in rv for c in r["changes"] if c["stage"] == "open")
+    parts = ([f"prod {when_local(last)}"] if last else []) + ([f"{on_dev} on dev"] if on_dev else [])
+    if opened and not parts:
+        parts.append(f"{opened} PR{'' if opened == 1 else 's'} open")
+    return {"space": space, "summary": " · ".join(parts), "checked_ms": now() - 2 * MIN, "repos": rv}
+
+
+def fake_releases(stage):
+    """The release tracks (feature releases), as FAKE_RELEASES says: first (one release carried #829, #830 on dev) or second (the default)."""
+    def ch(repo, n, title, base, stage_, merged=None, deployed=None, released=None, release=None, skipped=False):
+        m = lambda mins: T0 - mins * MIN if mins is not None else None
+        return {"number": n, "title": title, "url": f"https://github.com/{repo}/pull/{n}", "base": base, "stage": stage_,
+                "merged_ms": m(merged), "deployed_ms": m(deployed), "released_ms": m(released), "release": release, "skipped_dev": skipped}
+
+    def rel(repo, n, state, carried, merged=None):
+        return {"number": n, "title": f"Release: dev into main #{n}", "url": f"https://github.com/{repo}/pull/{n}", "head": "dev", "base": "main",
+                "state": state, "merged_ms": T0 - merged * MIN if merged is not None else None, "carried": carried}
+    mr = "example/mediaroom"
+    if stage == "first":
+        changes = [ch(mr, 829, "feat: the tour's voice clips", "dev", "released", merged=130, deployed=125, released=90, release=840),
+                   ch(mr, 830, "fix: clip volume on Android", "dev", "deployed", merged=70, deployed=65)]
+        releases = [rel(mr, 840, "merged", [829], merged=90)]
+    else:
+        changes = [ch(mr, 830, "fix: clip volume on Android", "dev", "released", merged=70, deployed=65, released=25, release=841),
+                   ch(mr, 850, "hotfix: the clips' CDN URL", "main", "released", merged=40, released=40, skipped=True),
+                   ch(mr, 829, "feat: the tour's voice clips", "dev", "released", merged=130, deployed=125, released=90, release=840),
+                   ch(mr, 832, "feat: a skip button on each step", "dev", "deployed", merged=15, deployed=11),
+                   ch(mr, 831, "chore: clip file names", "dev", "merged", merged=4),
+                   ch(mr, 833, "feat: the tour's progress bar", "dev", "open")]
+        releases = [rel(mr, 842, "open", [832]), rel(mr, 841, "merged", [830], merged=25), rel(mr, 840, "merged", [829], merged=90)]
+    isa = track_view("isa", [{"repo": mr, "dev": "dev", "prod": "main", "changes": changes, "releases": releases,
+                              "deployed": {"sha": "3f2c1aa", "at_ms": T0 - 11 * MIN, "environment": "dev"}}])
+    ef = "example/eyzflow"
+    anna = track_view("Anna", [{"repo": ef, "dev": "dev", "prod": "main",
+                                "changes": [ch(ef, 1201, "feat: support pictures on cases", "dev", "released", merged=9 * 60, deployed=8 * 60 + 50, released=8 * 60 + 5, release=1210)],
+                                "releases": [rel(ef, 1210, "merged", [1201], merged=8 * 60 + 5)]}])
+    return {"isa": isa, "Anna": anna}
+
+
 def check(i, what, how, evidence, status="planned", proof=None, by=None, mins=None):
     c = {"id": f"c{i}", "what": what, "how": how, "evidence": evidence, "status": status}
     if proof:
@@ -1080,6 +1168,8 @@ def quiet_world():
                    check(2, "On dev, the section shows variant B", "open the landing page on dev", "a screenshot", "passed",
                          "/tower/attachments/screenshots/landing-dev-b.png", by="s6", mins=42)],
         "edge_cases": [{"case": "A narrow phone: the drawing doesn't overflow", "checks": ["c1"]}]}
+    # Release tracks (feature releases): where each space's changes stand, as FAKE_RELEASES says.
+    STATE["releases"] = fake_releases(os.environ.get("FAKE_RELEASES", "second"))
     # Breaking changes (feature impact): who outside depends on what each PR changes.
     searched = ["mediaroom", "mediaroom-web", "ingest-app", "eyzflow", "landing", "landing-admin"]
     dep = lambda repo, file, line, uses, within, text: {"repo": repo, "file": file, "line": line, "uses": uses, "within": within, "text": text}
@@ -1753,7 +1843,7 @@ class H(BaseHTTPRequestHandler):
             nv = network_view() if QUIET[0] else {}
             nv.pop("tailscale", None)
             return self.send(200, {"token": tok, "device": {"id": dev["id"], "name": dev["name"]}, "fingerprint": FP, "api": 1, "repaired": bool(old),
-                                   **({"features": ["quiet", "acts", "pairing", "scores", "validation", "impact"], **nv} if QUIET[0] else {})})
+                                   **({"features": ["quiet", "acts", "pairing", "scores", "validation", "impact", "releases"], **nv} if QUIET[0] else {})})
         dev = self.device()
         if dev is None:
             return self.err(401, "unauthorized", "unknown token")
@@ -1773,7 +1863,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, network_view())
             if seg == ["hello"]:
                 return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS), "audio_route": ROUTE.get(dev["id"], "phone"),
-                                       **({"features": ["quiet", "acts", "pairing", "scores", "validation", "impact"]} if QUIET[0] else {})})
+                                       **({"features": ["quiet", "acts", "pairing", "scores", "validation", "impact", "releases"]} if QUIET[0] else {})})
             if seg == ["device", "audio"]:
                 return self.send(200, {"route": ROUTE.get(dev["id"], "phone")})
             if seg == ["audio"]:
@@ -1931,7 +2021,7 @@ class H(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts", "pairing", "scores", "validation", "impact"], **network_view()} if QUIET[0] else {})})
+            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts", "pairing", "scores", "validation", "impact", "releases"], **network_view()} if QUIET[0] else {})})
             out("state", STATE)
             if QUIET[0]:
                 # Right after the first state: the whole open list (a muted space's marked), then the missions.

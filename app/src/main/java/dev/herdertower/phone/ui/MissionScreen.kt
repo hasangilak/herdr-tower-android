@@ -155,9 +155,21 @@ fun MissionScreen(
     }
     val now = rememberNow(decisions.isNotEmpty())
     val focused = spaces.focus == name
+    // Where its changes stand, repo by repo (a tower with releases): from the state, current with every state event.
+    val state by session.state.collectAsStateWithLifecycle()
+    val releasesOn by session.releasesSupported.collectAsStateWithLifecycle()
+    val track = remember(state?.releases, releasesOn, name) {
+        if (releasesOn) dev.herdertower.phone.api.ReleasesApi.of(dev.herdertower.phone.api.ReleasesApi.parse(state?.releases), name) else null
+    }
 
     Column(Modifier.fillMaxSize()) {
-        TopBar(name, MissionsApi.sessionsLine(m) + (if (m.ownTower) " · its own tower" else "") + if (m.state == "closed") " · closed" else "", onBack = onBack)
+        TopBar(
+            name,
+            // Its release summary first ("prod 14:20 · 1 on dev"): the line is cut at its end, and this is what it says under the name on the Mac.
+            (track?.summary?.takeIf { it.isNotBlank() }?.let { "$it · " } ?: "") +
+                MissionsApi.sessionsLine(m) + (if (m.ownTower) " · its own tower" else "") + (if (m.state == "closed") " · closed" else ""),
+            onBack = onBack,
+        )
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 14.dp, end = 14.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             // The goal, and what counts as done.
             Row(verticalAlignment = Alignment.Top) {
@@ -209,6 +221,9 @@ fun MissionScreen(
                 if (d.open) DecisionCard(d, now, host, onQuestion, onSession, showSpace = false, tag = if (i == 0 && decisions.count { it.open } > 1) "Next" else null)
                 else DecisionDone(d)
             }
+
+            // On prod, on dev, open; and its releases: as the Mac's space panel shows them.
+            track?.takeIf { it.repos.isNotEmpty() }?.let { ReleaseTrackCard(it, now) }
 
             if (m.requests.isNotEmpty()) {
                 SectionLabel("Requests")

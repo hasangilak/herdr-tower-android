@@ -143,6 +143,8 @@ data class TowerState(
     val plan: JsonElement? = null,
     /** Whether the tower merges low-risk PRs into dev itself (`tower automerge`, feature `scores`). Null from a tower before it. */
     @SerialName("auto_merge") val autoMerge: Boolean? = null,
+    /** Each space's release track, by space (a tower with `releases`): read with [ReleasesApi.parse]. */
+    val releases: JsonElement? = null,
 )
 
 /** The brain's current step, as the panel's working line shows it ("Delegating to orb-rust · 12s"). */
@@ -348,6 +350,9 @@ data class StreamHello(
 
     /** Breaking changes: who outside depends on what a PR changes, and its warning. */
     val impact: Boolean get() = features.orEmpty().contains("impact")
+
+    /** Release tracks: where each space's changes stand, on dev and on prod. */
+    val releases: Boolean get() = features.orEmpty().contains("releases")
 }
 
 /** A screenshot a session sent to the tower (`GET /v1/screenshots`). */

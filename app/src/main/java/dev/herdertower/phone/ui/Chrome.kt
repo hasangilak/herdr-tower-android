@@ -279,7 +279,7 @@ fun MoodGlyph(mood: Mood, needs: Int = 0, muted: Boolean = false, modifier: Modi
 
 /** A row's two lines beside its sign: a name with a word at the right, and a line under them. */
 @Composable
-fun SignRow(sign: @Composable () -> Unit, name: String, right: String, sub: String, modifier: Modifier = Modifier, mono: String? = null, onClick: (() -> Unit)? = null) {
+fun SignRow(sign: @Composable () -> Unit, name: String, right: String, sub: String, modifier: Modifier = Modifier, mono: String? = null, note: String? = null, onClick: (() -> Unit)? = null) {
     Row(
         modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp))
             .then(if (onClick != null) Modifier.clickable(role = Role.Button, onClick = onClick) else Modifier)
@@ -294,6 +294,7 @@ fun SignRow(sign: @Composable () -> Unit, name: String, right: String, sub: Stri
             }
             if (sub.isNotBlank()) Text(sub, style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
             if (!mono.isNullOrBlank()) Text(mono, style = MaterialTheme.typography.labelSmall.copy(fontFamily = androidx.compose.ui.text.font.FontFamily.Monospace), color = tc.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            if (!note.isNullOrBlank()) Text(note, style = MaterialTheme.typography.labelMedium, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
         }
     }
 }
