@@ -62,8 +62,8 @@ val LocalSnack = staticCompositionLocalOf<(String) -> Unit> { {} }
 
 /**
  * Where the user is. Four places are the tabs (the queue, the spaces, the
- * record, the shots); a space, a session and a new space open from Spaces;
- * the rest opens over whatever is in front.
+ * record, the shots); a space, a session, a new space and the plan open from Spaces;
+ * the plan opens from Spaces too; the rest opens over whatever is in front.
  */
 sealed interface Route {
     data object Queue : Route
@@ -75,6 +75,8 @@ sealed interface Route {
     data class Space(val name: String) : Route
     data class Session(val address: String) : Route
     data object NewSpace : Route
+    /** The plan that is open: its status, link and predicted PRs. */
+    data object Plan : Route
     data object Settings : Route
     /** The whole conversation with the main tower, or with [space]'s own. */
     data class Chat(val space: String? = null) : Route
@@ -89,7 +91,7 @@ sealed interface Route {
     val tab: Tab?
         get() = when (this) {
             Queue -> Tab.Queue
-            Spaces, is Space, is Session, NewSpace -> Tab.Spaces
+            Spaces, is Space, is Session, NewSpace, Plan -> Tab.Spaces
             Record -> Tab.Record
             is Shots -> Tab.Shots
             Settings, is Chat, is Question, Behaviors, is Behavior -> null
@@ -118,6 +120,7 @@ sealed interface Route {
             is Space -> "space:${r.name}"
             is Session -> "session:${r.address}"
             NewSpace -> "new"
+            Plan -> "plan"
             Settings -> "settings"
             is Chat -> if (r.space == null) "chat" else "chat:${r.space}"
             is Question -> "question:${r.id}"
@@ -129,6 +132,7 @@ sealed interface Route {
             s == "spaces" -> Spaces
             s == "record" -> Record
             s == "new" -> NewSpace
+            s == "plan" -> Plan
             s == "settings" -> Settings
             s == "chat" -> Chat()
             s.startsWith("chat:") -> Chat(s.removePrefix("chat:"))
@@ -316,7 +320,8 @@ fun Shell(
                                 session, onQuestion = { go(Route.Question(it)) }, onSession = { go(Route.Session(it)) }, onChat = { go(Route.Chat()) }, onRepair = onRepair,
                                 open = focusDecision, onOpened = { focusDecision = null },
                             )
-                            Route.Spaces -> MissionsScreen(session, onSpace = { go(Route.Space(it)) }, onNew = { go(Route.NewSpace) })
+                            Route.Spaces -> MissionsScreen(session, onSpace = { go(Route.Space(it)) }, onNew = { go(Route.NewSpace) }, onPlan = { go(Route.Plan) })
+                            Route.Plan -> PlanScreen(session, onBack = { back() })
                             is Route.Space -> MissionScreen(
                                 session, route.name, onBack = { back() }, onSession = { go(Route.Session(it)) }, onQuestion = { go(Route.Question(it)) },
                                 onShot = { go(Route.Shots(open = it)) }, onChat = { go(Route.Chat(route.name)) },

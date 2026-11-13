@@ -13,7 +13,7 @@ class RouteTest {
     @Test fun routesSurviveSaveAndRestore() {
         val routes = listOf(
             Route.Queue, Route.Spaces, Route.Record, Route.Shots(), Route.Shots("t22", "1794160000000-login.png"), Route.Space("industrial-landing-page"),
-            Route.Session("vps/t3"), Route.NewSpace, Route.Settings, Route.Chat(), Route.Chat("B2C support"), Route.Question("q3f1"), Route.Behaviors, Route.Behavior("be-brief"), Route.Behavior(null),
+            Route.Session("vps/t3"), Route.NewSpace, Route.Plan, Route.Settings, Route.Chat(), Route.Chat("B2C support"), Route.Question("q3f1"), Route.Behaviors, Route.Behavior("be-brief"), Route.Behavior(null),
         )
         routes.forEach { assertEquals(it, Route.decode(Route.encode(it))) }
         // A colon in a session's address, a file's name or a space's doesn't split it.

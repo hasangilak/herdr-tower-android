@@ -139,6 +139,10 @@ data class TowerState(
     @SerialName("tell_voice") val tellVoice: String? = null,
     /** The brains' model, as `GET /v1/model` reports it. */
     @SerialName("brain_model") val brainModel: BrainModel? = null,
+    /** The plan that is open, or null: read with [PlansApi.parse], so a plan the app can't read never breaks the state. */
+    val plan: JsonElement? = null,
+    /** Whether the tower merges low-risk PRs into dev itself (`tower automerge`, feature `scores`). Null from a tower before it. */
+    @SerialName("auto_merge") val autoMerge: Boolean? = null,
 )
 
 /** The brain's current step, as the panel's working line shows it ("Delegating to orb-rust · 12s"). */
@@ -335,6 +339,9 @@ data class StreamHello(
 
     /** Receipts for commands, with undo; rules from answers; the tower's voice level. */
     val acts: Boolean get() = features.orEmpty().contains("acts")
+
+    /** Review scores: on PRs, a plan's predicted PRs, `auto_merge` in the state. */
+    val scores: Boolean get() = features.orEmpty().contains("scores")
 }
 
 /** A screenshot a session sent to the tower (`GET /v1/screenshots`). */

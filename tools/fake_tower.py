@@ -840,6 +840,43 @@ def model_says():
     return dict(MODEL, says=says)
 
 
+def fake_plan(kind):
+    """The plan that is open, as the tower's state carries it (Plan::view): ready with a migration PR and a UI PR, writing, blocked, failed or none."""
+    if kind == "none":
+        return None
+    draft = {"space": "live-editor", "goal": "Edit storefront pages live, with a preview beside them",
+             "done_when": "an editor changes a page in the preview and publishes it",
+             "sessions": [{"repo": "eyzflow", "why": "the drafts table and its API"}, {"repo": "eyzflow-admin-dashboard", "why": "the live editor"}]}
+    prs = [
+        {"n": 1, "repo": "eyzflow", "base": "dev", "title": "Drafts for live edits",
+         "changes": "Adds a storefront_drafts table and the API to save, preview and publish a draft.",
+         "files": ["db/migrations/0042_storefront_drafts.sql", "src/drafts/api.ts", "src/drafts/store.ts", "src/drafts/publish.ts", "test/drafts.test.ts"],
+         "migration": True, "breaking": "", "escalate": [], "after": [],
+         "score": {"needs_review": True, "line": "Needs review: a database migration (db/migrations/0042_storefront_drafts.sql)",
+                   "reasons": ["a database migration (db/migrations/0042_storefront_drafts.sql)"], "flags": ["migration"], "planned": "p3#1"}},
+        {"n": 2, "repo": "eyzflow-admin-dashboard", "base": "dev", "title": "The live editor with its preview",
+         "changes": "A side panel to edit a page's blocks, with the page's preview beside it.",
+         "files": ["src/editor/LivePanel.tsx", "src/editor/Preview.tsx", "src/editor/blocks.ts"],
+         "migration": False, "breaking": "", "escalate": [], "after": [1],
+         "score": {"needs_review": False, "line": "Low risk: no migration, breaking change, secrets, infrastructure or auth",
+                   "reasons": [], "flags": [], "planned": "p3#2"}},
+    ]
+    p = {"id": "p3", "form": "page", "status": "ready", "ticket": "SHOP-212 Storefront live editor\nEditors change a page and see it live before publishing.",
+         "draft": draft, "revision": 1, "address": "t40", "planner": "idle", "blocked": False, "answering": False,
+         "dir": "/tower/plans/p3", "plan_md": "/tower/plans/p3/plan.md", "url": "https://claude.ai/artifact/00000000-0000-4000-8000-000000000003", "why": "",
+         "thread": [{"from": "user", "text": "Keep the migration in its own PR.", "at": T0 - 20 * MIN},
+                    {"from": "planner", "text": "Done: PR 1 is the migration and its API, PR 2 the editor.", "at": T0 - 18 * MIN}],
+         "created_ms": T0 - 40 * MIN, "ready_ms": T0 - 22 * MIN, "updated_ms": T0 - 18 * MIN, "closed_ms": None, "launched": None, "prs": prs}
+    if kind == "writing":
+        p.update(status="writing", planner="working", url=None, ready_ms=None, revision=0, prs=[], thread=[], updated_ms=T0 - 2 * MIN)
+    elif kind == "blocked":
+        p.update(status="writing", planner="blocked", blocked=True, url=None, ready_ms=None, revision=0, prs=[], thread=[], updated_ms=T0 - 1 * MIN)
+    elif kind == "failed":
+        p.update(status="failed", planner="gone", address=None, url=None, ready_ms=None, revision=0, prs=[], thread=[],
+                 why="the planner ended before it published the plan", updated_ms=T0 - 5 * MIN)
+    return p
+
+
 def quiet_world():
     """Replaces the made-up shop with the design's example: five missions, three decisions, a thread, a record."""
     global SPACES
@@ -944,6 +981,10 @@ def quiet_world():
     PRS["example/landing#42"].update(score=dict(low, planned="p4#1", sha=PRS["example/landing#42"]["head_sha"]),
                                      auto={"state": "merged", "why": "low risk, into dev; its checks passed and its reviewer agreed", "sha": PRS["example/landing#42"]["head_sha"], "at_ms": T0 - 35 * MIN})
     STATE["auto_merge"] = True
+    # The open plan (state.plan), as FAKE_PLAN says: ready (default; auto-merge on), ready-off (auto-merge off), writing, blocked, failed, none.
+    kind = os.environ.get("FAKE_PLAN", "ready")
+    STATE["auto_merge"] = kind != "ready-off"
+    STATE["plan"] = fake_plan(kind)
     H_ = lambda mins, kind, **kw: dict({"at": T0 - mins * MIN, "kind": kind}, **kw)
     HISTORY[:] = sorted([
         H_(10 * 60 + 40, "answered", session="s5", name="mediaroom", space="isa", text="answered for you: Where to start? -> Start with the small fix to the analysis description."),
