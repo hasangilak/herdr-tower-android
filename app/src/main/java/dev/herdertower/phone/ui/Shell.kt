@@ -253,6 +253,7 @@ fun Shell(
     // The orb: a tap mutes the whole tower (here and on the Mac), another lets it talk again.
     val muted by session.muted.collectAsStateWithLifecycle()
     val validation by session.validationSupported.collectAsStateWithLifecycle()
+    val impact by session.impactSupported.collectAsStateWithLifecycle()
     val muting by session.muting.collectAsStateWithLifecycle()
     val mute = remember(muted, muting, connected) {
         MuteState(muted, enabled = connected && !muting) {
@@ -302,7 +303,7 @@ fun Shell(
 
     CompositionLocalProvider(
         LocalSnack provides show, LocalMute provides mute, LocalStop provides stop,
-        LocalOpenSettings provides { go(Route.Settings) }, LocalReach provides connected, LocalValidation provides validation,
+        LocalOpenSettings provides { go(Route.Settings) }, LocalReach provides connected, LocalValidation provides validation, LocalImpact provides impact,
     ) {
         Backdrop(orbPhase, needsYou = connected && waiting > 0) {
             Column(Modifier.fillMaxSize()) {

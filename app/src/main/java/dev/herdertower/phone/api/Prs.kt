@@ -47,6 +47,8 @@ data class Pr(
     val auto: PrAuto? = null,
     /** Its plan's checks as they stand, and its edge cases (a tower with `validation`); null on a PR no plan predicted. */
     val validation: PrValidation? = null,
+    /** Who outside depends on what it changes (a tower with `impact`). */
+    val impact: PrImpact? = null,
 ) {
     val open: Boolean get() = state == "open"
 

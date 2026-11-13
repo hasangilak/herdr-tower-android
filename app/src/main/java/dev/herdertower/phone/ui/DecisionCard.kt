@@ -292,12 +292,15 @@ fun DecisionCard(
                 else -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (DecisionModel.answerable(d)) d.options.forEachIndexed { i, o ->
                         BigAnswer(o.label, primary = o.pick, why = o.why) { host.answer(d, i) }
-                        // A merge's row: its PR's review score under its button (amber: needs review; cyan: low risk).
-                        if (d.kind == "merge") PrModel.score(d.prs.getOrNull(i)?.score)?.let { (line, needs) ->
-                            ScoreLine(line, needs, Modifier.padding(start = 16.dp, end = 8.dp))
+                        // A merge's row, as the Mac's: a breaking change first (rose), its review score (amber: needs review; cyan: low
+                        // risk; not when the break is its only reason), its planned checks, or that nothing outside depends on it.
+                        if (d.kind == "merge") d.prs.getOrNull(i)?.let { p ->
+                            val pad = Modifier.padding(start = 16.dp, end = 8.dp)
+                            BreakingBox(p.impact)
+                            if (scoreShown(p.score, p.impact)) PrModel.score(p.score)?.let { (line, needs) -> ScoreLine(line, needs, pad) }
+                            ValidationLine(p.validation, pad)
+                            QuietImpactLine(p.impact, pad)
                         }
-                        // …and its planned checks: all passed, or which are missing.
-                        if (d.kind == "merge") ValidationLine(d.prs.getOrNull(i)?.validation, Modifier.padding(start = 16.dp, end = 8.dp))
                     }
                     when (DecisionModel.fallback(d)) {
                         DecisionModel.Fallback.Questions -> BigAnswer(if (d.why.endsWith("questions")) "Answer the ${d.why}" else "Answer", primary = true) { d.questionId?.let(onQuestion) }
@@ -350,8 +353,10 @@ private fun PrRow(pr: DecisionPr, merge: (() -> Unit)?, onOpen: () -> Unit) {
         }
         if (merge != null) PillButton("Merge", onClick = merge)
     }
-    PrModel.score(pr.score)?.let { (line, needs) -> ScoreLine(line, needs) }
+    BreakingBox(pr.impact, Modifier.padding(top = 4.dp))
+    if (scoreShown(pr.score, pr.impact)) PrModel.score(pr.score)?.let { (line, needs) -> ScoreLine(line, needs) }
     ValidationLine(pr.validation)
+    QuietImpactLine(pr.impact)
     }
 }
 

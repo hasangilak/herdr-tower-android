@@ -46,6 +46,8 @@ data class DecisionPr(
     val score: PrScore? = null,
     /** Its plan's checks as they stand (a tower with `validation`). */
     val validation: PrValidation? = null,
+    /** Who outside depends on what it changes (a tower with `impact`). */
+    val impact: PrImpact? = null,
 ) {
     val ref: PrRef? get() = PrRef.of(repo, number)
     val key: String get() = prKey.ifBlank { "$repo#$number" }
@@ -276,7 +278,7 @@ object DecisionsApi {
             waiting = 0,
             title = if (ordered.size == 1) "Merge #${first.number}: ${first.title.ifBlank { first.id }}" else "${ordered.size} pull requests ready to merge",
             why = "Merge",
-            prs = ordered.map { DecisionPr(it.repo, it.number, it.base, checks = checksWord(it.checks.state), prKey = it.id, title = it.title, link = it.url, session = it.session, merge = it.merge, score = it.score, validation = it.validation) },
+            prs = ordered.map { DecisionPr(it.repo, it.number, it.base, checks = checksWord(it.checks.state), prKey = it.id, title = it.title, link = it.url, session = it.session, merge = it.merge, score = it.score, validation = it.validation, impact = it.impact) },
             firstMs = ordered.minOf { if (it.foundMs > 0) it.foundMs else Long.MAX_VALUE }.takeIf { it != Long.MAX_VALUE } ?: 0,
             lastMs = ordered.maxOf { it.checkedMs },
             count = ordered.size,

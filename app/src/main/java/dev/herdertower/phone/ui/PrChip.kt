@@ -168,9 +168,13 @@ fun PrChip(pr: Pr, onMerge: () -> Unit, modifier: Modifier = Modifier, highlight
                 }
             }
             // Whether a person should read it before it merges: amber when it needs review, cyan when low risk.
-            PrModel.score(pr.score)?.let { (line, needs) -> ScoreLine(line, needs) }
+            // A breaking change first, in rose: what breaks and who uses it.
+            BreakingBox(pr.impact)
+            if (scoreShown(pr.score, pr.impact)) PrModel.score(pr.score)?.let { (line, needs) -> ScoreLine(line, needs) }
             // Its plan's checks: all passed (cyan), or which are missing (amber; rose when one failed).
             ValidationLine(pr.validation)
+            // Nothing outside depends on what it changes: said quietly.
+            QuietImpactLine(pr.impact)
             PrModel.autoFailed(pr)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis) }
             pr.error?.takeIf { pr.open }?.let {
                 Text("The Mac couldn't ask GitHub lately: $it", style = MaterialTheme.typography.labelSmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -331,6 +335,11 @@ fun MergeSheet(session: TowerSession, pr: Pr, onDismiss: () -> Unit) {
                 shown?.let { Fact("Method", PrModel.method(it.method)) }
             }
             // Each planned check and how it stands; the missing ones are said again among the warnings below.
+            // A breaking change, above the warnings, and every dependent behind a tap.
+            (p.impact ?: pr.impact)?.let { i ->
+                BreakingBox(i)
+                DependentsList(i, pr.id)
+            }
             (p.validation ?: pr.validation)?.let { v -> ChecksBlock(v.checks, v.edgeCases, real = true) }
             when (val s = step) {
                 is MergeStep.Looking -> Row(

@@ -114,6 +114,7 @@ object PrModel {
         }
         score(pr.score)?.let { add(it.first) }
         ValidationModel.line(pr.validation)?.let { add(it) }
+        pr.impact?.let { add(ImpactModel.line(it)) }
     }.joinToString(", ")
 
     /** The warnings the sheet shows: the tower's, and the production one first even if an older tower didn't send it. */

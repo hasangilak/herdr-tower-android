@@ -545,6 +545,7 @@ class TowerSession(
                         _actsSupported.value = ev.hello.acts
                         _scoresSupported.value = ev.hello.scores
                         _validationSupported.value = ev.hello.validation
+                        _impactSupported.value = ev.hello.impact
                         _pairingSupported.value = ev.hello.pairing
                         live = true
                         route?.let {
@@ -975,6 +976,10 @@ class TowerSession(
     private val _validationSupported = MutableStateFlow(false)
     /** Whether the tower validates planned PRs: their checks and edge cases, on the plan and on each PR. */
     val validationSupported: StateFlow<Boolean> = _validationSupported.asStateFlow()
+
+    private val _impactSupported = MutableStateFlow(false)
+    /** Whether the tower looks for who outside depends on what a PR changes (breaking changes). */
+    val impactSupported: StateFlow<Boolean> = _impactSupported.asStateFlow()
 
     private val _acts = MutableStateFlow<Map<String, Act>>(emptyMap())
     /** Every act seen (in the chat, from its event, or undone here), as it last stood. */
@@ -1798,6 +1803,7 @@ class TowerSession(
         _actsSupported.value = false
         _scoresSupported.value = false
         _validationSupported.value = false
+        _impactSupported.value = false
         _ruleOffers.value = emptyList()
         _tellVoice.value = null
         _spaceThreads.value = emptyMap()

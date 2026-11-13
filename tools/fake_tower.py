@@ -177,6 +177,9 @@ def pr_gate(p):
         warnings.append("GitHub hasn't worked out yet whether it merges cleanly.")
     if (p.get("score") or {}).get("needs_review"):
         warnings.append(p["score"]["line"])
+    imp = p.get("impact")
+    if imp and impact_breaking(imp):
+        warnings.append(impact_line(imp).rstrip(".") + ".")
     v = p.get("validation") or {}
     if v.get("checks") and not all(c["status"] == "passed" for c in v["checks"]):
         warnings.append(f"Planned checks not all passed: {missing_line(v)}.")
@@ -190,6 +193,38 @@ def missing_line(v):
     """The planned checks not passed, as the tower's Validation::missing_line: "c2 <what, cut to 60> (not run), …"."""
     short = lambda c: f"{c['id']} {c['what'][:60].rstrip()}{'…' if len(c['what']) > 60 else ''}"
     return ", ".join(f"{short(c)} ({CHECK_WORD.get(c['status'], 'not reported yet')})" for c in v["checks"] if c["status"] != "passed")
+
+
+def thing_said(t):
+    """Thing::said: "renames formatTotal to formatAmount", "removes the field x"."""
+    what = t["name"] if t["kind"] in ("function", "type") else f"the {'config key' if t['kind'] == 'config' else t['kind']} {t['name']}"
+    if t["change"] == "renamed" and t.get("renamed_to"):
+        return f"renames {what} to {t['renamed_to']}"
+    return {"signature": f"changes the signature of {what}", "unread": f"stops reading {what}"}.get(t["change"], f"removes {what}")
+
+
+def impact_breaking(i):
+    """Impact::breaking: per thing used, who uses it (another repo first, then a use in a function), then each breaks report."""
+    out = []
+    for t in i["things"]:
+        users = sorted([d for d in i["dependents"] if d["uses"] == t["name"]], key=lambda d: (d["repo"].lower() == i.get("repo", "").lower(), not d.get("within")))
+        if users:
+            d = users[0]
+            more = f" and {len(users) - 1} more" if len(users) > 1 else ""
+            out.append(f"{thing_said(t)}, used by {d['repo']} {d['file']}:{d['line']}{' in ' + d['within'] if d.get('within') else ''}{more}")
+    return out + [r["text"] for r in i["reports"] if r["verdict"] == "breaks"]
+
+
+def impact_line(i):
+    """Impact::line: the warning, or that nothing outside depends on it."""
+    b = impact_breaking(i)
+    if b:
+        return "Breaking change: " + "; ".join(b[:2]) + (f"; and {len(b) - 2} more" if len(b) > 2 else "")
+    n = len(i["things"])
+    what = "no name others can use changes" if n == 0 else thing_said(i["things"][0]) if n == 1 else f"{n} things others could use change"
+    clean = next((f"; checked: {r['text']}" for r in reversed(i["reports"]) if r["verdict"] == "clean"), "")
+    k = len(i["searched"])
+    return f"Nothing outside depends on what it changes ({what}; searched {k} repo{'' if k == 1 else 's'}{clean})"
 
 
 def check(i, what, how, evidence, status="planned", proof=None, by=None, mins=None):
@@ -1030,6 +1065,34 @@ def quiet_world():
                    check(2, "On dev, the section shows variant B", "open the landing page on dev", "a screenshot", "passed",
                          "/tower/attachments/screenshots/landing-dev-b.png", by="s6", mins=42)],
         "edge_cases": [{"case": "A narrow phone: the drawing doesn't overflow", "checks": ["c1"]}]}
+    # Breaking changes (feature impact): who outside depends on what each PR changes.
+    searched = ["mediaroom", "mediaroom-web", "ingest-app", "eyzflow", "landing", "landing-admin"]
+    dep = lambda repo, file, line, uses, within, text: {"repo": repo, "file": file, "line": line, "uses": uses, "within": within, "text": text}
+    i1273 = {"repo": "mediaroom",
+             "things": [{"kind": "function", "name": "formatClipUrl", "change": "renamed", "renamed_to": "clipUrl", "file": "src/clips/url.ts"},
+                        {"kind": "field", "name": "clip_url", "change": "renamed", "renamed_to": "audio_url", "file": "src/api/clips.ts"}],
+             "dependents": [dep("mediaroom", "src/tour/preload.ts", 12, "formatClipUrl", "preloadTour", "urls.map(formatClipUrl)"),
+                            dep("mediaroom-web", "src/tour/index.ts", 3, "formatClipUrl", "", "import { formatClipUrl } from '@mediaroom/clips'"),
+                            dep("mediaroom-web", "src/tour/Step.tsx", 18, "formatClipUrl", "renderStep", "<audio src={formatClipUrl(step.clip)} />"),
+                            dep("ingest-app", "lib/tour/player.dart", 77, "clip_url", "playStep", "final url = step['clip_url'] as String;"),
+                            dep("ingest-app", "lib/tour/clip.dart", 41, "clip_url", "Clip.fromJson", "url: json['clip_url'] as String,")],
+             "searched": searched, "reports": [], "sha": PRS["example/mediaroom#1273"]["head_sha"], "checked_ms": T0 - 30 * MIN}
+    i1277 = {"repo": "mediaroom", "things": [], "dependents": [], "searched": searched, "sha": PRS["example/mediaroom#1277"]["head_sha"], "checked_ms": T0 - 29 * MIN,
+             "reports": [{"verdict": "breaks", "text": "The Ingest app's tour test fails against this release: tour.spec.ts still expects clip_url (ran npm test in ingest-app)",
+                          "by": "t61", "at_ms": T0 - 28 * MIN}]}
+    i42 = {"repo": "landing", "things": [{"kind": "type", "name": "DrawingProps", "change": "signature", "file": "src/drawings/types.ts"}],
+           "dependents": [], "searched": searched, "sha": PRS["example/landing#42"]["head_sha"], "checked_ms": T0 - 44 * MIN,
+           "reports": [{"verdict": "clean", "text": "type-checked landing-admin against it: no errors", "by": "s6", "at_ms": T0 - 43 * MIN}]}
+    for k, imp in [("example/mediaroom#1273", i1273), ("example/mediaroom#1277", i1277), ("example/landing#42", i42)]:
+        PRS[k]["impact"] = imp
+        b = impact_breaking(imp)
+        if b:
+            reason = "a breaking change (" + "; ".join(b[:2]) + (f"; and {len(b) - 2} more" if len(b) > 2 else "") + ")"
+            sc = PRS[k]["score"]
+            reasons = ([r for r in sc.get("reasons", [])] if sc.get("needs_review") else []) + [reason]
+            flags = ([f for f in sc.get("flags", [])] if sc.get("needs_review") else []) + ["breaking"]
+            sc.update(needs_review=True, reasons=reasons, flags=flags,
+                      line="Needs review: " + "; ".join(reasons[:2]) + (f"; and {len(reasons) - 2} more" if len(reasons) > 2 else ""))
     # The open plan (state.plan), as FAKE_PLAN says: ready (default; auto-merge on), ready-off (auto-merge off), writing, blocked, failed, none.
     kind = os.environ.get("FAKE_PLAN", "ready")
     STATE["auto_merge"] = kind != "ready-off"
@@ -1093,7 +1156,7 @@ def d_pr(p, d):
     note = {"pass": "checks passing", "pending": "checks running", "none": "no checks ran"}.get(checks) or f"{len(failing)} check{'s' if len(failing) != 1 else ''} failing: {', '.join(failing)}"
     return {"key": k, "repo": p["repo"], "number": p["number"], "base": p["base"], "title": view.get("title", ""), "url": view.get("url", f"https://github.com/{p['repo']}/pull/{p['number']}"),
             "checks": checks, "note": note, "session": view.get("session"), "merge": view.get("merge") or {"can": True, "blocked": None, "needs_override": None, "warnings": []},
-            **({"score": view["score"]} if view.get("score") else {}), **({"validation": view["validation"]} if view.get("validation") else {})}
+            **({"score": view["score"]} if view.get("score") else {}), **({"validation": view["validation"]} if view.get("validation") else {}), **({"impact": view["impact"]} if view.get("impact") else {})}
 
 
 def d_view(d):
@@ -1675,7 +1738,7 @@ class H(BaseHTTPRequestHandler):
             nv = network_view() if QUIET[0] else {}
             nv.pop("tailscale", None)
             return self.send(200, {"token": tok, "device": {"id": dev["id"], "name": dev["name"]}, "fingerprint": FP, "api": 1, "repaired": bool(old),
-                                   **({"features": ["quiet", "acts", "pairing", "scores", "validation"], **nv} if QUIET[0] else {})})
+                                   **({"features": ["quiet", "acts", "pairing", "scores", "validation", "impact"], **nv} if QUIET[0] else {})})
         dev = self.device()
         if dev is None:
             return self.err(401, "unauthorized", "unknown token")
@@ -1695,7 +1758,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, network_view())
             if seg == ["hello"]:
                 return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS), "audio_route": ROUTE.get(dev["id"], "phone"),
-                                       **({"features": ["quiet", "acts", "pairing", "scores", "validation"]} if QUIET[0] else {})})
+                                       **({"features": ["quiet", "acts", "pairing", "scores", "validation", "impact"]} if QUIET[0] else {})})
             if seg == ["device", "audio"]:
                 return self.send(200, {"route": ROUTE.get(dev["id"], "phone")})
             if seg == ["audio"]:
@@ -1853,7 +1916,7 @@ class H(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts", "pairing", "scores", "validation"], **network_view()} if QUIET[0] else {})})
+            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts", "pairing", "scores", "validation", "impact"], **network_view()} if QUIET[0] else {})})
             out("state", STATE)
             if QUIET[0]:
                 # Right after the first state: the whole open list (a muted space's marked), then the missions.

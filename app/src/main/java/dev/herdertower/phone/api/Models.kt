@@ -345,6 +345,9 @@ data class StreamHello(
 
     /** Validation: a predicted PR's checks and edge cases, a real PR's `validation`, missing checks among a merge's warnings. */
     val validation: Boolean get() = features.orEmpty().contains("validation")
+
+    /** Breaking changes: who outside depends on what a PR changes, and its warning. */
+    val impact: Boolean get() = features.orEmpty().contains("impact")
 }
 
 /** A screenshot a session sent to the tower (`GET /v1/screenshots`). */
