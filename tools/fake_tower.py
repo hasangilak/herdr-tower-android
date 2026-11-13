@@ -925,6 +925,21 @@ def fake_plan(kind):
          "score": {"needs_review": False, "line": "Low risk: no migration, breaking change, secrets, infrastructure or auth",
                    "reasons": [], "flags": [], "planned": "p3#2"}},
     ]
+    # Who outside depends on each (feature impact): PR 1 breaks a reader of its API, PR 2 has a user it doesn't break, PR 3 none.
+    breaking = {"what": "the response field page.body (now page.blocks)", "used_by": "storefront-web src/pages/render.ts renderPage", "breaks": True}
+    prs[0].update(dependents=[breaking], outside="rg over ~/Work for page.body and storefront_drafts")
+    why = f"a breaking change ({breaking['what']}, used by {breaking['used_by']})"
+    sc = prs[0]["score"]
+    sc.update(reasons=sc["reasons"] + [why], flags=sc["flags"] + ["breaking"], line="Needs review: " + "; ".join(sc["reasons"] + [why]))
+    prs[1].update(dependents=[{"what": "the LivePanel component", "used_by": "eyzflow-admin-dashboard src/pages/Settings.tsx SettingsPage", "breaks": False}],
+                  outside="rg over ~/Work for LivePanel: one use, its props unchanged")
+    prs.append({"n": 3, "repo": "eyzflow", "base": "dev", "title": "Purge the CDN when a draft is published",
+                "changes": "A webhook that purges the page's CDN cache after a publish.",
+                "files": ["src/drafts/purge.ts", "test/purge.test.ts"], "migration": False, "breaking": "", "escalate": [], "after": [1],
+                "checks": [check(1, "Publishing a draft purges that page's cache", "add test/purge.test.ts and run npm test -- purge", "test output")],
+                "edge_cases": [{"case": "A publish while the CDN is down: retried, not lost", "checks": ["c1"]}],
+                "dependents": [], "outside": "rg over ~/Work for purgePage and /v1/drafts/purge: nothing outside eyzflow uses them",
+                "score": {"needs_review": False, "line": "Low risk: no migration, breaking change, secrets, infrastructure or auth", "reasons": [], "flags": [], "planned": "p3#3"}})
     p = {"id": "p3", "form": "page", "status": "ready", "ticket": "SHOP-212 Storefront live editor\nEditors change a page and see it live before publishing.",
          "draft": draft, "revision": 1, "address": "t40", "planner": "idle", "blocked": False, "answering": False,
          "dir": "/tower/plans/p3", "plan_md": "/tower/plans/p3/plan.md", "url": "https://claude.ai/artifact/00000000-0000-4000-8000-000000000003", "why": "",

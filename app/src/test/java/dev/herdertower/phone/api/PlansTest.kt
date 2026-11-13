@@ -43,6 +43,14 @@ class PlansTest {
         assertNull(p.prs[0].pr)
         assertEquals(listOf(1), p.prs[1].after)
         assertEquals("o/admin#88", p.prs[1].pr)
+        // Who outside depends on a predicted PR (a tower with impact).
+        val deps = PlansApi.parse(TowerJson.parseToJsonElement(
+            """{"id": "p4", "prs": [{"n": 1, "dependents": [{"what": "the field total", "used_by": "shop-web src/cart.ts render", "breaks": true},
+               {"what": "formatTotal", "used_by": "shop-app lib/a.dart build"}], "outside": ""},
+               {"n": 2, "dependents": [], "outside": "rg over ~/Work for publishDraft: nothing"}]}""",
+        ))!!
+        assertEquals(listOf(PlanDependent("the field total", "shop-web src/cart.ts render", true), PlanDependent("formatTotal", "shop-app lib/a.dart build", false)), deps.prs[0].dependents)
+        assertEquals("rg over ~/Work for publishDraft: nothing", deps.prs[1].outside)
         assertEquals(true, s.autoMerge)
     }
 

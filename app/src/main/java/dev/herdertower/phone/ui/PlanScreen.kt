@@ -10,11 +10,13 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.filled.OpenInNew
@@ -30,6 +32,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontFamily
@@ -155,9 +158,39 @@ private fun PredictedPrCard(p: PredictedPr) {
             PlanModel.prNotes(p).takeIf { it.isNotEmpty() }?.let {
                 Text(it.joinToString(" · "), style = MaterialTheme.typography.labelMedium, color = tc.faint)
             }
-            ChecksBlock(p.checks, p.edgeCases, real = false, modifier = Modifier.padding(top = 4.dp))
+            // As the Mac's: how it is validated, who outside depends on what it changes (what breaks first), then its edge cases.
+            ChecksBlock(p.checks, emptyList(), real = false, modifier = Modifier.padding(top = 4.dp))
+            PlanDependents(p)
+            ChecksBlock(emptyList(), p.edgeCases, real = false, modifier = Modifier.padding(top = 2.dp))
         }
     }
+}
+
+/**
+ * Who outside depends on what a predicted PR changes (a tower with
+ * `impact`): each one it breaks in a rose box, "⚠ Breaks"; each it doesn't,
+ * quietly; with none, how the planner checked that nothing does.
+ */
+@Composable
+private fun PlanDependents(p: PredictedPr) {
+    if (!LocalImpact.current) return
+    val rose = tc.failed
+    val shape = RoundedCornerShape(10.dp)
+    p.dependents.filter { it.breaks }.forEach { d ->
+        Row(
+            Modifier.fillMaxWidth().padding(top = 2.dp).clip(shape).background(rose.copy(alpha = 0.12f)).border(1.dp, rose.copy(alpha = 0.45f), shape)
+                .padding(horizontal = 10.dp, vertical = 7.dp).semantics(mergeDescendants = true) {},
+            verticalAlignment = Alignment.Top,
+        ) {
+            Text("⚠ Breaks", style = MaterialTheme.typography.labelMedium, color = rose, fontWeight = FontWeight.SemiBold)
+            Spacer(Modifier.width(8.dp))
+            Text(PlanModel.dependent(d), Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = tc.text)
+        }
+    }
+    p.dependents.filterNot { it.breaks }.forEach { d ->
+        Text(PlanModel.stillWorks(d), style = MaterialTheme.typography.bodySmall, color = tc.faint)
+    }
+    PlanModel.nothingOutside(p)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = tc.faint) }
 }
 
 /** "Needs review" in amber, "Low risk" in cyan. */

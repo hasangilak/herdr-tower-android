@@ -19,6 +19,10 @@ data class PlanDraft(
     val sessions: List<PlanSession> = emptyList(),
 )
 
+/** Something outside that uses what a predicted PR changes: [what] ("the response field page.body"), [usedBy] (repo, file, function), and whether it [breaks]. */
+@Serializable
+data class PlanDependent(val what: String = "", @SerialName("used_by") val usedBy: String = "", val breaks: Boolean = false)
+
 /** One line of the chat about a plan: `user` or `planner`. */
 @Serializable
 data class PlanMsg(val from: String = "", val text: String = "", val at: Long = 0)
@@ -44,6 +48,10 @@ data class PredictedPr(
     /** How it is validated (a tower with `validation`): each check planned. */
     val checks: List<PrCheck> = emptyList(),
     @SerialName("edge_cases") val edgeCases: List<EdgeCase> = emptyList(),
+    /** Who outside uses what it changes, and whether the change breaks it (a tower with `impact`). */
+    val dependents: List<PlanDependent> = emptyList(),
+    /** How the planner checked who depends on it; when nothing does, that it doesn't. */
+    val outside: String = "",
     val score: PrScore? = null,
     /** The real PR's key once it opened (`owner/name#12`). */
     val pr: String? = null,

@@ -97,6 +97,15 @@ object PlanModel {
         p.pr?.takeIf { it.isNotBlank() }?.let { add("Opened: $it") }
     }
 
+    /** A dependent, as the Mac says it: "the response field page.body, used by storefront-web src/pages/render.ts renderPage". */
+    fun dependent(d: dev.herdertower.phone.api.PlanDependent): String = "${d.what}, used by ${d.usedBy}"
+
+    /** One that uses it but isn't broken: said quietly. */
+    fun stillWorks(d: dev.herdertower.phone.api.PlanDependent): String = "Depends on it, still works: ${dependent(d)}"
+
+    /** No dependents, and how the planner checked: "Nothing outside depends on it: …"; null when there are dependents or no word on it. */
+    fun nothingOutside(p: PredictedPr): String? = p.outside.trim().takeIf { p.dependents.isEmpty() && it.isNotEmpty() }?.let { "Nothing outside depends on it: $it" }
+
     /** Branches the tower can merge into itself (as its `is_dev`). */
     fun isDev(base: String): Boolean = base.trim().lowercase() in setOf("dev", "develop", "development")
 

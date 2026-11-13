@@ -91,4 +91,16 @@ class PlanModelTest {
         assertEquals(on, PlanModel.mergeNote(listOf(ui.copy(base = "Develop")), autoMerge = true))
         assertTrue(PlanModel.isDev(" development "))
     }
+
+    @Test fun whoOutsideDependsOnAPredictedPr() {
+        val breaks = dev.herdertower.phone.api.PlanDependent("the response field page.body", "storefront-web src/pages/render.ts renderPage", breaks = true)
+        val fine = dev.herdertower.phone.api.PlanDependent("the LivePanel component", "eyzflow-admin-dashboard src/pages/Settings.tsx SettingsPage")
+        assertEquals("the response field page.body, used by storefront-web src/pages/render.ts renderPage", PlanModel.dependent(breaks))
+        assertEquals("Depends on it, still works: the LivePanel component, used by eyzflow-admin-dashboard src/pages/Settings.tsx SettingsPage", PlanModel.stillWorks(fine))
+        assertEquals("Nothing outside depends on it: rg over ~/Work for publishDraft: no use outside eyzflow",
+            PlanModel.nothingOutside(ui.copy(outside = " rg over ~/Work for publishDraft: no use outside eyzflow ")))
+        // With dependents, or with no word from the planner, no such line.
+        assertNull(PlanModel.nothingOutside(ui.copy(outside = "rg over ~/Work for LivePanel", dependents = listOf(fine))))
+        assertNull(PlanModel.nothingOutside(ui))
+    }
 }
