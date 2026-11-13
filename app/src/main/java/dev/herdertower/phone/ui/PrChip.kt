@@ -30,6 +30,8 @@ import androidx.compose.material.icons.filled.Cancel
 import androidx.compose.material.icons.filled.CheckCircle
 import androidx.compose.material.icons.filled.Error
 import androidx.compose.material.icons.filled.HourglassTop
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material.icons.filled.Merge
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Warning
@@ -46,6 +48,7 @@ import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -166,10 +169,29 @@ fun PrChip(pr: Pr, onMerge: () -> Unit, modifier: Modifier = Modifier, highlight
             }
             // Whether a person should read it before it merges: amber when it needs review, cyan when low risk.
             PrModel.score(pr.score)?.let { (line, needs) -> ScoreLine(line, needs) }
+            // Its plan's checks: all passed (cyan), or which are missing (amber; rose when one failed).
+            ValidationLine(pr.validation)
             PrModel.autoFailed(pr)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis) }
             pr.error?.takeIf { pr.open }?.let {
                 Text("The Mac couldn't ask GitHub lately: $it", style = MaterialTheme.typography.labelSmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis)
             }
+        }
+        // Its checks, how each stands and the evidence given, and its edge cases: folded until asked for.
+        pr.validation?.takeIf { LocalValidation.current && (it.checks.isNotEmpty() || it.edgeCases.isNotEmpty()) }?.let { v ->
+            var shown by rememberSaveable(pr.id) { mutableStateOf(false) }
+            Row(
+                Modifier.heightIn(min = 48.dp).clip(RoundedCornerShape(12.dp))
+                    .clickable(role = Role.Button, onClickLabel = if (shown) "Hide its checks" else "Show its checks") { shown = !shown }
+                    .padding(end = 8.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(if (shown) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown, null, Modifier.size(18.dp), tint = tc.accentHi)
+                Text(
+                    if (shown) " Hide the checks" else " Show the checks and edge cases", style = MaterialTheme.typography.labelLarge,
+                    color = tc.accentHi, fontWeight = FontWeight.Medium,
+                )
+            }
+            if (shown) ChecksBlock(v.checks, v.edgeCases, real = true, modifier = Modifier.padding(bottom = 4.dp))
         }
         val button = PrModel.mergeButton(pr)
         if (button != null) {
@@ -308,6 +330,8 @@ fun MergeSheet(session: TowerSession, pr: Pr, onDismiss: () -> Unit) {
                 PrModel.mergeable(p)?.let { (t, tone) -> Fact("Conflicts", t, tone = tone) }
                 shown?.let { Fact("Method", PrModel.method(it.method)) }
             }
+            // Each planned check and how it stands; the missing ones are said again among the warnings below.
+            (p.validation ?: pr.validation)?.let { v -> ChecksBlock(v.checks, v.edgeCases, real = true) }
             when (val s = step) {
                 is MergeStep.Looking -> Row(
                     Modifier.fillMaxWidth().heightIn(min = 48.dp).semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },

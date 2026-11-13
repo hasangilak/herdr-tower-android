@@ -177,7 +177,26 @@ def pr_gate(p):
         warnings.append("GitHub hasn't worked out yet whether it merges cleanly.")
     if (p.get("score") or {}).get("needs_review"):
         warnings.append(p["score"]["line"])
+    v = p.get("validation") or {}
+    if v.get("checks") and not all(c["status"] == "passed" for c in v["checks"]):
+        warnings.append(f"Planned checks not all passed: {missing_line(v)}.")
     return {"can": blocked is None, "blocked": blocked, "needs_override": needs, "warnings": warnings}
+
+
+CHECK_WORD = {"passed": "passed", "failed": "failed", "not_run": "not run"}
+
+
+def missing_line(v):
+    """The planned checks not passed, as the tower's Validation::missing_line: "c2 <what, cut to 60> (not run), …"."""
+    short = lambda c: f"{c['id']} {c['what'][:60].rstrip()}{'…' if len(c['what']) > 60 else ''}"
+    return ", ".join(f"{short(c)} ({CHECK_WORD.get(c['status'], 'not reported yet')})" for c in v["checks"] if c["status"] != "passed")
+
+
+def check(i, what, how, evidence, status="planned", proof=None, by=None, mins=None):
+    c = {"id": f"c{i}", "what": what, "how": how, "evidence": evidence, "status": status}
+    if proof:
+        c.update(proof=proof, by=by or "s5", at_ms=T0 - (mins or 30) * MIN)
+    return c
 
 
 def pr_view(p):
@@ -852,12 +871,22 @@ def fake_plan(kind):
          "changes": "Adds a storefront_drafts table and the API to save, preview and publish a draft.",
          "files": ["db/migrations/0042_storefront_drafts.sql", "src/drafts/api.ts", "src/drafts/store.ts", "src/drafts/publish.ts", "test/drafts.test.ts"],
          "migration": True, "breaking": "", "escalate": [], "after": [],
+         "checks": [check(1, "The migration creates storefront_drafts and rolls back cleanly", "npm run db:migrate, then npm run db:rollback, on a scratch database", "the migrate and rollback output"),
+                    check(2, "The API saves, previews and publishes one draft per page", "add src/drafts/api.test.ts and run npm test -- drafts", "test output"),
+                    check(3, "On dev, publishing a draft changes the live page", "after the deploy to dev, publish one draft and load the page", "the response and the page, in a log")],
+         "edge_cases": [{"case": "A page that already has a draft: no second row", "checks": ["c2"]},
+                        {"case": "Publishing a draft someone changed meanwhile", "checks": ["c2", "c3"]},
+                        {"case": "Rolling back after drafts exist", "checks": ["c1"]}],
          "score": {"needs_review": True, "line": "Needs review: a database migration (db/migrations/0042_storefront_drafts.sql)",
                    "reasons": ["a database migration (db/migrations/0042_storefront_drafts.sql)"], "flags": ["migration"], "planned": "p3#1"}},
         {"n": 2, "repo": "eyzflow-admin-dashboard", "base": "dev", "title": "The live editor with its preview",
          "changes": "A side panel to edit a page's blocks, with the page's preview beside it.",
          "files": ["src/editor/LivePanel.tsx", "src/editor/Preview.tsx", "src/editor/blocks.ts"],
          "migration": False, "breaking": "", "escalate": [], "after": [1],
+         "checks": [check(1, "Each block edits in the panel and shows in the preview", "add src/editor/LivePanel.test.tsx and run npm test -- LivePanel", "test output"),
+                    check(2, "On dev, an editor changes a heading and sees it live", "open a page in the editor on dev and change its heading", "two screenshots: before and after")],
+         "edge_cases": [{"case": "A block type the editor doesn't know shows read-only", "checks": ["c1"]},
+                        {"case": "The preview of a page with no blocks", "checks": ["c1", "c2"]}],
          "score": {"needs_review": False, "line": "Low risk: no migration, breaking change, secrets, infrastructure or auth",
                    "reasons": [], "flags": [], "planned": "p3#2"}},
     ]
@@ -981,6 +1010,26 @@ def quiet_world():
     PRS["example/landing#42"].update(score=dict(low, planned="p4#1", sha=PRS["example/landing#42"]["head_sha"]),
                                      auto={"state": "merged", "why": "low risk, into dev; its checks passed and its reviewer agreed", "sha": PRS["example/landing#42"]["head_sha"], "at_ms": T0 - 35 * MIN})
     STATE["auto_merge"] = True
+    # Validation (feature validation): each planned PR's checks as its session reported them.
+    PRS["example/mediaroom#1273"]["validation"] = {
+        "checks": [check(1, "Each clip plays at its step of the tour", "npm test -- tour-clips", "test output", "passed", "14 passing (tour-clips)", mins=40),
+                   check(2, "The clips load from the CDN on dev", "open the Ingest tour on dev and play each step", "a screenshot of each step", "passed",
+                         "/tower/attachments/screenshots/ingest-dev-1.png … ingest-dev-6.png", mins=36),
+                   check(3, "A missing clip skips its step quietly", "remove one clip on a scratch build and walk the tour", "the console log", "passed",
+                         "step 4 skipped, no error in the console", mins=35)],
+        "edge_cases": [{"case": "A step without its clip", "checks": ["c3"]}, {"case": "A slow network: the clip loads late", "checks": ["c2"]}]}
+    PRS["example/mediaroom#1277"]["validation"] = {
+        "checks": [check(1, "The release notes list every clip", "compare the notes with the 12 clips", "the notes", "passed", "notes checked against the 12 clips", mins=33),
+                   check(2, "On production, the tour plays its clips after the deploy", "after the deploy, open the Ingest tour on production and play it through",
+                         "a screen recording", "not_run", "not reported when its session finished its turn on the PR", by="tower", mins=31),
+                   check(3, "The health check stays green during the deploy", "watch /health during a deploy to staging", "the health log", "failed",
+                         "2 of 40 health checks timed out at 14:52", mins=32)],
+        "edge_cases": [{"case": "A visitor mid-tour during the deploy", "checks": ["c2", "c3"]}, {"case": "Rolling the release back", "checks": ["c1"]}]}
+    PRS["example/landing#42"]["validation"] = {
+        "checks": [check(1, "The drawing scales from 320 to 1440 px", "npm test -- drawings", "test output", "passed", "8 passing (drawings)", by="s6", mins=45),
+                   check(2, "On dev, the section shows variant B", "open the landing page on dev", "a screenshot", "passed",
+                         "/tower/attachments/screenshots/landing-dev-b.png", by="s6", mins=42)],
+        "edge_cases": [{"case": "A narrow phone: the drawing doesn't overflow", "checks": ["c1"]}]}
     # The open plan (state.plan), as FAKE_PLAN says: ready (default; auto-merge on), ready-off (auto-merge off), writing, blocked, failed, none.
     kind = os.environ.get("FAKE_PLAN", "ready")
     STATE["auto_merge"] = kind != "ready-off"
@@ -1044,7 +1093,7 @@ def d_pr(p, d):
     note = {"pass": "checks passing", "pending": "checks running", "none": "no checks ran"}.get(checks) or f"{len(failing)} check{'s' if len(failing) != 1 else ''} failing: {', '.join(failing)}"
     return {"key": k, "repo": p["repo"], "number": p["number"], "base": p["base"], "title": view.get("title", ""), "url": view.get("url", f"https://github.com/{p['repo']}/pull/{p['number']}"),
             "checks": checks, "note": note, "session": view.get("session"), "merge": view.get("merge") or {"can": True, "blocked": None, "needs_override": None, "warnings": []},
-            **({"score": view["score"]} if view.get("score") else {})}
+            **({"score": view["score"]} if view.get("score") else {}), **({"validation": view["validation"]} if view.get("validation") else {})}
 
 
 def d_view(d):
@@ -1626,7 +1675,7 @@ class H(BaseHTTPRequestHandler):
             nv = network_view() if QUIET[0] else {}
             nv.pop("tailscale", None)
             return self.send(200, {"token": tok, "device": {"id": dev["id"], "name": dev["name"]}, "fingerprint": FP, "api": 1, "repaired": bool(old),
-                                   **({"features": ["quiet", "acts", "pairing", "scores"], **nv} if QUIET[0] else {})})
+                                   **({"features": ["quiet", "acts", "pairing", "scores", "validation"], **nv} if QUIET[0] else {})})
         dev = self.device()
         if dev is None:
             return self.err(401, "unauthorized", "unknown token")
@@ -1646,7 +1695,7 @@ class H(BaseHTTPRequestHandler):
                 return self.send(200, network_view())
             if seg == ["hello"]:
                 return self.send(200, {"api": 1, "tower": "fake", "device": dev, "voice": "af_bella", "phone_is_voice": any(v for _, v in SUBS), "audio_route": ROUTE.get(dev["id"], "phone"),
-                                       **({"features": ["quiet", "acts", "pairing", "scores"]} if QUIET[0] else {})})
+                                       **({"features": ["quiet", "acts", "pairing", "scores", "validation"]} if QUIET[0] else {})})
             if seg == ["device", "audio"]:
                 return self.send(200, {"route": ROUTE.get(dev["id"], "phone")})
             if seg == ["audio"]:
@@ -1804,7 +1853,7 @@ class H(BaseHTTPRequestHandler):
             self.wfile.flush()
 
         try:
-            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts", "pairing", "scores"], **network_view()} if QUIET[0] else {})})
+            out("hello", {"api": 1, "device": dev["id"], "voice": voice, **({"features": ["quiet", "acts", "pairing", "scores", "validation"], **network_view()} if QUIET[0] else {})})
             out("state", STATE)
             if QUIET[0]:
                 # Right after the first state: the whole open list (a muted space's marked), then the missions.

@@ -45,6 +45,8 @@ data class Pr(
     val score: PrScore? = null,
     /** The tower's own merge of it (auto-merge on): merged, or failed and why. */
     val auto: PrAuto? = null,
+    /** Its plan's checks as they stand, and its edge cases (a tower with `validation`); null on a PR no plan predicted. */
+    val validation: PrValidation? = null,
 ) {
     val open: Boolean get() = state == "open"
 

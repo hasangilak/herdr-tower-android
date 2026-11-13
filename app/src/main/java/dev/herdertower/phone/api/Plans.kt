@@ -41,6 +41,9 @@ data class PredictedPr(
     val escalate: List<String> = emptyList(),
     /** The plan's PRs (by [n]) it waits for. */
     val after: List<Int> = emptyList(),
+    /** How it is validated (a tower with `validation`): each check planned. */
+    val checks: List<PrCheck> = emptyList(),
+    @SerialName("edge_cases") val edgeCases: List<EdgeCase> = emptyList(),
     val score: PrScore? = null,
     /** The real PR's key once it opened (`owner/name#12`). */
     val pr: String? = null,

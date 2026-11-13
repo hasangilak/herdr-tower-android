@@ -342,6 +342,9 @@ data class StreamHello(
 
     /** Review scores: on PRs, a plan's predicted PRs, `auto_merge` in the state. */
     val scores: Boolean get() = features.orEmpty().contains("scores")
+
+    /** Validation: a predicted PR's checks and edge cases, a real PR's `validation`, missing checks among a merge's warnings. */
+    val validation: Boolean get() = features.orEmpty().contains("validation")
 }
 
 /** A screenshot a session sent to the tower (`GET /v1/screenshots`). */

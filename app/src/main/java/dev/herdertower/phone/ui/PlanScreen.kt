@@ -155,6 +155,7 @@ private fun PredictedPrCard(p: PredictedPr) {
             PlanModel.prNotes(p).takeIf { it.isNotEmpty() }?.let {
                 Text(it.joinToString(" · "), style = MaterialTheme.typography.labelMedium, color = tc.faint)
             }
+            ChecksBlock(p.checks, p.edgeCases, real = false, modifier = Modifier.padding(top = 4.dp))
         }
     }
 }

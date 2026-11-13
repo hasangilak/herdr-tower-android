@@ -296,6 +296,8 @@ fun DecisionCard(
                         if (d.kind == "merge") PrModel.score(d.prs.getOrNull(i)?.score)?.let { (line, needs) ->
                             ScoreLine(line, needs, Modifier.padding(start = 16.dp, end = 8.dp))
                         }
+                        // …and its planned checks: all passed, or which are missing.
+                        if (d.kind == "merge") ValidationLine(d.prs.getOrNull(i)?.validation, Modifier.padding(start = 16.dp, end = 8.dp))
                     }
                     when (DecisionModel.fallback(d)) {
                         DecisionModel.Fallback.Questions -> BigAnswer(if (d.why.endsWith("questions")) "Answer the ${d.why}" else "Answer", primary = true) { d.questionId?.let(onQuestion) }
@@ -349,6 +351,7 @@ private fun PrRow(pr: DecisionPr, merge: (() -> Unit)?, onOpen: () -> Unit) {
         if (merge != null) PillButton("Merge", onClick = merge)
     }
     PrModel.score(pr.score)?.let { (line, needs) -> ScoreLine(line, needs) }
+    ValidationLine(pr.validation)
     }
 }
 

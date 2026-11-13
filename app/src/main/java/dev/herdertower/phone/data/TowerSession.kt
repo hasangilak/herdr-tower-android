@@ -544,6 +544,7 @@ class TowerSession(
                         ev.hello.hosts?.let { learnHosts(it, ev.hello.magicDns, ev.hello.network) } ?: ev.hello.network?.let { _network.value = it }
                         _actsSupported.value = ev.hello.acts
                         _scoresSupported.value = ev.hello.scores
+                        _validationSupported.value = ev.hello.validation
                         _pairingSupported.value = ev.hello.pairing
                         live = true
                         route?.let {
@@ -970,6 +971,10 @@ class TowerSession(
     private val _scoresSupported = MutableStateFlow(false)
     /** Whether the tower scores PRs: a plan's predicted PRs, and whether it merges the low-risk ones itself. */
     val scoresSupported: StateFlow<Boolean> = _scoresSupported.asStateFlow()
+
+    private val _validationSupported = MutableStateFlow(false)
+    /** Whether the tower validates planned PRs: their checks and edge cases, on the plan and on each PR. */
+    val validationSupported: StateFlow<Boolean> = _validationSupported.asStateFlow()
 
     private val _acts = MutableStateFlow<Map<String, Act>>(emptyMap())
     /** Every act seen (in the chat, from its event, or undone here), as it last stood. */
@@ -1792,6 +1797,7 @@ class TowerSession(
         _acts.value = emptyMap()
         _actsSupported.value = false
         _scoresSupported.value = false
+        _validationSupported.value = false
         _ruleOffers.value = emptyList()
         _tellVoice.value = null
         _spaceThreads.value = emptyMap()
