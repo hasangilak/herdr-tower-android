@@ -43,6 +43,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
+import androidx.compose.ui.semantics.heading
+import androidx.compose.foundation.layout.Spacer
 import androidx.compose.ui.text.SpanStyle
 import androidx.compose.ui.text.buildAnnotatedString
 import androidx.compose.ui.text.font.FontWeight
@@ -204,6 +206,8 @@ fun MissionScreen(
             )
         }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 14.dp, end = 14.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
+            // Where the space is, in plain parts (a tower that keeps briefs); the goal is in its own card below.
+            m.brief?.let { WhereWeAre(it) }
             // The goal, and what counts as done.
             Row(verticalAlignment = Alignment.Top) {
                 Column(Modifier.weight(1f).padding(start = 4.dp, top = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
@@ -291,15 +295,18 @@ fun MissionScreen(
                     )
                 }
                 m.sessions.forEach { s ->
+                    Column {
                     SignRow(
                         sign = { SessionSign(if (s.runsJob) "working" else s.status) },
                         name = dev.herdertower.phone.api.ActsApi.inSpace(s.label, name), right = SessionModel.statusWord(s.statusShown),
-                        // A job it left running says what, since when and its last progress, over its last words.
-                        sub = s.job?.line?.takeIf { it.isNotBlank() } ?: SessionModel.said(s, history, jobs),
+                        // Its brief's "now" when it has one (no separate last words then); else a job it left running, over its last words.
+                        sub = s.brief?.now?.takeIf { it.isNotBlank() } ?: s.job?.line?.takeIf { it.isNotBlank() } ?: SessionModel.said(s, history, jobs),
                         mono = SessionModel.place(s).takeIf { it.isNotBlank() },
                         note = seat(s.address, s.account),
                         onClick = { onSession(s.address) },
                     )
+                    s.brief?.let { b -> SessionBriefFold(s.address, b) }
+                    }
                 }
             } else if (m.state != "closed") {
                 EmptyBox("No session runs here now.")
@@ -409,6 +416,71 @@ private fun GoalHistory(m: Mission) {
             v.doneWhen.takeIf { it.isNotBlank() }?.let { Text("Done when $it", style = MaterialTheme.typography.bodySmall, color = tc.faint) }
             v.request?.takeIf { it.isNotBlank() && v.by == "request" }?.let { Text("Your request: “$it”", style = MaterialTheme.typography.bodySmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis) }
         }
+    }
+}
+
+/**
+ * "Where we are": the space's brief, a line per part with its label (Stage,
+ * Done, In progress, Next, Waiting for you in amber, Risks in rose), when it
+ * last changed, and its earlier versions folded.
+ */
+@Composable
+private fun WhereWeAre(b: dev.herdertower.phone.api.SpaceBrief) {
+    var earlierOpen by rememberSaveable { mutableStateOf(false) }
+    val now = rememberNow(true)
+    Card {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Where we are", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, color = tc.text, fontWeight = FontWeight.SemiBold)
+            dev.herdertower.phone.api.Briefs.space(b).forEach { BriefPart(it) }
+            val earlier = dev.herdertower.phone.api.Briefs.earlier(b.history)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                if (b.changedMs > 0) Text("changed ${ago(b.changedMs, now)}", Modifier.weight(1f), style = MaterialTheme.typography.labelMedium, color = tc.faint)
+                else Spacer(Modifier.weight(1f))
+                if (earlier.isNotEmpty()) TextButton(onClick = { earlierOpen = !earlierOpen }, modifier = Modifier.heightIn(min = 40.dp)) {
+                    Text("${earlier.size} earlier " + if (earlierOpen) "▴" else "▾", color = tc.muted, style = MaterialTheme.typography.labelLarge)
+                }
+            }
+            if (earlierOpen) earlier.forEach { v ->
+                Text("${if (v.atMs > 0) ago(v.atMs, now) else "earlier"}: ${v.text}", style = MaterialTheme.typography.bodySmall, color = tc.muted)
+            }
+        }
+    }
+}
+
+/** A brief's part: its label, then what it says; amber when it waits for the user or is stuck, rose for risks. */
+@Composable
+private fun BriefPart(p: dev.herdertower.phone.api.Briefs.Part) {
+    val color = when (p.tone) {
+        dev.herdertower.phone.api.Briefs.Tone.Waits -> tc.decisionInk
+        dev.herdertower.phone.api.Briefs.Tone.Risk -> tc.failed
+        else -> tc.muted
+    }
+    val strong = if (p.tone == dev.herdertower.phone.api.Briefs.Tone.Plain) tc.text else color
+    Text(
+        buildAnnotatedString {
+            if (p.label.isNotBlank()) {
+                withStyle(SpanStyle(color = strong, fontWeight = FontWeight.SemiBold)) { append(p.label) }
+                append("  ")
+            }
+            append(p.text)
+        },
+        style = MaterialTheme.typography.bodyMedium, color = color,
+    )
+}
+
+/** "Brief ▾" under a session's row: the rest of its brief (Asked, Result, Earlier today, Next, Stuck). */
+@Composable
+private fun SessionBriefFold(address: String, b: dev.herdertower.phone.api.SessionBrief) {
+    val parts = dev.herdertower.phone.api.Briefs.session(b)
+    if (parts.isEmpty()) return
+    var open by rememberSaveable(address) { mutableStateOf(false) }
+    Column(Modifier.padding(start = 44.dp, end = 8.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Box(
+            Modifier.heightIn(min = 40.dp).clip(RoundedCornerShape(10.dp))
+                .clickable(role = Role.Button, onClickLabel = if (open) "Fold its brief" else "Open its brief") { open = !open },
+            contentAlignment = Alignment.CenterStart,
+        ) { Text("Brief " + if (open) "▴" else "▾", color = tc.muted, style = MaterialTheme.typography.labelLarge) }
+        if (open) parts.forEach { BriefPart(it) }
     }
 }
 
