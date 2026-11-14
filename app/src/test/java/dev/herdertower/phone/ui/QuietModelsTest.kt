@@ -46,6 +46,23 @@ class QuietModelsTest {
         assertFalse(DecisionModel.leftOut(d.copy(kind = "question"), 1))
     }
 
+    /** A merge card PR's words: its summary, its opening while that is made, or that it has none (and its session was asked). */
+    @Test fun aMergesPrSaysWhatItDoes() {
+        val body = "## Summary\n\n**Support Studio** gets a `Knowledge gaps` column:\n- counts open gaps\n\n## Testing\nran it"
+        val p = DecisionPr(repo = "o/app", number = 839, body = body)
+        assertEquals(DescriptionModel.About.Opening("Support Studio gets a Knowledge gaps column: counts open gaps"), DescriptionModel.about(p))
+        assertEquals(DescriptionModel.About.Summary("Support staff see open gaps."), DescriptionModel.about(p.copy(summary = "Support staff see open gaps.")))
+        assertEquals(DescriptionModel.About.Missing(asked = true), DescriptionModel.about(p.copy(body = " ", askedBody = true)))
+        assertNull("not looked at, or an older tower", DescriptionModel.about(p.copy(body = null)))
+        assertEquals("No description on GitHub. The tower asked its session to write one.", DescriptionModel.missingLine(true))
+        assertEquals("No description on GitHub.", DescriptionModel.missingLine(false))
+        assertEquals(listOf("Summary", "Support Studio gets a Knowledge gaps column:", "counts open gaps", "Testing", "ran it"), DescriptionModel.lines(body))
+        // As the tower sends it.
+        val wire = kotlinx.serialization.json.Json { ignoreUnknownKeys = true }
+            .decodeFromString(DecisionPr.serializer(), """{"repo":"o/app","number":842,"body":"","asked_body":true,"summary":""}""")
+        assertEquals(DescriptionModel.About.Missing(asked = true), DescriptionModel.about(wire))
+    }
+
     @Test fun theQueuesLine() {
         assertEquals("3 need you" to "3 working", DecisionModel.status(3, 3, reach = true))
         assertEquals("1 needs you" to "", DecisionModel.status(1, 0, reach = true))
