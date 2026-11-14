@@ -18,6 +18,8 @@ data class MissionSession(
     val said: String? = null,
     /** A job it left running in the background (feature `jobs`): its turn may be done, its work isn't. */
     val job: MissionJob? = null,
+    /** Where it is, in a few plain sentences, kept up by the tower (absent from an older tower). */
+    val brief: SessionBrief? = null,
 ) {
     val label: String get() = name.ifBlank { address }
 
@@ -87,6 +89,8 @@ data class Mission(
     @SerialName("auto_close_ms") val autoCloseMs: Long? = null,
     /** How long its sessions have been at work, and waited on the user (absent from an older tower). */
     val active: MissionActive? = null,
+    /** Where the space is, in a few plain sentences, kept up by the tower (absent from an older tower). */
+    val brief: SpaceBrief? = null,
 ) {
     /** Its own tower takes what is asked here (else the main tower does, with the space named). */
     val ownTower: Boolean get() = tower?.status == "ready" || tower?.status == "working"
@@ -135,6 +139,86 @@ object GoalsApi {
         "tower" -> "the tower"
         else -> "before versions were kept"
     }
+}
+
+/** One version of a brief: when it said so, and what. */
+@Serializable
+data class BriefVersion(@SerialName("at_ms") val atMs: Long = 0, val text: String = "")
+
+/**
+ * Where a space is ("where are we"): the whole of it in a few sentences
+ * ([text]), its [stage], what was done lately (newest first, "<session>:
+ * <result>"), who works on what now, what is queued, what waits for the
+ * user, the risks; when what it says last changed, and its earlier versions
+ * ([history], newest first, the first the current one).
+ */
+@Serializable
+data class SpaceBrief(
+    val text: String = "",
+    val goal: String = "",
+    val stage: String = "",
+    val done: List<String> = emptyList(),
+    val doing: List<String> = emptyList(),
+    val next: List<String> = emptyList(),
+    val waits: List<String> = emptyList(),
+    val risks: List<String> = emptyList(),
+    @SerialName("changed_ms") val changedMs: Long = 0,
+    val history: List<BriefVersion> = emptyList(),
+)
+
+/**
+ * Where a session is: what it was asked last and where that stands
+ * ([asked]), what came of it, what else it finished lately, what it does
+ * [now], what is next, and a task stuck ([stuck]) with why.
+ */
+@Serializable
+data class SessionBrief(
+    val text: String = "",
+    val asked: String = "",
+    val result: String? = null,
+    val done: List<String> = emptyList(),
+    val now: String = "",
+    val next: List<String> = emptyList(),
+    val stuck: String? = null,
+    @SerialName("changed_ms") val changedMs: Long = 0,
+    val history: List<BriefVersion> = emptyList(),
+)
+
+/** What a brief says, part by part, as the Mac shows it. */
+object Briefs {
+    /** How a part looks: plain, amber (waits for the user, stuck), rose (risks). */
+    enum class Tone { Plain, Waits, Risk }
+
+    data class Part(val label: String, val text: String, val tone: Tone = Tone.Plain)
+
+    /** Two of a done list, then "(and N more today)". */
+    fun twoAndMore(list: List<String>): String =
+        list.take(2).joinToString("; ") + (list.size - 2).takeIf { it > 0 }?.let { " (and $it more today)" }.orEmpty()
+
+    /** A space's "Where we are": Stage, Done, In progress, Next, Waiting for you (amber), Risks (rose); empty parts left out. */
+    fun space(b: SpaceBrief): List<Part> = buildList {
+        b.stage.takeIf { it.isNotBlank() }?.let { add(Part("Stage", it)) }
+        b.done.takeIf { it.isNotEmpty() }?.let { add(Part("Done", twoAndMore(it))) }
+        b.doing.takeIf { it.isNotEmpty() }?.let { add(Part("In progress", it.joinToString("; "))) }
+        b.next.takeIf { it.isNotEmpty() }?.let { add(Part("Next", it.joinToString("; "))) }
+        b.waits.takeIf { it.isNotEmpty() }?.let { add(Part("Waiting for you", it.joinToString("; "), Tone.Waits)) }
+        b.risks.takeIf { it.isNotEmpty() }?.let { add(Part("Risks", it.joinToString("; "), Tone.Risk)) }
+        // A brief with none of its parts: its whole text.
+        if (isEmpty() && b.text.isNotBlank()) add(Part("", b.text))
+    }
+
+    /** A session's brief opened: Asked, Result, Earlier today: N more tasks done, Next, Stuck (amber). */
+    fun session(b: SessionBrief): List<Part> = buildList {
+        b.asked.takeIf { it.isNotBlank() }?.let { add(Part("Asked", it)) }
+        b.result?.takeIf { it.isNotBlank() }?.let { add(Part("Result", it)) }
+        b.done.takeIf { it.isNotEmpty() }?.let { add(Part("Earlier today", "${it.size} more task${if (it.size == 1) "" else "s"} done")) }
+        b.next.takeIf { it.isNotEmpty() }?.let { add(Part("Next", it.joinToString("; "))) }
+        b.stuck?.takeIf { it.isNotBlank() }?.let { add(Part("Stuck", it, Tone.Waits)) }
+        if (isEmpty() && b.text.isNotBlank()) add(Part("", b.text))
+    }
+
+    /** The earlier versions, newest first: every one but the current. */
+    fun earlier(history: List<BriefVersion>): List<BriefVersion> = history.drop(1)
 }
 
 /**
@@ -186,7 +270,9 @@ object ActiveTime {
      * The space screen's line, as the Mac's: "Active now · 1h 12m this
      * stretch · 3h 05m today · 14h 20m since it opened · waited on you 25m
      * today", "Not at work now · …", "Waiting on you now · …"; null when
-     * it has been at work under a minute in all and isn't now.
+     * it has been at work under a minute in all and isn't now. A stretch
+     * under a minute isn't said: "Active now" alone says it ("0m this
+     * stretch" read as nothing at work).
      */
     fun line(a: MissionActive?, now: Long): String? {
         a ?: return null
@@ -200,18 +286,18 @@ object ActiveTime {
                     else -> "Not at work now"
                 },
             )
-            l.stretchMs?.let { add("${duration(it)} this stretch") }
+            l.stretchMs?.takeIf { it >= MINUTE }?.let { add("${duration(it)} this stretch") }
             add("${duration(l.todayMs)} today")
             add("${duration(l.totalMs)} since it opened")
             if (l.waitingTodayMs >= MINUTE) add("waited on you ${duration(l.waitingTodayMs)} today")
         }.joinToString(" · ")
     }
 
-    /** The spaces list's word: "at work 12m" (this stretch) while at work, else "1h 12m today"; null under a minute today. */
+    /** The spaces list's word: "at work 12m" (this stretch) while at work ("at work now" under a minute), else "1h 12m today"; null under a minute today. */
     fun compact(a: MissionActive?, now: Long): String? {
         a ?: return null
         val l = live(a, now)
-        if (a.now) return "at work " + duration(l.stretchMs ?: 0)
+        if (a.now) return l.stretchMs?.takeIf { it >= MINUTE }?.let { "at work " + duration(it) } ?: "at work now"
         return l.todayMs.takeIf { it >= MINUTE }?.let { "${duration(it)} today" }
     }
 }

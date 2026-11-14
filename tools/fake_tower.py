@@ -1313,7 +1313,8 @@ def d_count():
 # Each space's active time (herder-tower's `active` on a mission): how long its sessions have been at work, and waited on the user.
 ACTIVE = {
     "industrial-landing-page": {"now": True, "since": 72 * MIN, "today": (3 * 60 + 5) * MIN, "total": (14 * 60 + 20) * MIN, "waiting_now": False, "w_today": 25 * MIN, "w_total": 40 * MIN},
-    "isa": {"now": False, "today": 72 * MIN, "total": 5 * 60 * MIN, "waiting_now": False, "w_today": 0, "w_total": 10 * MIN},
+    # A stretch that just began: "at work now", no "0m this stretch".
+    "isa": {"now": True, "since": 0, "today": 72 * MIN, "total": 5 * 60 * MIN, "waiting_now": False, "w_today": 0, "w_total": 10 * MIN},
     "sandbox": {"now": False, "today": 42 * MIN, "total": 2 * 60 * MIN, "waiting_now": True, "w_today": 18 * MIN, "w_total": 30 * MIN},
 }
 
@@ -1329,10 +1330,48 @@ def m_active(name):
     return v
 
 
+# Each space's and session's brief (herder-tower's `brief` on a mission and its sessions): where it is, in plain parts.
+def m_brief(name):
+    if name != "industrial-landing-page":
+        return None, {}
+    space = {
+        "text": "The drawings are being reworked: two sections have theirs, the microscope one waits for your pick. The hero drawing's PR conflicts with dev.",
+        "goal": "New product drawings on the landing page",
+        "stage": "open; 2 of 4 sections drawn today; release prod Nov 13 21:20",
+        "done": ["landing: drew the centrifuge section (checked by the brain)", "landing: drew the pipette section",
+                 "landing: compressed every drawing under 80 KB", "landing: fixed the dark-mode outlines"],
+        "doing": ["landing: draws the incubator section"],
+        "next": ["Put the drawings live on the landing page"],
+        "waits": ["Which microscope drawing?"],
+        "risks": ["PR #412 (hero drawing) conflicts with dev: being fixed by landing"],
+        "changed_ms": now() - 5 * MIN,
+        "history": [{"at_ms": now() - 5 * MIN, "text": "The drawings are being reworked: two sections have theirs, the microscope one waits for your pick."},
+                    {"at_ms": now() - 40 * MIN, "text": "The drawings are being reworked: one section has its drawing."},
+                    {"at_ms": now() - 95 * MIN, "text": "The landing page's drawings are being planned."}],
+    }
+    session = {
+        "s6": {
+            "text": "Asked to rework the product drawings; draws the incubator section now.",
+            "asked": "Rework the product drawings, one per section",
+            "result": "Centrifuge and pipette sections drawn and checked in the browser",
+            "done": ["compressed every drawing under 80 KB", "fixed the dark-mode outlines"],
+            "now": "working on it: drawing the incubator section (3 of 4)",
+            "next": ["Put the drawings live on the landing page", "Ask which microscope drawing"],
+            "stuck": "PR #412 conflicts with dev: resolving it",
+            "changed_ms": now() - 5 * MIN,
+            "history": [],
+        },
+    }
+    return space, session
+
+
 def m_view(m):
     act = m_active(m["name"])
     if act is not None:
         m = dict(m, active=act)
+    brief, briefs = m_brief(m["name"])
+    if brief is not None:
+        m = dict(m, brief=brief, sessions=[dict(x, brief=briefs[x["address"]]) if x.get("address") in briefs else x for x in m.get("sessions", [])])
     return dict(m, needs=sum(1 for d in d_all() if d["space"] == m["name"]), goal=m.get("goal") or "", done_when=m.get("done_when") or "", report=m.get("report") or "",
                 tower=m.get("tower"), quiet_since_ms=None, ready_since_ms=now() - 20 * MIN if m["state"] == "ready" else None,
                 auto_close_ms=now() + 4 * 60 * MIN if m["state"] == "ready" else None)

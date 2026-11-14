@@ -130,6 +130,10 @@ class MissionsTest {
         // Two minutes on, without a read: at work the whole time.
         assertEquals("Active now · 1h 14m this stretch · 3h 07m today · 14h 22m since it opened · waited on you 25m today", ActiveTime.line(a, at + 2 * min))
         assertEquals("at work 1h 12m", ActiveTime.compact(a, at))
+        // A stretch under a minute: at work now, no "0m".
+        val fresh = a.copy(sinceMs = at - 20_000)
+        assertEquals("at work now", ActiveTime.compact(fresh, at))
+        assertEquals("Active now · 3h 05m today · 14h 20m since it opened · waited on you 25m today", ActiveTime.line(fresh, at))
         val off = a.copy(now = false, sinceMs = null, waitingTodayMs = 30_000)
         assertEquals("Not at work now · 3h 05m today · 14h 20m since it opened", ActiveTime.line(off, at + 10 * min))
         assertEquals("3h 05m today", ActiveTime.compact(off, at))
@@ -144,5 +148,39 @@ class MissionsTest {
         val m = TowerJson.decodeFromString(MissionsResponse.serializer(), """{"spaces":[{"name":"a","active":{"at_ms":1,"now":true,"since_ms":1,"today_ms":60000,"total_ms":60000,"waiting_now":false,"waiting_today_ms":0,"waiting_total_ms":0}},{"name":"b"}]}""")
         assertEquals(true, m.spaces[0].active?.now)
         assertEquals(null, m.spaces[1].active)
+    }
+
+    /** A space's brief, part by part as the Mac shows it, and a session's. */
+    @Test fun briefsSayWhereASpaceAndASessionAre() {
+        val m = TowerJson.decodeFromString(
+            MissionsResponse.serializer(),
+            """{"spaces":[{"name":"isa","brief":{"text":"All done.","goal":"Voice clips","stage":"ready to close; 27 of 27 tasks verified today",""" +
+                """"done":["eyzflow: shipped the clips","mediaroom: merged #829","docs: wrote the notes","web: fixed the player"],"doing":["eyzflow: checks the tour"],""" +
+                """"next":[],"waits":["Merge PR #830"],"risks":["#831 conflicts with dev"],"changed_ms":5,"history":[{"at_ms":5,"text":"All done."},{"at_ms":1,"text":"Half done."}]},""" +
+                """"sessions":[{"address":"t3","name":"eyzflow","brief":{"text":"…","asked":"ship the clips (done)","result":"shipped","done":["a","b"],"now":"idle; it last said: shipped","next":["check the tour"],"stuck":"the upload stalled: no network"}}]},{"name":"old"}]}""",
+        )
+        val b = m.spaces[0].brief!!
+        assertEquals(
+            listOf(
+                Briefs.Part("Stage", "ready to close; 27 of 27 tasks verified today"),
+                Briefs.Part("Done", "eyzflow: shipped the clips; mediaroom: merged #829 (and 2 more today)"),
+                Briefs.Part("In progress", "eyzflow: checks the tour"),
+                Briefs.Part("Waiting for you", "Merge PR #830", Briefs.Tone.Waits),
+                Briefs.Part("Risks", "#831 conflicts with dev", Briefs.Tone.Risk),
+            ),
+            Briefs.space(b),
+        )
+        assertEquals(listOf("Half done."), Briefs.earlier(b.history).map { it.text })
+        val sb = m.spaces[0].sessions[0].brief!!
+        assertEquals("idle; it last said: shipped", sb.now)
+        assertEquals(
+            listOf("Asked" to "ship the clips (done)", "Result" to "shipped", "Earlier today" to "2 more tasks done", "Next" to "check the tour", "Stuck" to "the upload stalled: no network"),
+            Briefs.session(sb).map { it.label to it.text },
+        )
+        assertEquals(Briefs.Tone.Waits, Briefs.session(sb).last().tone)
+        // An older tower: no brief.
+        assertNull(m.spaces[1].brief)
+        // A brief with only its text: the text.
+        assertEquals(listOf(Briefs.Part("", "All quiet.")), Briefs.space(SpaceBrief(text = "All quiet.")))
     }
 }
