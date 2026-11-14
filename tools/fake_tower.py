@@ -1229,6 +1229,17 @@ def quiet_world():
     if STATE["plan"]:
         STATE["plan"].update(plan_v2())
     STATE["plans_live"] = [plan_live()]
+    # Each account's usage and the failover's moves (feature accounts): made up, no emails.
+    STATE["accounts"] = {
+        "list": [{"name": "main", "default": True, "five_hour": None, "seven_day": {"used": 99.0, "resets_ms": now() + 38 * 60 * MIN},
+                  "out_until_ms": now() + 38 * 60 * MIN, "out_why": "weekly limit"},
+                 {"name": "studio", "default": False, "five_hour": {"used": 42.0, "resets_ms": now() + 3 * 60 * MIN}, "seven_day": {"used": 61.0, "resets_ms": now() + 4 * 24 * 60 * MIN},
+                  "out_until_ms": None, "out_why": ""}],
+        "starts_on": "studio",
+        "moves": [{"at_ms": now() - 95 * MIN, "address": "t21", "name": "tower-sandbox", "space": "sandbox", "tower": "tower-sandbox", "from": "main", "to": "studio",
+                   "how": "moved", "why": "main hit its weekly limit"},
+                  {"at_ms": now() - 80 * MIN, "address": "s5", "name": "mediaroom", "space": "isa", "from": "main", "to": "studio", "how": "moved", "why": "main hit its weekly limit"}],
+        "moving": [], "waiting": []}
     H_ = lambda mins, kind, **kw: dict({"at": T0 - mins * MIN, "kind": kind}, **kw)
     HISTORY[:] = sorted([
         H_(10 * 60 + 40, "answered", session="s5", name="mediaroom", space="isa", text="answered for you: Where to start? -> Start with the small fix to the analysis description."),
