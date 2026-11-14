@@ -241,8 +241,10 @@ fun MissionScreen(
                 SectionLabel("Sessions")
                 m.sessions.forEach { s ->
                     SignRow(
-                        sign = { SessionSign(s.status) },
-                        name = dev.herdertower.phone.api.ActsApi.inSpace(s.label, name), right = SessionModel.statusWord(s.status), sub = SessionModel.said(s, history, jobs),
+                        sign = { SessionSign(if (s.runsJob) "working" else s.status) },
+                        name = dev.herdertower.phone.api.ActsApi.inSpace(s.label, name), right = SessionModel.statusWord(s.statusShown),
+                        // A job it left running says what, since when and its last progress, over its last words.
+                        sub = s.job?.line?.takeIf { it.isNotBlank() } ?: SessionModel.said(s, history, jobs),
                         mono = SessionModel.place(s).takeIf { it.isNotBlank() },
                         onClick = { onSession(s.address) },
                     )
