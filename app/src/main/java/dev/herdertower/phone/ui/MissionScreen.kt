@@ -195,6 +195,14 @@ fun MissionScreen(
                 MissionsApi.sessionsLine(m) + (if (m.ownTower) " · its own tower" else "") + (if (m.state == "closed") " · closed" else ""),
             onBack = onBack,
         )
+        // How long its sessions have been at work (a tower that counts it): cyan while at work, live between reads.
+        val activeNow = rememberNow(m.active != null)
+        dev.herdertower.phone.api.ActiveTime.line(m.active, activeNow)?.let { line ->
+            Text(
+                line, Modifier.padding(start = 18.dp, end = 18.dp, bottom = 6.dp), style = MaterialTheme.typography.bodySmall,
+                color = if (m.active?.now == true) tc.live else if (m.active?.waitingNow == true) tc.decisionInk else tc.muted,
+            )
+        }
         Column(Modifier.fillMaxSize().verticalScroll(rememberScrollState()).padding(start = 14.dp, end = 14.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(10.dp)) {
             // The goal, and what counts as done.
             Row(verticalAlignment = Alignment.Top) {

@@ -120,4 +120,29 @@ class MissionsTest {
         assertEquals("done", MissionsApi.progress(m.spaces[1]))
         assertEquals("Deploy v2.3 to staging", MissionsApi.line(m.spaces[1]))
     }
+
+    /** A space's active time, as the Mac words it, moving between reads. */
+    @Test fun aSpaceSaysHowLongItHasBeenAtWork() {
+        val at = 1_794_629_893_000L
+        val min = 60_000L
+        val a = MissionActive(atMs = at, now = true, sinceMs = at - 72 * min, todayMs = 185 * min, totalMs = 860 * min, waitingTodayMs = 25 * min, waitingTotalMs = 40 * min)
+        assertEquals("Active now · 1h 12m this stretch · 3h 05m today · 14h 20m since it opened · waited on you 25m today", ActiveTime.line(a, at))
+        // Two minutes on, without a read: at work the whole time.
+        assertEquals("Active now · 1h 14m this stretch · 3h 07m today · 14h 22m since it opened · waited on you 25m today", ActiveTime.line(a, at + 2 * min))
+        assertEquals("at work 1h 12m", ActiveTime.compact(a, at))
+        val off = a.copy(now = false, sinceMs = null, waitingTodayMs = 30_000)
+        assertEquals("Not at work now · 3h 05m today · 14h 20m since it opened", ActiveTime.line(off, at + 10 * min))
+        assertEquals("3h 05m today", ActiveTime.compact(off, at))
+        val waits = off.copy(waitingNow = true, waitingTodayMs = 18 * min)
+        assertEquals("Waiting on you now · 3h 05m today · 14h 20m since it opened · waited on you 20m today", ActiveTime.line(waits, at + 2 * min))
+        // Under a minute in all and not at work: nothing; nothing today: no word in the list.
+        assertEquals(null, ActiveTime.line(MissionActive(atMs = at, totalMs = 30_000), at))
+        assertEquals(null, ActiveTime.compact(MissionActive(atMs = at, totalMs = 90 * min, todayMs = 20_000), at))
+        assertEquals("42m", ActiveTime.duration(42 * min))
+        assertEquals("1h 05m", ActiveTime.duration(65 * min))
+        // Read off the missions; absent from an older tower.
+        val m = TowerJson.decodeFromString(MissionsResponse.serializer(), """{"spaces":[{"name":"a","active":{"at_ms":1,"now":true,"since_ms":1,"today_ms":60000,"total_ms":60000,"waiting_now":false,"waiting_today_ms":0,"waiting_total_ms":0}},{"name":"b"}]}""")
+        assertEquals(true, m.spaces[0].active?.now)
+        assertEquals(null, m.spaces[1].active)
+    }
 }

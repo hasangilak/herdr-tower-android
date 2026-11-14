@@ -1310,7 +1310,29 @@ def d_count():
     return len(d_queue())
 
 
+# Each space's active time (herder-tower's `active` on a mission): how long its sessions have been at work, and waited on the user.
+ACTIVE = {
+    "industrial-landing-page": {"now": True, "since": 72 * MIN, "today": (3 * 60 + 5) * MIN, "total": (14 * 60 + 20) * MIN, "waiting_now": False, "w_today": 25 * MIN, "w_total": 40 * MIN},
+    "isa": {"now": False, "today": 72 * MIN, "total": 5 * 60 * MIN, "waiting_now": False, "w_today": 0, "w_total": 10 * MIN},
+    "sandbox": {"now": False, "today": 42 * MIN, "total": 2 * 60 * MIN, "waiting_now": True, "w_today": 18 * MIN, "w_total": 30 * MIN},
+}
+
+
+def m_active(name):
+    a = ACTIVE.get(name)
+    if a is None:
+        return None
+    v = {"at_ms": now(), "now": a["now"], "today_ms": a["today"], "total_ms": a["total"], "waiting_now": a["waiting_now"],
+         "waiting_today_ms": a["w_today"], "waiting_total_ms": a["w_total"]}
+    if a["now"]:
+        v["since_ms"] = now() - a["since"]
+    return v
+
+
 def m_view(m):
+    act = m_active(m["name"])
+    if act is not None:
+        m = dict(m, active=act)
     return dict(m, needs=sum(1 for d in d_all() if d["space"] == m["name"]), goal=m.get("goal") or "", done_when=m.get("done_when") or "", report=m.get("report") or "",
                 tower=m.get("tower"), quiet_since_ms=None, ready_since_ms=now() - 20 * MIN if m["state"] == "ready" else None,
                 auto_close_ms=now() + 4 * 60 * MIN if m["state"] == "ready" else None)
