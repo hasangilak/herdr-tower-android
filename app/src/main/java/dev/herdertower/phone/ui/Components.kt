@@ -198,6 +198,14 @@ fun span(ms: Long): String {
 
 fun clock(ms: Long): String = SimpleDateFormat("HH:mm", Locale.getDefault()).format(Date(ms))
 
+/** "15:00" today, "Sun 02:00" on another day: a reset or a return days away never reads as one already past. */
+fun dayClock(ms: Long, now: Long = System.currentTimeMillis()): String {
+    val a = Calendar.getInstance().apply { timeInMillis = ms }
+    val b = Calendar.getInstance().apply { timeInMillis = now }
+    val today = a.get(Calendar.YEAR) == b.get(Calendar.YEAR) && a.get(Calendar.DAY_OF_YEAR) == b.get(Calendar.DAY_OF_YEAR)
+    return if (today) clock(ms) else SimpleDateFormat("EEE HH:mm", Locale.getDefault()).format(Date(ms))
+}
+
 fun dayLabel(ms: Long): String {
     val c = Calendar.getInstance().apply { timeInMillis = ms }
     val today = Calendar.getInstance()

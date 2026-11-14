@@ -252,7 +252,7 @@ fun MissionScreen(
 
             // Which account each runs on, and what the failover moved (a tower with accounts).
             val board = remember(state?.accounts) { dev.herdertower.phone.api.AccountsApi.parse(state?.accounts) }
-            fun seat(address: String?, account: String?) = dev.herdertower.phone.api.AccountsApi.seat(board, address, account, ::clock)
+            fun seat(address: String?, account: String?) = dev.herdertower.phone.api.AccountsApi.seat(board, address, account) { dayClock(it) }
             if (m.sessions.isNotEmpty()) {
                 SectionLabel("Sessions")
                 // Its own tower first, with its account.

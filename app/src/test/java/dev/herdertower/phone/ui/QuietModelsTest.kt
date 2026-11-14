@@ -520,4 +520,13 @@ class QuietModelsTest {
         assertEquals("↳ the tower sent it: Push and open the PR", ChatModel.asked(ChatModel.entry(r)))
         assertNull(ChatModel.asked(ChatModel.entry(ChatMessage(id = "h11", role = "tower", text = "Hi"))))
     }
+
+    /** A reset days away says its day: "out until 02:00" at 03:54 read as past. */
+    @Test fun aTimeOnAnotherDaySaysItsDay() {
+        val now = java.util.Calendar.getInstance().apply { set(2026, 10, 14, 3, 54, 0) }.timeInMillis
+        val sunday = java.util.Calendar.getInstance().apply { set(2026, 10, 15, 2, 0, 0) }.timeInMillis
+        val later = java.util.Calendar.getInstance().apply { set(2026, 10, 14, 15, 0, 0) }.timeInMillis
+        assertEquals("15:00", dayClock(later, now))
+        assertEquals(java.text.SimpleDateFormat("EEE", java.util.Locale.getDefault()).format(java.util.Date(sunday)) + " 02:00", dayClock(sunday, now))
+    }
 }

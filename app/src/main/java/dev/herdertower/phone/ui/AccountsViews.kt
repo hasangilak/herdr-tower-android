@@ -44,7 +44,7 @@ import dev.herdertower.phone.api.UsageWindow
 /** What the accounts strip says, in words (the strip and the tests read these). */
 object AccountsModel {
     /** "Accounts · orca out until 15:00", "Accounts · new sessions start on orca", "Accounts". */
-    fun head(b: AccountsBoard, now: Long, clock: (Long) -> String = ::clock): String {
+    fun head(b: AccountsBoard, now: Long, clock: (Long) -> String = { dayClock(it) }): String {
         val out = b.list.filter { AccountsApi.out(it, now) }
         val def = b.list.firstOrNull { it.default }?.name
         return "Accounts" + when {
@@ -57,11 +57,11 @@ object AccountsModel {
     }
 
     /** A window's row: "5h  42%  ↻15:00". */
-    fun window(label: String, w: UsageWindow?, clock: (Long) -> String = ::clock): String =
+    fun window(label: String, w: UsageWindow?, clock: (Long) -> String = { dayClock(it) }): String =
         listOf(label, AccountsApi.percent(w), AccountsApi.resets(w, clock)).filter { it.isNotBlank() }.joinToString("  ")
 
     /** A move, in a line: "fix-login (sandbox): default → orca at 15:02, 5-hour limit"; a failed one says so. */
-    fun move(m: AccountMove, clock: (Long) -> String = ::clock): String {
+    fun move(m: AccountMove, clock: (Long) -> String = { dayClock(it) }): String {
         val who = (m.name?.takeIf { it.isNotBlank() } ?: m.address) + (m.space?.takeIf { it.isNotBlank() }?.let { " ($it)" } ?: "")
         val at = if (m.atMs > 0) " at ${clock(m.atMs)}" else ""
         val why = m.why?.takeIf { it.isNotBlank() }?.let { ", $it" }.orEmpty()
@@ -109,7 +109,7 @@ fun AccountsStrip(board: AccountsBoard, now: Long, modifier: Modifier = Modifier
 
 @Composable
 private fun AccountRow(a: AccountUsage, now: Long, whole: Boolean, startsHere: Boolean) {
-    val out = AccountsApi.outLine(a, now, ::clock)
+    val out = AccountsApi.outLine(a, now) { dayClock(it) }
     Column(verticalArrangement = Arrangement.spacedBy(4.dp)) {
         Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
             AccountBadge(a.name, a.default)
@@ -129,7 +129,7 @@ private fun AccountRow(a: AccountUsage, now: Long, whole: Boolean, startsHere: B
                 Text(label, Modifier.width(24.dp), style = MaterialTheme.typography.labelMedium, color = tc.faint)
                 UsageBar(w, Modifier.weight(1f))
                 Text(
-                    listOf(AccountsApi.percent(w), AccountsApi.resets(w, ::clock)).filter { it.isNotBlank() }.joinToString("  "),
+                    listOf(AccountsApi.percent(w), AccountsApi.resets(w) { dayClock(it) }).filter { it.isNotBlank() }.joinToString("  "),
                     style = MaterialTheme.typography.labelMedium, color = if (AccountsModel.high(w)) tc.decisionInk else tc.muted, maxLines = 1,
                 )
             }
@@ -155,7 +155,7 @@ private fun UsageBar(w: UsageWindow?, modifier: Modifier = Modifier) {
 @Composable
 fun SeatAccount(board: AccountsBoard?, address: String?, account: String?, defaultAccount: String?, modifier: Modifier = Modifier) {
     val acc = account?.takeIf { it.isNotBlank() }
-    val extra = AccountsApi.now(board, address) ?: acc?.let { AccountsApi.movedTo(board, address, it) }?.let { AccountsApi.movedLine(it, ::clock) }
+    val extra = AccountsApi.now(board, address) ?: acc?.let { AccountsApi.movedTo(board, address, it) }?.let { AccountsApi.movedLine(it) { t -> dayClock(t) } }
     if (acc == null && extra == null) return
     Row(modifier.heightIn(min = 20.dp), verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(8.dp)) {
         acc?.let { AccountBadge(it, isDefault = it == defaultAccount) }
