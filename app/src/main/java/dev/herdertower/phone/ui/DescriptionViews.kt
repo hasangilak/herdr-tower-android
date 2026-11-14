@@ -77,7 +77,8 @@ fun PrAbout(p: DecisionPr, modifier: Modifier = Modifier) {
     var open by rememberSaveable(p.key) { mutableStateOf(false) }
     Column(modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
         when (about) {
-            is DescriptionModel.About.Summary -> Text(about.text, style = MaterialTheme.typography.bodyMedium, color = tc.text, maxLines = 4, overflow = TextOverflow.Ellipsis)
+            // At most two sentences (the tower cuts one that ran on): shown whole.
+            is DescriptionModel.About.Summary -> Text(about.text, style = MaterialTheme.typography.bodyMedium, color = tc.text)
             is DescriptionModel.About.Opening -> Text(about.text, style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 2, overflow = TextOverflow.Ellipsis)
             is DescriptionModel.About.Missing -> Text(DescriptionModel.missingLine(about.asked), style = MaterialTheme.typography.bodySmall, color = tc.decisionInk)
         }

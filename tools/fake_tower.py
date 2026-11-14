@@ -1089,6 +1089,20 @@ def quiet_world():
          "title": "Which microscope drawing?", "why": "Design choice", "detail": "",
          "options": [{"label": "B, magnified view", "why": "the tower's pick: it reads at small sizes", "pick": True}, {"label": "A", "why": "", "pick": False}, {"label": "C", "why": "", "pick": False}],
          "prs": [], "first_ms": now() - 4 * MIN},
+        # The tower's merge card as it is now: only the PRs ready for the user (its drafts wait outside it), each saying
+        # what it does; one without a description says so, and its session was asked for one.
+        {"id": "d-gaps", "key": "merge:isa:example/support", "kind": "merge", "space": "isa", "sessions": [],
+         "title": "Merge PR #839 into dev, then PR #842 into dev (example/support)", "why": "merge", "detail": "", "options": [],
+         "prs": [{"repo": "example/support", "number": 839, "base": "dev", "title": "Support Studio: call Unanswered \"Knowledge gaps\"",
+                  "body": "## Summary\n\nSupport Studio's **Unanswered** page is now called **Knowledge gaps**: in the studio column, the breadcrumb, the page title "
+                          "and the assistant's manifest (en \"Knowledge gaps\", de \"Wissenslücken\", fr \"Lacunes de connaissances\").\n\n"
+                          "The route stays `/support/setup/unanswered`, so no redirect is needed.\n\n## Testing\n\n- ran the i18n check and the breadcrumb tests\n"
+                          "- opened the page in all three languages",
+                  "summary": "Support Studio's Unanswered page is renamed Knowledge gaps everywhere users see it, in English, German and French. "
+                             "The web address stays the same, so existing links keep working and there's no migration."},
+                 {"repo": "example/support", "number": 842, "base": "dev", "title": "Support Studio: count open knowledge gaps in the column",
+                  "body": "", "asked_body": True}],
+         "first_ms": now() - 45 * MIN},
         {"id": "d-pr", "key": "merge:example/mediaroom", "kind": "merge", "space": "isa", "sessions": [],
          "title": "2 pull requests ready to merge", "why": "Merge", "detail": "",
          "options": [],
@@ -1259,7 +1273,9 @@ def d_pr(p, d):
     checks = {"passing": "pass", "failing": "fail", "pending": "pending"}.get((view.get("checks") or {}).get("state"), "none")
     failing = (view.get("checks") or {}).get("failing") or []
     note = {"pass": "checks passing", "pending": "checks running", "none": "no checks ran"}.get(checks) or f"{len(failing)} check{'s' if len(failing) != 1 else ''} failing: {', '.join(failing)}"
-    return {"key": k, "repo": p["repo"], "number": p["number"], "base": p["base"], "title": view.get("title", ""), "url": view.get("url", f"https://github.com/{p['repo']}/pull/{p['number']}"),
+    # What it does (a tower with descriptions): its GitHub description ("" none), its summary, and whether its session was asked for one.
+    about = {f: p[f] for f in ("body", "summary", "asked_body") if f in p}
+    return {**about, "key": k, "repo": p["repo"], "number": p["number"], "base": p["base"], "title": view.get("title", p.get("title", "")), "url": view.get("url", f"https://github.com/{p['repo']}/pull/{p['number']}"),
             "checks": checks, "note": note, "session": view.get("session"), "merge": view.get("merge") or {"can": True, "blocked": None, "needs_override": None, "warnings": []},
             **({"score": view["score"]} if view.get("score") else {}), **({"validation": view["validation"]} if view.get("validation") else {}), **({"impact": view["impact"]} if view.get("impact") else {})}
 
