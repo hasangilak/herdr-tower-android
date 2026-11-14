@@ -91,6 +91,8 @@ data class StateAgent(
     val jobs: List<AgentJob> = emptyList(),
     /** Servers it keeps up (a dev server, a process holding a port): never jobs, never stuck. */
     val servers: List<AgentServer> = emptyList(),
+    /** How its turn goes while it works (a tower with `progress`). */
+    val progress: SessionProgress? = null,
 )
 
 /** A job a session runs in the background: what, since when, its last progress, whether it works now or is quiet ([stuck]). */
@@ -394,6 +396,9 @@ data class StreamHello(
 
     /** Each Claude account's usage, and what the failover moved. */
     val accounts: Boolean get() = features.orEmpty().contains("accounts")
+
+    /** How each working session's turn goes, and asking one aside (`/v1/sessions/{t}/progress`). */
+    val progress: Boolean get() = features.orEmpty().contains("progress")
 
     /** "Merge all N" from the phone: the tower merges a card's PRs in order (`/v1/decisions/{id}/merge-all`). */
     val mergeChain: Boolean get() = features.orEmpty().contains("merge_chain")

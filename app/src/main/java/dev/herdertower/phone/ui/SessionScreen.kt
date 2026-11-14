@@ -5,6 +5,11 @@ import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
+import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.size
+import androidx.compose.ui.Alignment
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.heightIn
@@ -105,6 +110,8 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, on
                 SectionLabel(if (sv.size == 1) "A server up" else "${sv.size} servers up")
                 sv.forEach { v -> Text(SessionModel.serverLine(v), Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodyMedium, color = tc.muted) }
             }
+            // While it works: how its turn goes, and asking it aside without stopping it.
+            ProgressBox(session, address, stateAgent?.progress ?: mission?.sessions?.firstOrNull { it.address == address }?.progress, s.status, history)
             if (said.isNotBlank()) {
                 SectionLabel("Last said")
                 Text(said, Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodyLarge, color = tc.muted)
@@ -161,6 +168,84 @@ private fun LegacyApproval(session: TowerSession, address: String) {
             BigAnswer("Approve", primary = true, enabled = !busy) { answer(true) }
             BigAnswer("Refuse", primary = false, enabled = !busy) { answer(false) }
             done?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = tc.muted) }
+        }
+    }
+}
+
+/**
+ * A working session's progress line (cyan; amber once its last write is 10
+ * min old), its task list when it keeps one, and "How is it going?": the
+ * session is asked aside, without stopping it ("Asking it aside…", up to
+ * ~90 s), with an optional question; its answer shows here, with why when
+ * it was read from its transcript instead. The last such answer from the
+ * history shows too.
+ */
+@Composable
+private fun ProgressBox(
+    session: TowerSession, address: String, progress: dev.herdertower.phone.api.SessionProgress?, status: String,
+    history: List<dev.herdertower.phone.api.HistoryEntry>,
+) {
+    val on by session.progressSupported.collectAsStateWithLifecycle()
+    val scope = rememberCoroutineScope()
+    val snack = LocalSnack.current
+    var asking by remember(address) { mutableStateOf(false) }
+    var question by remember(address) { mutableStateOf("") }
+    var answer by remember(address) { mutableStateOf<dev.herdertower.phone.api.ProgressAnswer?>(null) }
+    val now = rememberNow(progress != null)
+    val working = progress != null || status == "working"
+    // The last answer the history has for it (asked from the Mac, the brain or here).
+    val lastAnswer = history.lastOrNull { it.session == address && it.kind == "progress" && it.status in setOf("btw", "transcript") }
+    if (!on && progress == null) return
+    progress?.let { p ->
+        SectionLabel("How its turn goes")
+        Text(
+            dev.herdertower.phone.api.ProgressApi.line(p, now), Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodyLarge,
+            color = if (dev.herdertower.phone.api.ProgressApi.quiet(p, now)) tc.decisionInk else tc.live,
+        )
+        if (p.items.isNotEmpty()) Column(Modifier.padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
+            p.items.forEach { i ->
+                val (mark, color) = when (i.status) {
+                    "completed" -> "✓" to tc.live
+                    "in_progress" -> "▸" to tc.text
+                    else -> "○" to tc.faint
+                }
+                Text("$mark  ${if (i.status == "in_progress") i.active.ifBlank { i.subject } else i.subject}", style = MaterialTheme.typography.bodyMedium, color = color)
+            }
+        }
+    }
+    if (on && working) {
+        androidx.compose.material3.OutlinedTextField(
+            question, { question = it }, Modifier.fillMaxWidth(), enabled = !asking, maxLines = 3,
+            placeholder = { Text("Ask it something (optional)") },
+        )
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            PillButton(if (asking) "Asking it aside…" else "How is it going?", primary = true, enabled = !asking) {
+                asking = true
+                scope.launch {
+                    session.askProgress(address, question)
+                        .onSuccess { answer = it; question = "" }
+                        .onFailure { snack("Couldn't ask it: ${TowerSession.describe(it)}") }
+                    asking = false
+                }
+            }
+            if (asking) {
+                Spacer(Modifier.width(12.dp))
+                androidx.compose.material3.CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp, color = tc.live)
+            }
+        }
+    }
+    val shown = answer
+    if (shown != null) Card {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("You asked: ${shown.asked}", style = MaterialTheme.typography.labelMedium, color = tc.faint, maxLines = 3, overflow = TextOverflow.Ellipsis)
+            MarkdownText(shown.answer.ifBlank { "It said nothing." }, tc.text)
+            dev.herdertower.phone.api.ProgressApi.viaNote(shown)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = tc.faint) }
+        }
+    } else if (lastAnswer != null) Card {
+        Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Text("Asked aside ${ago(lastAnswer.at)}", style = MaterialTheme.typography.labelMedium, color = tc.faint)
+            MarkdownText(lastAnswer.text, tc.text)
+            if (lastAnswer.status == "transcript") Text("From its transcript", style = MaterialTheme.typography.bodySmall, color = tc.faint)
         }
     }
 }

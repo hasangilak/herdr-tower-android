@@ -910,6 +910,22 @@ class TowerSessionTest {
         assertTrue(s.stopMerges("m1").getOrThrow().stopped)
     }
 
+    /** "How is it going?": the session asked aside, the question in the body, the answer back. */
+    @Test fun aWorkingSessionIsAskedAside() = runBlocking {
+        extra = { r ->
+            if (r.url.encodedPath == "/v1/sessions/t7/progress") json("""{"session":"t7","name":"api","status":"working","asked":"is the migration nearly done?","via":"btw","answer":"Two of three tables are moved.","why":null,"progress":null}""")
+            else null
+        }
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "the stream") { s.link.value is Link.Live }
+        val a = s.askProgress("t7", " is the migration nearly done? ").getOrThrow()
+        assertEquals("Two of three tables are moved.", a.answer)
+        assertTrue(calls.any { it == "POST /v1/sessions/t7/progress {\"question\":\"is the migration nearly done?\"}" })
+        s.askProgress("t7", "").getOrThrow()
+        assertTrue(calls.any { it == "POST /v1/sessions/t7/progress {}" })
+    }
+
     // A tower from before the queue: the same from its questions and its waiting PRs
 
     private val escalated = """{"id":"q2","session":"t5","name":"web","kind":"claude-permission","title":"Run a command","detail":"rm -rf build/",""" +
