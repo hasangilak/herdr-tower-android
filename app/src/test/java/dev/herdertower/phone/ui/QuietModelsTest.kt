@@ -10,6 +10,7 @@ import dev.herdertower.phone.api.Job
 import dev.herdertower.phone.api.MissionSession
 import dev.herdertower.phone.api.MissionsResponse
 import dev.herdertower.phone.api.Mission
+import dev.herdertower.phone.api.PrGate
 import dev.herdertower.phone.api.Screenshot
 import dev.herdertower.phone.api.Setup
 import dev.herdertower.phone.voice.TalkTarget
@@ -23,6 +24,27 @@ import org.junit.Test
 /** What the new screens say, in words: the queue, a card, the reply, the talk button, the record, spaces, a session, a launch. */
 class QuietModelsTest {
     // The queue
+
+    /** 14 Nov: eyzflow's card had two drafts among four PRs; on the phone each still looked like a Merge answer. */
+    @Test fun aMergesDraftIsShownAsLeftOut() {
+        val ready = DecisionPr(repo = "o/app", number = 839, base = "dev", merge = PrGate(can = true))
+        val draft = DecisionPr(repo = "o/app", number = 840, base = "dev", merge = PrGate(can = false, blocked = "It's a draft: mark it ready for review first."))
+        val failing = DecisionPr(repo = "o/app", number = 841, base = "dev", merge = PrGate(can = true, needsOverride = "1 check failing: lint."))
+        val old = DecisionPr(repo = "o/app", number = 842, base = "dev")
+        val d = Decision(
+            kind = "merge", title = "Merge PR #839 into dev, then PR #842 into dev (o/app)",
+            options = listOf(
+                DecisionOption(label = "Merge PR #839 into dev", pick = true),
+                DecisionOption(label = "#840 isn't in this merge: it's a draft"),
+                DecisionOption(label = "#841 isn't in this merge: its checks fail"),
+                DecisionOption(label = "Merge PR #842 into dev"),
+            ),
+            prs = listOf(ready, draft, failing, old),
+        )
+        assertEquals(listOf(false, true, true, false), d.options.indices.map { DecisionModel.leftOut(d, it) })
+        // Only a merge's PRs are left out of anything.
+        assertFalse(DecisionModel.leftOut(d.copy(kind = "question"), 1))
+    }
 
     @Test fun theQueuesLine() {
         assertEquals("3 need you" to "3 working", DecisionModel.status(3, 3, reach = true))

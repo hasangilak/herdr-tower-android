@@ -62,6 +62,14 @@ import kotlinx.coroutines.launch
 
 /** What a decision's card says, in words (the card and the tests read these). */
 object DecisionModel {
+    /**
+     * A merge's PR that isn't in its merge: a draft, conflicts, checks that
+     * fail (the tower's `merge` gate, as the Mac's card leaves it out). Its
+     * answer is shown as not included, with why, and is never a merge button.
+     */
+    fun leftOut(d: Decision, i: Int): Boolean =
+        d.kind == "merge" && d.prs.getOrNull(i)?.merge?.let { it.blocked != null || it.needsOverride != null } == true
+
     /** "3 sessions wait · 2 min". */
     fun stakeLine(d: Decision, now: Long): String = listOf(DecisionsApi.stake(d), DecisionsApi.waited(d, now)).filter { it.isNotBlank() }.joinToString(" · ")
 
@@ -291,7 +299,9 @@ fun DecisionCard(
                 !d.open -> DoneLine(d)
                 else -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
                     if (DecisionModel.answerable(d)) d.options.forEachIndexed { i, o ->
-                        BigAnswer(o.label, primary = o.pick, why = o.why) { host.answer(d, i) }
+                        // Left out of the merge: its words say so ("#840 isn't in this merge: it's a draft"), not a button.
+                        val out = DecisionModel.leftOut(d, i)
+                        BigAnswer(o.label, primary = o.pick && !out, why = o.why, enabled = !out) { host.answer(d, i) }
                         // A merge's row, as the Mac's: a breaking change first (rose), its review score (amber: needs review; cyan: low
                         // risk; not when the break is its only reason), its planned checks, or that nothing outside depends on it.
                         if (d.kind == "merge") d.prs.getOrNull(i)?.let { p ->
