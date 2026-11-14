@@ -515,9 +515,11 @@ fun DecisionCard(
             }
             Text(d.title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, color = tc.text, fontWeight = FontWeight.SemiBold)
             DecisionModel.backLine(d)?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.decisionInk, fontWeight = FontWeight.Medium) }
+            // A plan's revision shows its diff whole; anything else in a box that scrolls.
+            val whole = dev.herdertower.phone.api.PlansApi.isRevisionCard(d)
             DecisionModel.detail(d)?.let { detail -> Text(
                 detail,
-                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(tc.screen).heightIn(max = 160.dp).verticalScroll(rememberScrollState()).padding(12.dp),
+                Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(tc.screen).then(if (whole) Modifier else Modifier.heightIn(max = 160.dp).verticalScroll(rememberScrollState())).padding(12.dp),
                 style = MaterialTheme.typography.bodySmall.copy(fontFamily = FontFamily.Monospace), color = tc.screenText,
             ) }
             // A merge with an answer per PR says it all in its answers; its links are in the menu.

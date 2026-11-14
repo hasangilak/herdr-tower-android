@@ -1103,6 +1103,15 @@ def quiet_world():
                  {"repo": "example/support", "number": 842, "base": "dev", "title": "Support Studio: count open knowledge gaps in the column",
                   "body": "", "asked_body": True}],
          "first_ms": now() - 45 * MIN},
+        {"id": "d-planq", "key": "plan:p4:q3", "kind": "choice", "space": "sandbox", "sessions": [], "why": "plan",
+         "title": "Publish to MediaRoom at once, or batch every 5 minutes?", "detail": "decides stage 3's webhook",
+         "options": [{"label": "At once", "why": "simplest", "pick": True}, {"label": "Batch every 5 minutes", "why": "fewer calls", "pick": False}], "prs": [],
+         "first_ms": now() - 12 * MIN},
+        {"id": "d-planrev", "key": "plan:p3:rev:3", "kind": "choice", "space": "isa", "sessions": [], "why": "plan",
+         "title": "Revise isa's plan: MediaRoom wants signed payloads?",
+         "detail": "version 2 → 3. Why: MediaRoom's webhook wants a signed payload (f2).\n- Stage s3 signs its payload with the MediaRoom key\n- A pre-check: the key is on dev",
+         "options": [{"label": "Apply it", "why": "", "pick": True}, {"label": "Keep the plan as it is", "why": "", "pick": False}], "prs": [],
+         "first_ms": now() - 25 * MIN},
         {"id": "d-pr", "key": "merge:example/mediaroom", "kind": "merge", "space": "isa", "sessions": [],
          "title": "2 pull requests ready to merge", "why": "Merge", "detail": "",
          "options": [],
@@ -1216,6 +1225,10 @@ def quiet_world():
     kind = os.environ.get("FAKE_PLAN", "ready")
     STATE["auto_merge"] = kind != "ready-off"
     STATE["plan"] = fake_plan(kind)
+    # Planning v2: the open plan's stages, questions (one in every status) and assumptions; a live plan launched as isa, with 2 revisions (one proposed).
+    if STATE["plan"]:
+        STATE["plan"].update(plan_v2())
+    STATE["plans_live"] = [plan_live()]
     H_ = lambda mins, kind, **kw: dict({"at": T0 - mins * MIN, "kind": kind}, **kw)
     HISTORY[:] = sorted([
         H_(10 * 60 + 40, "answered", session="s5", name="mediaroom", space="isa", text="answered for you: Where to start? -> Start with the small fix to the analysis description."),
@@ -1289,7 +1302,9 @@ def d_view(d):
         v["options"] = [{"label": f"Merge #{p['number']} into {p['base']}", "why": p["note"], "pick": i == 0 and p["checks"] == "pass" and not prod(p["base"])} for i, p in enumerate(v["prs"])]
     picks = [o["label"] for o in v["options"] if o.get("pick")]
     v["pick"] = picks[0] if picks else None
-    v.pop("detail", None)
+    # As the tower: a decision's detail when it has one (a plan revision's diff, say); none sent when empty.
+    if not v.get("detail"):
+        v.pop("detail", None)
     return v
 
 
@@ -1328,6 +1343,68 @@ def m_active(name):
     if a["now"]:
         v["since_ms"] = now() - a["since"]
     return v
+
+
+def _ck(i, what, how, evidence, status="planned", proof=None):
+    c = {"id": f"c{i}", "what": what, "how": how, "evidence": evidence, "status": status}
+    if proof:
+        c.update(proof=proof, by="s6", at_ms=now() - 20 * MIN)
+    return c
+
+
+def plan_v2():
+    """The open plan's v2 parts: 4 stages (one done, one under way, one waiting on pre-checks, one waiting), 4 questions in every status, 3 assumptions."""
+    stages = [
+        {"id": "s1", "title": "Spike: can the editor save to the sandbox?", "kind": "spike", "done_when": "a click saves a change to the sandbox and reads it back",
+         "prs": [], "pre": [_ck(1, "The sandbox API takes a write", "curl -X POST the sandbox's /elements with a test change", "the 200 answer", "passed", "200 OK, element e17 written")],
+         "post": [_ck(2, "A change saved from the editor reads back", "save a title in the editor, reload", "a screenshot of the reloaded page", "passed", "/tower/attachments/screenshots/spike-save.png")],
+         "state": "done"},
+        {"id": "s2", "title": "The editor's save, behind a flag", "kind": "build", "done_when": "editors save changes on dev with the flag on, nothing changes with it off",
+         "after": ["s1"], "prs": [1, 2],
+         "pre": [_ck(1, "The flag exists on dev", "read EDITOR_SAVE in dev's config", "the config line", "passed", "EDITOR_SAVE=false on dev")],
+         "post": [_ck(2, "Saving works with the flag on", "npm test -- editor-save", "test output", "passed", "12 passing (editor-save)"),
+                  _ck(3, "Nothing saves with the flag off", "flag off, click Save on dev", "the network log", "planned")],
+         "state": "active"},
+        {"id": "s3", "title": "Publish a change across MediaRoom", "kind": "build", "done_when": "a published change shows in MediaRoom within a minute",
+         "after": ["s2"], "prs": [3], "pre": [_ck(1, "MediaRoom's webhook is reachable from dev", "curl the webhook from the dev box", "the answer", "planned")],
+         "post": [_ck(2, "A change shows in MediaRoom", "publish a title on dev, open MediaRoom", "a screenshot, with the time", "planned")],
+         "state": "ready"},
+        {"id": "s4", "title": "Release to production", "kind": "release", "done_when": "the editor saves on production and the health check stays green",
+         "after": ["s3"], "prs": [4], "post": [_ck(1, "Health stays green during the deploy", "watch /health during the deploy", "the health log", "planned")],
+         "state": "waiting"},
+    ]
+    questions = [
+        {"id": "q1", "text": "Who may publish: every editor, or only leads?", "why": "decides the role check in stage 2", "options": [{"label": "Every editor"}, {"label": "Only leads"}],
+         "recommended": 1, "theirs": True, "stage": "s2", "status": "answered", "answer": "Only leads", "by": "you", "at_ms": now() - 50 * MIN},
+        {"id": "q2", "text": "Which flag name?", "options": [{"label": "EDITOR_SAVE"}], "recommended": 0, "theirs": False, "status": "answered", "answer": "EDITOR_SAVE, as dev has it", "by": "tower"},
+        {"id": "q3", "text": "Publish to MediaRoom at once, or batch every 5 minutes?", "why": "decides stage 3's webhook", "options": [{"label": "At once", "why": "simplest"}, {"label": "Batch every 5 minutes", "why": "fewer calls"}],
+         "recommended": 0, "theirs": True, "stage": "s3", "status": "asked", "card": "d-planq"},
+        {"id": "q4", "text": "Does the sandbox keep a change's history?", "theirs": False, "stage": "s3", "status": "with-tower"},
+    ]
+    assumptions = [
+        {"id": "a1", "text": "The sandbox API takes writes from the editor", "check": "a test write in the spike", "by": "s1", "status": "holds", "proof": "200 OK"},
+        {"id": "a2", "text": "MediaRoom's webhook takes our payload as it is", "check": "a test call before stage 3", "by": "s3", "status": "open"},
+        {"id": "a3", "text": "No migration is needed for saved changes", "check": "read the schema", "status": "open"},
+    ]
+    return {"stages": stages, "progress": {"stages": 4, "done": 1, "at": 2}, "questions": questions, "open_questions": 2, "assumptions": assumptions,
+            "findings": [], "revisions": [], "version": 1}
+
+
+def plan_live():
+    """A launched plan (plans_live), its space isa: version 3, 2 revisions (one small and applied, one big and proposed), a finding that waits."""
+    v = plan_v2()
+    v["stages"][0]["state"] = "done"
+    v["stages"][1]["state"] = "failing"
+    v["stages"][1]["post"][1]["status"] = "failed"
+    v["stages"][1]["post"][1]["proof"] = "with the flag off, Save still sent a PATCH"
+    return dict(v, id="p3", status="live", launched="isa", url="https://claude.ai/artifact/fake-plan-p3", version=3,
+                progress={"stages": 4, "done": 1, "at": 2}, open_questions=0,
+                questions=[dict(q, status="answered", answer=q.get("answer") or "At once", by=q.get("by") or "you") for q in v["questions"]],
+                findings=[{"id": "f1", "at_ms": now() - 90 * MIN, "kind": "split-pr", "text": "PR 2 is two changes: the save and the flag", "stage": "s2", "revision": 2},
+                          {"id": "f2", "at_ms": now() - 30 * MIN, "kind": "assumption-wrong", "text": "MediaRoom's webhook wants a signed payload", "stage": "s3", "assumption": "a2", "revision": 3},
+                          {"id": "f3", "at_ms": now() - 5 * MIN, "kind": "check-cant-run", "text": "The health log isn't reachable from the phone's network", "stage": "s4"}],
+                revisions=[{"n": 2, "at_ms": now() - 85 * MIN, "by": "tower", "why": "PR 2 split in two", "findings": ["f1"], "changes": ["Stage s2 delivers PR 1, PR 2, PR 5", "PR 5: the flag on its own"], "size": "small", "status": "applied"},
+                           {"n": 3, "at_ms": now() - 25 * MIN, "by": "tower", "why": "MediaRoom wants signed payloads", "findings": ["f2"], "changes": ["Stage s3 signs its payload with the MediaRoom key", "A pre-check: the key is on dev"], "size": "big", "status": "proposed", "card": "d-planrev"}])
 
 
 # Each space's and session's brief (herder-tower's `brief` on a mission and its sessions): where it is, in plain parts.

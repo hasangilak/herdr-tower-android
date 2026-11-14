@@ -100,6 +100,11 @@ fun PlanScreen(session: TowerSession, onBack: () -> Unit) {
                     Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodyLarge, color = tc.muted,
                 )
             }
+            // Planning v2: no plan goes out with questions open; then its stages, questions and assumptions.
+            PlansApi.launchWaits(plan)?.let { Text(it, Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodyMedium, color = tc.decisionInk) }
+            PlanStages(plan)
+            PlanQuestions(plan)
+            PlanAssumptions(plan)
             if (scores && plan.prs.isNotEmpty()) {
                 Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
                     SectionLabel("Pull requests")

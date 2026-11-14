@@ -72,4 +72,55 @@ class PlansTest {
         assertEquals(false, odd.autoMerge)
         assertNull(PlansApi.parse(state("\"p9\"").plan))
     }
+
+    /** Planning v2: stages, questions, assumptions, and a live plan's revisions, in the Mac's words. */
+    @Test fun aPlanSaysItsStagesQuestionsAndRevisions() {
+        val json = TowerJson.parseToJsonElement(
+            """{"id":"p4","status":"ready","version":1,"open_questions":2,"progress":{"stages":4,"done":1,"at":2},""" +
+                """"stages":[{"id":"s1","title":"Spike","kind":"spike","done_when":"it saves","post":[{"id":"c1","what":"w","how":"h","evidence":"e","status":"passed","proof":"200 OK"}],"state":"done"},""" +
+                """{"id":"s2","title":"Build","kind":"build","done_when":"editors save","after":["s1"],"prs":[1,2],"pre":[{"id":"c1","what":"w","how":"h","evidence":"the config line","status":"planned"}],""" +
+                """"post":[{"id":"c2","what":"w","how":"h","evidence":"e","status":"failed","proof":"still sent a PATCH"},{"id":"c3","what":"w","how":"h","evidence":"e","status":"not_run"}],"state":"failing"}],""" +
+                """"questions":[{"id":"q1","text":"Who?","theirs":true,"status":"answered","answer":"Only leads","by":"you"},{"id":"q2","text":"Flag?","status":"answered","answer":"EDITOR_SAVE","by":"tower"},""" +
+                """{"id":"q3","text":"When?","status":"asked","card":"d1"},{"id":"q4","text":"History?","status":"with-tower"}],""" +
+                """"assumptions":[{"id":"a1","text":"It takes writes","check":"a test write","by":"s1","status":"holds"},{"id":"a2","text":"No migration","check":"read the schema","status":"open"}],""" +
+                """"findings":[{"id":"f1","text":"split","revision":2},{"id":"f3","text":"can't run"}],""" +
+                """"revisions":[{"n":2,"why":"PR 2 split in two.","findings":["f1"],"changes":["a"],"size":"small","status":"applied"},{"n":3,"why":"signed payloads","findings":["f2"],"size":"big","status":"proposed"}]}""",
+        )
+        val p = PlansApi.parse(json)!!
+        assertEquals("Stage 2 of 4 · 1 done", PlansApi.stagesHead(p))
+        assertEquals("All 4 done", PlansApi.stagesHead(p.copy(progress = PlanProgress(4, 4, null))))
+        assertEquals("4 stages", PlansApi.stagesHead(p.copy(progress = PlanProgress(4, 0, 1))))
+        assertEquals("Done" to false, PlansApi.stageWord("done"))
+        assertEquals("Failing" to true, PlansApi.stageWord(p.stages[1].state))
+        assertEquals("Pre-checks first" to false, PlansApi.stageWord("ready"))
+        assertEquals("Delivers PR 1, PR 2 · after s1", PlansApi.stageLine(p.stages[1]))
+        assertEquals(listOf("○", "✗", "–"), (p.stages[1].pre + p.stages[1].post).map { PlansApi.checkMark(it).first })
+        assertEquals("Evidence: the config line", PlansApi.checkResult(p.stages[1].pre[0]))
+        assertEquals("passed: 200 OK", PlansApi.checkResult(p.stages[0].post[0]))
+        assertEquals(
+            listOf(
+                "Answered by you: Only leads", "Answered by the tower: EDITOR_SAVE",
+                "In your queue: answer it there, on the Mac or the phone.", "With the tower: it answers what is routine, and asks you the rest.",
+            ),
+            p.questions.map { PlansApi.questionLine(it) },
+        )
+        assertEquals("2 open of 4", PlansApi.questionsHead(p))
+        assertEquals("2 questions of the plan are open: Launch waits for their answers, so no plan goes out with questions on its page.", PlansApi.launchWaits(p))
+        assertEquals(null, PlansApi.launchWaits(p.copy(openQuestions = 0)))
+        assertEquals("Checked by s1: a test write", PlansApi.assumptionLine(p.assumptions[0]))
+        assertEquals("Checked: read the schema", PlansApi.assumptionLine(p.assumptions[1]))
+        assertEquals("Plan · version 1 · Stage 2 of 4 · 1 done", PlansApi.liveHead(p))
+        assertEquals("Done when: editors save · 0 of 3 checks passed", PlansApi.liveStageLine(p.stages[1]))
+        assertEquals("1 finding waits for the plan's revision.", PlansApi.findingsWait(p))
+        assertEquals(
+            listOf("Revision 3 · waiting for your word: signed payloads (from f2)", "Revision 2 · small, applied by itself: PR 2 split in two (from f1)"),
+            PlansApi.lastRevisions(p).map { PlansApi.revisionLine(it) },
+        )
+        // A space's live plan, by its name in any case.
+        val live = PlansApi.live(TowerJson.parseToJsonElement("""[{"id":"p3","status":"live","launched":"ISA"},{"bad":[}]""".replace("[}]", "1}]")))
+        assertEquals("p3", PlansApi.liveOf(live, "isa")?.id)
+        // A big revision's card shows its diff whole; a plan question's doesn't need to.
+        assertTrue(PlansApi.isRevisionCard(Decision(why = "plan", key = "plan:p3:rev:3")))
+        assertFalse(PlansApi.isRevisionCard(Decision(why = "plan", key = "plan:p3:q3")))
+    }
 }
