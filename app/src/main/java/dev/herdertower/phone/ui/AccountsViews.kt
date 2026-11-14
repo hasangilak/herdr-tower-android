@@ -1,7 +1,6 @@
 package dev.herdertower.phone.ui
 
 import androidx.compose.foundation.background
-import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -14,22 +13,17 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.filled.KeyboardArrowDown
-import androidx.compose.material.icons.filled.KeyboardArrowUp
-import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.saveable.rememberSaveable
-import androidx.compose.runtime.setValue
+import androidx.compose.runtime.remember
+import androidx.lifecycle.compose.collectAsStateWithLifecycle
+import androidx.compose.ui.semantics.heading
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.semantics.Role
 import androidx.compose.ui.semantics.contentDescription
 import androidx.compose.ui.semantics.semantics
 import androidx.compose.ui.text.font.FontWeight
@@ -56,6 +50,10 @@ object AccountsModel {
         }
     }
 
+    /** The section's line under its title: what [head] says after "Accounts · ", or null when nothing stands out. */
+    fun status(b: AccountsBoard, now: Long, clock: (Long) -> String = { dayClock(it) }): String? =
+        head(b, now, clock).removePrefix("Accounts").removePrefix(" · ").takeIf { it.isNotBlank() }?.replaceFirstChar { it.uppercase() }
+
     /** A window's row: "5h  42%  ↻15:00". */
     fun window(label: String, w: UsageWindow?, clock: (Long) -> String = { dayClock(it) }): String =
         listOf(label, AccountsApi.percent(w), AccountsApi.resets(w, clock)).filter { it.isNotBlank() }.joinToString("  ")
@@ -73,50 +71,56 @@ object AccountsModel {
 }
 
 /**
- * Each Claude account's usage, as the Mac's sidebar strip: one row an
- * account (its badge, its fullest window as a bar, the percent), amber from
- * 80 %, "out until 15:00" while out. Tap: both windows of each, when they
- * reset, and what the failover moved lately.
+ * Each Claude account's usage, in Settings (the Mac's Accounts view): its
+ * status line ("default out until Sun 02:00 (weekly limit)"), then each
+ * account with its windows as bars (the 5-hour one only when it has one),
+ * amber from 80 %, when each resets and "out until" while out; who waits
+ * for an account, the main tower and the sessions outside every space with
+ * their accounts, and what the failover moved lately. Live: it follows the
+ * tower's state.
  */
 @Composable
-fun AccountsStrip(
-    board: AccountsBoard, now: Long, modifier: Modifier = Modifier,
-    /** The main tower and the sessions outside every space, with their accounts (the spaces' own are on each space's screen). */
-    outside: List<dev.herdertower.phone.api.Seat> = emptyList(),
-) {
-    var open by rememberSaveable { mutableStateOf(false) }
+fun AccountsSection(session: dev.herdertower.phone.data.TowerSession, modifier: Modifier = Modifier) {
+    val state by session.state.collectAsStateWithLifecycle()
+    val missions by session.missions.collectAsStateWithLifecycle()
+    val board = remember(state?.accounts) { AccountsApi.parse(state?.accounts)?.takeIf { it.list.isNotEmpty() } } ?: return
+    val now = rememberNow(true)
+    val inSpaces = missions.spaces.flatMap { m -> m.sessions.map { it.address } + listOfNotNull(m.tower?.address) }.toSet()
+    val outside = AccountsApi.outside(state?.brains.orEmpty(), state?.agents.orEmpty(), inSpaces)
     Column(
-        modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(tc.card)
-            .clickable(role = Role.Button, onClickLabel = if (open) "Fold the accounts" else "Show each account's usage") { open = !open }
-            .padding(horizontal = 14.dp, vertical = 10.dp),
-        verticalArrangement = Arrangement.spacedBy(8.dp),
+        modifier.fillMaxWidth().clip(RoundedCornerShape(22.dp)).background(tc.card).padding(16.dp),
+        verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
-        Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(AccountsModel.head(board, now), Modifier.weight(1f), style = MaterialTheme.typography.labelLarge, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-            Icon(if (open) Icons.Filled.KeyboardArrowUp else Icons.Filled.KeyboardArrowDown, null, Modifier.size(18.dp), tint = tc.faint)
+        Text("Accounts", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleMedium, color = tc.text, fontWeight = FontWeight.SemiBold)
+        AccountsModel.status(board, now)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = tc.muted) }
+        AccountsPanel(board, now, outside)
+    }
+}
+
+/** The accounts, who waits, who runs outside the spaces, and the moves: what [AccountsSection] shows under its title. */
+@Composable
+fun AccountsPanel(board: AccountsBoard, now: Long, outside: List<dev.herdertower.phone.api.Seat> = emptyList()) {
+    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        board.list.forEach { a -> AccountRow(a, now, whole = true, startsHere = board.startsOn == a.name && !a.default) }
+        board.waiting.takeIf { it.isNotEmpty() }?.let { w ->
+            Text(
+                "Waiting for an account: " + w.joinToString(", ") { it.address } + ". The tower carries on with them when one is back.",
+                style = MaterialTheme.typography.bodySmall, color = tc.decisionInk,
+            )
         }
-        board.list.forEach { a -> AccountRow(a, now, whole = open, startsHere = open && board.startsOn == a.name && !a.default) }
-        if (open) {
-            board.waiting.takeIf { it.isNotEmpty() }?.let { w ->
-                Text(
-                    "Waiting for an account: " + w.joinToString(", ") { it.address } + ". The tower carries on with them when one is back.",
-                    style = MaterialTheme.typography.bodySmall, color = tc.decisionInk,
-                )
-            }
-            if (outside.isNotEmpty()) {
-                Text("Outside the spaces", style = MaterialTheme.typography.labelMedium, color = tc.faint, modifier = Modifier.padding(top = 2.dp))
-                val def = board.list.firstOrNull { it.default }?.name
-                outside.forEach { s ->
-                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
-                        Text(s.label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = if (s.tower) tc.text else tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                        SeatAccount(board, s.address, s.account, def)
-                    }
+        if (outside.isNotEmpty()) {
+            Text("Outside the spaces", style = MaterialTheme.typography.labelMedium, color = tc.faint, modifier = Modifier.padding(top = 2.dp))
+            val def = board.list.firstOrNull { it.default }?.name
+            outside.forEach { s ->
+                Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(s.label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = if (s.tower) tc.text else tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                    SeatAccount(board, s.address, s.account, def)
                 }
             }
-            board.moves.takeLast(4).reversed().takeIf { it.isNotEmpty() }?.let { moves ->
-                Text("Moved lately", style = MaterialTheme.typography.labelMedium, color = tc.faint, modifier = Modifier.padding(top = 2.dp))
-                moves.forEach { m -> Text(AccountsModel.move(m), style = MaterialTheme.typography.bodySmall, color = if (m.how == "failed") tc.failed else tc.muted, maxLines = 2, overflow = TextOverflow.Ellipsis) }
-            }
+        }
+        board.moves.takeLast(4).reversed().takeIf { it.isNotEmpty() }?.let { moves ->
+            Text("Moved lately", style = MaterialTheme.typography.labelMedium, color = tc.faint, modifier = Modifier.padding(top = 2.dp))
+            moves.forEach { m -> Text(AccountsModel.move(m), style = MaterialTheme.typography.bodySmall, color = if (m.how == "failed") tc.failed else tc.muted, maxLines = 2, overflow = TextOverflow.Ellipsis) }
         }
     }
 }

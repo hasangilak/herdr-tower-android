@@ -71,21 +71,11 @@ fun MissionsScreen(session: TowerSession, onSpace: (String) -> Unit, onNew: () -
     var quietOpen by rememberSaveable { mutableStateOf(false) }
     // In the tower's own order, as its window on the Mac lists them.
     val list = missions.spaces
-    // Each Claude account's usage (a tower with accounts): over the spaces, as the Mac's sidebar has it.
-    val accounts = remember(state?.accounts) { dev.herdertower.phone.api.AccountsApi.parse(state?.accounts)?.takeIf { it.list.isNotEmpty() } }
-    val now = rememberNow(accounts != null)
 
     Column(Modifier.fillMaxSize()) {
         TopBar("Spaces", MissionsModel.counts(missions))
         PullToRefreshBox(refreshing, { refreshing = true; scope.launch { session.refreshLists(); refreshing = false } }, Modifier.fillMaxSize()) {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                accounts?.let { b ->
-                    item(key = "accounts") {
-                        val inSpaces = missions.spaces.flatMap { m -> m.sessions.map { it.address } + listOfNotNull(m.tower?.address) }.toSet()
-                        val outside = dev.herdertower.phone.api.AccountsApi.outside(state?.brains.orEmpty(), state?.agents.orEmpty(), inSpaces)
-                        AccountsStrip(b, now, Modifier.padding(bottom = 8.dp), outside = outside)
-                    }
-                }
                 plan?.let { p -> item(key = "plan") { PlanRow(p, scores, onClick = onPlan) } }
                 if (list.isEmpty() && missions.quiet.isEmpty() && plan == null) item(key = "none") {
                     EmptyBox("No spaces yet. Start one from a goal: the tower opens its sessions and hands the work out.", Modifier.padding(horizontal = 2.dp, vertical = 6.dp))

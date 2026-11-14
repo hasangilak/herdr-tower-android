@@ -489,6 +489,9 @@ class QuietModelsTest {
         )
         assertEquals("Accounts · default out until 15:00 (5-hour limit)", AccountsModel.head(board, 5_000, clock))
         assertEquals("Accounts · new sessions start on orca", AccountsModel.head(board, 20_000, clock))
+        // Settings' Accounts section: the same, under its title.
+        assertEquals("Default out until 15:00 (5-hour limit)", AccountsModel.status(board, 5_000, clock))
+        assertNull(AccountsModel.status(board.copy(startsOn = "default"), 20_000, clock))
         assertEquals("orca · moved from default at 15:00", dev.herdertower.phone.api.AccountsApi.seat(board, "t12", "orca", clock))
         assertEquals("default", dev.herdertower.phone.api.AccountsApi.seat(board, "t3", "default", clock))
         assertEquals("fix-login (sandbox): default → orca at 15:00, default hit its 5-hour limit", AccountsModel.move(board.moves.single(), clock))

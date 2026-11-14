@@ -298,6 +298,8 @@ fun SettingsScreen(session: TowerSession, theme: String, onTheme: (String) -> Un
 
             // The tower's own settings: kept on the Mac, changed from here too.
             SectionLabel("The tower")
+            // Each Claude account's usage and what the failover moved (a tower with accounts): live with the tower's state.
+            AccountsSection(session)
             val model by session.model.collectAsStateWithLifecycle()
             model?.let { bm -> BrainSection(bm, session, scope, snack) }
             val qOn by session.questionsSupported.collectAsStateWithLifecycle()
