@@ -82,6 +82,9 @@ class TowerClient(
     /** Voice uploads wait for the transcription. */
     private val slow: OkHttpClient = http.newBuilder().readTimeout(60, TimeUnit.SECONDS).build()
 
+    /** Asking a working session aside takes up to ~90 s: this one waits two and a half minutes. */
+    private val aside: OkHttpClient = http.newBuilder().readTimeout(150, TimeUnit.SECONDS).callTimeout(160, TimeUnit.SECONDS).build()
+
     /** Files up to 6 x 50 MB: give the upload time on a slow network. */
     private val upload: OkHttpClient = http.newBuilder().writeTimeout(5, TimeUnit.MINUTES).readTimeout(2, TimeUnit.MINUTES).build()
 
@@ -383,6 +386,17 @@ class TowerClient(
     /** `POST /v1/merges/{id}/stop`: nothing more of that chain is merged. */
     suspend fun stopMerges(id: String): MergeChain =
         post(MergeChainResponse.serializer(), "{}".toRequestBody(JSON), "merges", id, "stop").merge
+
+    /** `GET /v1/progress`: how each working session's turn goes (a tower with `progress`). */
+    suspend fun progress(): ProgressList = get(ProgressList.serializer(), "progress")
+
+    /**
+     * `POST /v1/sessions/{t}/progress`: asks a session how it is going without
+     * stopping it ([question], or none: what is done, what it does now, what
+     * is left). Up to ~90 s.
+     */
+    suspend fun askProgress(address: String, question: String?): ProgressAnswer =
+        post(ProgressAnswer.serializer(), json(ProgressAsk.serializer(), ProgressAsk(question?.trim()?.takeIf { it.isNotEmpty() })), "sessions", address, "progress", client = aside)
 
     /** `GET /v1/missions`: every open space as a mission, the quiet ones and today's closed ones by name. */
     suspend fun missions(): MissionsResponse = get(MissionsResponse.serializer(), "missions")

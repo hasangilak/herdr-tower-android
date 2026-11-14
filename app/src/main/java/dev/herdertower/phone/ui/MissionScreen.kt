@@ -282,6 +282,8 @@ fun MissionScreen(
             // Which account each runs on, and what the failover moved (a tower with accounts).
             val board = remember(state?.accounts) { dev.herdertower.phone.api.AccountsApi.parse(state?.accounts) }
             fun seat(address: String?, account: String?) = dev.herdertower.phone.api.AccountsApi.seat(board, address, account) { dayClock(it) }
+            // The progress lines' clock: "14 min in · last update 1 min ago" stays true between the tower's reads.
+            val progressNow = rememberNow(m.sessions.any { it.progress != null })
             if (m.sessions.isNotEmpty()) {
                 SectionLabel("Sessions")
                 // Its own tower first, with its account.
@@ -299,8 +301,11 @@ fun MissionScreen(
                     SignRow(
                         sign = { SessionSign(if (s.runsJob) "working" else s.status) },
                         name = dev.herdertower.phone.api.ActsApi.inSpace(s.label, name), right = SessionModel.statusWord(s.statusShown),
-                        // Its brief's "now" when it has one (no separate last words then); else a job it left running, over its last words.
-                        sub = s.brief?.now?.takeIf { it.isNotBlank() } ?: s.job?.line?.takeIf { it.isNotBlank() } ?: SessionModel.said(s, history, jobs),
+                        // While it works, how its turn goes (said against the clock); else its brief's "now" (no separate last words
+                        // then); else a job it left running, over its last words.
+                        sub = s.progress?.let { dev.herdertower.phone.api.ProgressApi.line(it, progressNow) }
+                            ?: s.brief?.now?.takeIf { it.isNotBlank() } ?: s.job?.line?.takeIf { it.isNotBlank() } ?: SessionModel.said(s, history, jobs),
+                        subColor = s.progress?.let { if (dev.herdertower.phone.api.ProgressApi.quiet(it, progressNow)) tc.decisionInk else tc.live },
                         mono = SessionModel.place(s).takeIf { it.isNotBlank() },
                         note = seat(s.address, s.account),
                         onClick = { onSession(s.address) },

@@ -20,6 +20,8 @@ data class MissionSession(
     val job: MissionJob? = null,
     /** Where it is, in a few plain sentences, kept up by the tower (absent from an older tower). */
     val brief: SessionBrief? = null,
+    /** How its turn goes while it works (a tower with `progress`). */
+    val progress: SessionProgress? = null,
 ) {
     val label: String get() = name.ifBlank { address }
 
