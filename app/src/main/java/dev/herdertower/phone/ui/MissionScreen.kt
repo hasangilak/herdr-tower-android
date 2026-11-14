@@ -63,6 +63,23 @@ import kotlinx.coroutines.launch
 
 /** What a session's row and its own screen say about it, from what the phone has. */
 object SessionModel {
+    /** A job's line: "Restart v2 training · since 01:21 · last progress 01:42", "… · quiet", "… · watched". */
+    fun jobLine(j: dev.herdertower.phone.api.AgentJob, clock: (Long) -> String = { dayClock(it) }): String = listOfNotNull(
+        j.what.ifBlank { j.command.orEmpty() }.ifBlank { "A job" },
+        j.sinceMs.takeIf { it > 0 }?.let { "since ${clock(it)}" },
+        j.progressMs?.takeIf { it > 0 }?.let { "last progress ${clock(it)}" },
+        if (j.stuck) "quiet, possibly stuck" else if (j.busy) "working" else null,
+        j.note?.takeIf { it.isNotBlank() },
+    ).joinToString(" · ")
+
+    /** A server's line: "npm run dev · port 3002". */
+    fun serverLine(v: dev.herdertower.phone.api.AgentServer): String =
+        v.what.ifBlank { "A server" } + when (v.ports.size) {
+            0 -> ""
+            1 -> " · port ${v.ports[0]}"
+            else -> " · ports " + v.ports.joinToString(", ")
+        }
+
     /** Its last words: what the tower gives, else its last report in the history, else what its last job came to. */
     fun said(s: MissionSession, history: List<HistoryEntry>, jobs: List<Job>): String {
         s.said?.takeIf { it.isNotBlank() }?.let { return it }

@@ -547,6 +547,7 @@ class TowerSession(
                         _validationSupported.value = ev.hello.validation
                         _impactSupported.value = ev.hello.impact
                         _releasesSupported.value = ev.hello.releases
+                        _mergeChainSupported.value = ev.hello.mergeChain
                         _pairingSupported.value = ev.hello.pairing
                         live = true
                         route?.let {
@@ -1058,6 +1059,16 @@ class TowerSession(
     private val _releasesSupported = MutableStateFlow(false)
     /** Whether the tower keeps each space's release track (in the state). */
     val releasesSupported: StateFlow<Boolean> = _releasesSupported.asStateFlow()
+
+    private val _mergeChainSupported = MutableStateFlow(false)
+    /** Whether the tower takes a merge card's "Merge all" from the phone (else the phone merges each PR itself, in order). */
+    val mergeChainSupported: StateFlow<Boolean> = _mergeChainSupported.asStateFlow()
+
+    /** Hands a merge card's PRs ([keys], in order) to the tower, which merges them one after the other. */
+    suspend fun mergeAll(d: Decision, keys: List<String>): Result<dev.herdertower.phone.api.MergeChain> = act { it.mergeAll(d.id, keys) }
+
+    /** Stops a chain: nothing more of it is merged. */
+    suspend fun stopMerges(id: String): Result<dev.herdertower.phone.api.MergeChain> = act { it.stopMerges(id) }
 
     private val _acts = MutableStateFlow<Map<String, Act>>(emptyMap())
     /** Every act seen (in the chat, from its event, or undone here), as it last stood. */
@@ -1889,6 +1900,7 @@ class TowerSession(
         _validationSupported.value = false
         _impactSupported.value = false
         _releasesSupported.value = false
+        _mergeChainSupported.value = false
         _ruleOffers.value = emptyList()
         _tellVoice.value = null
         _spaceThreads.value = emptyMap()

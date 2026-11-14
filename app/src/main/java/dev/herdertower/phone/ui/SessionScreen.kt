@@ -96,6 +96,15 @@ fun SessionScreen(session: TowerSession, address: String, onBack: () -> Unit, on
             // A tower from before question sets: a blocked session is answered here, with a yes or a no.
             if (!questionsOn && s.status == "blocked" && mine.isEmpty()) LegacyApproval(session, address)
 
+            // What it left running: its jobs (work that goes on after its turn) and its servers (meant to idle).
+            stateAgent?.jobs?.takeIf { it.isNotEmpty() }?.let { js ->
+                SectionLabel(if (js.size == 1) "Running a job" else "Running ${js.size} jobs")
+                js.forEach { j -> Text(SessionModel.jobLine(j), Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodyMedium, color = if (j.stuck) tc.decisionInk else tc.muted) }
+            }
+            stateAgent?.servers?.takeIf { it.isNotEmpty() }?.let { sv ->
+                SectionLabel(if (sv.size == 1) "A server up" else "${sv.size} servers up")
+                sv.forEach { v -> Text(SessionModel.serverLine(v), Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodyMedium, color = tc.muted) }
+            }
             if (said.isNotBlank()) {
                 SectionLabel("Last said")
                 Text(said, Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodyLarge, color = tc.muted)

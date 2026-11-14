@@ -892,6 +892,24 @@ class TowerSessionTest {
         assertEquals(listOf("d2"), s.onHold.value.map { it.id })
     }
 
+    /** "Merge all" handed to the tower: the card's PRs, in order, to its merge-all route. */
+    @Test fun mergeAllIsHandedToTheTower() = runBlocking {
+        extra = { r ->
+            when {
+                r.url.encodedPath == "/v1/decisions/d1/merge-all" -> json("""{"merge":{"id":"m1","card":"d1","by":"phone:d_test","links":[{"key":"o/app#839","number":839,"step":{"step":"queued"}}]}}""", 202)
+                r.url.encodedPath == "/v1/merges/m1/stop" -> json("""{"merge":{"id":"m1","card":"d1","stopped":true}}""")
+                else -> null
+            }
+        }
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "the stream") { s.link.value is Link.Live }
+        val c = s.mergeAll(dev.herdertower.phone.api.Decision(id = "d1", kind = "merge"), listOf("o/app#839", "o/app#842")).getOrThrow()
+        assertEquals("m1", c.id)
+        assertTrue(calls.any { it == "POST /v1/decisions/d1/merge-all {\"prs\":[\"o/app#839\",\"o/app#842\"]}" })
+        assertTrue(s.stopMerges("m1").getOrThrow().stopped)
+    }
+
     // A tower from before the queue: the same from its questions and its waiting PRs
 
     private val escalated = """{"id":"q2","session":"t5","name":"web","kind":"claude-permission","title":"Run a command","detail":"rm -rf build/",""" +

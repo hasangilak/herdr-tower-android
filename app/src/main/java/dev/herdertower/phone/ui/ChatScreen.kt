@@ -367,6 +367,22 @@ fun ChatContent(
     // Scrolled up to the top: load the older messages.
     val atTop by remember { androidx.compose.runtime.derivedStateOf { list.firstVisibleItemIndex == 0 && list.layoutInfo.totalItemsCount > 1 } }
     LaunchedEffect(atTop, canLoadMore, follow) { if (atTop && !follow && canLoadMore && rows.isNotEmpty()) onLoadOlder() }
+    // A question's answer, or an answer's question, tapped: brought into view and lit for a moment.
+    var jump by remember { mutableStateOf<String?>(null) }
+    var lit by remember { mutableStateOf<String?>(null) }
+    LaunchedEffect(jump) {
+        val id = jump ?: return@LaunchedEffect
+        val i = rows.indexOfFirst { it is ChatRow.Item && it.e.id == id }
+        jump = null
+        if (i < 0) return@LaunchedEffect
+        follow = false
+        list.animateScrollToItem(i + 1)
+        lit = id
+        kotlinx.coroutines.delay(1_800)
+        if (lit == id) lit = null
+    }
+    // Whether this conversation pairs answers with questions (a tower that sends answered_by / asks).
+    val paired = remember(entries) { curated && entries.any { it.answeredBy != null || it.asks != null } }
     // To one message (a PR's chip from its notification): it stays in view, the end isn't followed.
     LaunchedEffect(focus, rows) {
         val id = focus ?: return@LaunchedEffect
@@ -409,11 +425,14 @@ fun ChatContent(
                     is ChatRow.Day -> Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
                         Text(r.label, style = MaterialTheme.typography.labelSmall, color = tc.faint)
                     }
-                    is ChatRow.Item -> Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
+                    is ChatRow.Item -> Column(
+                        Modifier.then(if (lit != null && r.e.id == lit) Modifier.clip(RoundedCornerShape(20.dp)).background(tc.accent.copy(alpha = 0.18f)) else Modifier),
+                        verticalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
                         when (r.e.kind) {
-                            "request" -> UserBubble(r.e, sentFiles)
+                            "request" -> UserBubble(r.e, sentFiles, state = ChatModel.requestState(r.e, now, paired), onAnswer = r.e.answeredBy?.let { a -> { jump = a } })
                             "behavior" -> BehaviorChangeCard(r.e.text, r.e.diff) { onBehavior(r.e.text) }
-                            "answer", "reply" -> ReplyBubble(r.e, replyShots)
+                            "answer", "reply" -> ReplyBubble(r.e, replyShots, onAsked = r.e.replyTo?.let { q -> { jump = q } })
                             "pr" -> prChip(r.e)
                             "act" -> actCard(r.e)
                             "screenshot" -> if (r.e.id != null && !curated) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
@@ -434,7 +453,13 @@ fun ChatContent(
 
 /** What you said: warm copper, on the right. */
 @Composable
-fun UserBubble(e: HistoryEntry, files: @Composable (HistoryEntry) -> Unit = {}) {
+fun UserBubble(
+    e: HistoryEntry, files: @Composable (HistoryEntry) -> Unit = {},
+    /** "answered ↓" or "waiting for an answer", under it. */
+    state: String? = null,
+    /** Its answer, tapped: scrolled to. */
+    onAnswer: (() -> Unit)? = null,
+) {
     val voice = e.text.startsWith("[voice] ")
     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
         Column(
@@ -451,13 +476,23 @@ fun UserBubble(e: HistoryEntry, files: @Composable (HistoryEntry) -> Unit = {}) 
                 if (voice) Icon(Icons.Filled.Mic, "spoken", Modifier.size(12.dp), tint = tc.onBubble.copy(alpha = 0.8f))
                 Text(" " + clock(e.at), style = MaterialTheme.typography.labelSmall, color = tc.onBubble.copy(alpha = 0.85f))
             }
+            state?.let { s ->
+                Text(
+                    s, Modifier.align(Alignment.End).then(if (onAnswer != null) Modifier.clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = "Go to its answer", onClick = onAnswer) else Modifier).padding(top = 2.dp),
+                    style = MaterialTheme.typography.labelSmall, color = tc.onBubble.copy(alpha = 0.85f),
+                )
+            }
         }
     }
 }
 
 /** The tower's answer: a dark soft bubble with the orb beside it; its markdown rendered. */
 @Composable
-fun ReplyBubble(e: HistoryEntry, shots: @Composable (List<ChatModel.ShotRef>, Modifier) -> Unit = { _, _ -> }) {
+fun ReplyBubble(
+    e: HistoryEntry, shots: @Composable (List<ChatModel.ShotRef>, Modifier) -> Unit = { _, _ -> },
+    /** The question it answers, tapped: scrolled to. */
+    onAsked: (() -> Unit)? = null,
+) {
     val (text, refs) = remember(e.text) { ChatModel.shots(e.text) }
     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.Top) {
         // Not a switch: a stray tap on a reply mustn't mute the whole tower (the header's orb does that).
@@ -472,7 +507,7 @@ fun ReplyBubble(e: HistoryEntry, shots: @Composable (List<ChatModel.ShotRef>, Mo
                 .padding(horizontal = 18.dp, vertical = 12.dp),
         ) {
             // What it answers, however much came in between.
-            ChatModel.asked(e)?.let { Text(it, Modifier.padding(bottom = 6.dp), style = MaterialTheme.typography.labelMedium, color = tc.faint, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
+            ChatModel.asked(e)?.let { Text(it, Modifier.then(if (onAsked != null) Modifier.clickable(role = androidx.compose.ui.semantics.Role.Button, onClickLabel = "Go to the question", onClick = onAsked) else Modifier).padding(bottom = 6.dp), style = MaterialTheme.typography.labelMedium, color = tc.faint, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
             if (e.kind == "reply" && !e.name.isNullOrBlank()) Text(e.name, Modifier.padding(bottom = 2.dp), style = MaterialTheme.typography.labelMedium, color = tc.muted, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
             if (text.isNotBlank()) MarkdownText(text, tc.text)
             if (refs.isNotEmpty()) shots(refs, Modifier.padding(top = 8.dp))

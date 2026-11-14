@@ -376,6 +376,14 @@ class TowerClient(
     suspend fun unholdDecision(id: String, why: String? = null): Decision =
         post(DecisionResponse.serializer(), DecisionsApi.unholdBody(why).toRequestBody(JSON), "decisions", id, "unhold").decision
 
+    /** `POST /v1/decisions/{id}/merge-all`: the tower merges [prs] (keys, in order) of that merge card itself. `409 running`: one runs already. */
+    suspend fun mergeAll(id: String, prs: List<String>): MergeChain =
+        post(MergeChainResponse.serializer(), json(MergeAllRequest.serializer(), MergeAllRequest(prs)), "decisions", id, "merge-all").merge
+
+    /** `POST /v1/merges/{id}/stop`: nothing more of that chain is merged. */
+    suspend fun stopMerges(id: String): MergeChain =
+        post(MergeChainResponse.serializer(), "{}".toRequestBody(JSON), "merges", id, "stop").merge
+
     /** `GET /v1/missions`: every open space as a mission, the quiet ones and today's closed ones by name. */
     suspend fun missions(): MissionsResponse = get(MissionsResponse.serializer(), "missions")
 

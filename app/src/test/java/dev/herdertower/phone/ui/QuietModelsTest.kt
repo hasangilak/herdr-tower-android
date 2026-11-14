@@ -529,4 +529,55 @@ class QuietModelsTest {
         assertEquals("15:00", dayClock(later, now))
         assertEquals(java.text.SimpleDateFormat("EEE", java.util.Locale.getDefault()).format(java.util.Date(sunday)) + " 02:00", dayClock(sunday, now))
     }
+
+    /** A "Merge all" the tower runs: where each PR stands, read off the state; one the app can't read is left out. */
+    @Test fun aChainSaysWhereEachPrStands() {
+        val json = dev.herdertower.phone.api.TowerJson.parseToJsonElement(
+            """[{"id":"m1","card":"d1","space":"sandbox","by":"phone:d_x","started_ms":1,"stopped":false,"over":false,"links":[""" +
+                """{"key":"o/app#839","number":839,"base":"dev","step":{"step":"merged"},"since_ms":1,"line":"merged"},""" +
+                """{"key":"o/app#842","number":842,"base":"dev","step":{"step":"waiting","why":"its checks"},"since_ms":2,"line":""}]},""" +
+                """{"id":"bad","links":"no"}]""",
+        )
+        val chains = dev.herdertower.phone.api.MergesApi.parse(json)
+        assertEquals(listOf("m1"), chains.map { it.id })
+        val c = dev.herdertower.phone.api.MergesApi.of(chains, "d1")!!
+        assertTrue(c.running)
+        assertEquals("The tower merges in order · 1 of 2 merged", dev.herdertower.phone.api.MergesApi.head(c))
+        assertEquals(listOf("#839: merged", "#842: waiting for its checks"), c.links.map { dev.herdertower.phone.api.MergesApi.line(it) })
+        val back = c.copy(over = true, links = c.links.mapIndexed { i, l -> if (i == 1) l.copy(step = dev.herdertower.phone.api.MergeStepState("back", "checks still fail")) else l })
+        assertEquals("Stopped: #842 is yours", dev.herdertower.phone.api.MergesApi.head(back))
+        assertNull(dev.herdertower.phone.api.MergesApi.of(chains, "d2"))
+    }
+
+    /** A question says "answered ↓" once it has an answer, "waiting for an answer" while recent; never in a conversation that doesn't pair them. */
+    @Test fun aQuestionSaysWhetherItWasAnswered() {
+        val q = HistoryEntry(at = 1_000, kind = "request", text = "what's left?", id = "h4")
+        assertEquals("answered ↓", ChatModel.requestState(q.copy(answeredBy = "h9"), 2_000, paired = true))
+        assertEquals("waiting for an answer", ChatModel.requestState(q, 2_000, paired = true))
+        assertNull(ChatModel.requestState(q, 1_000 + ChatModel.WAITS_MS + 1, paired = true))
+        assertNull(ChatModel.requestState(q, 2_000, paired = false))
+        assertEquals("h4", ChatModel.entry(ChatMessage(id = "h9", role = "tower", text = "Done", replyTo = "h4")).replyTo)
+    }
+
+    /** Who runs outside the spaces: the main tower first, then each session no space lists, with its account. */
+    @Test fun whoRunsOutsideTheSpaces() {
+        val seats = dev.herdertower.phone.api.AccountsApi.outside(
+            brains = listOf(dev.herdertower.phone.api.StateBrain("tower", null, "t10v", account = "orca"), dev.herdertower.phone.api.StateBrain("tower-sandbox", "sandbox", "t7", account = "orca")),
+            agents = listOf(
+                dev.herdertower.phone.api.StateAgent("t10v", "tower"), dev.herdertower.phone.api.StateAgent("t3", "web", account = "default"),
+                dev.herdertower.phone.api.StateAgent("t5", "loose", account = "orca"),
+            ),
+            inSpaces = setOf("t3"),
+        )
+        assertEquals(listOf("The main tower" to "orca", "loose" to "orca"), seats.map { it.label to it.account })
+    }
+
+    /** A session's background jobs and servers, in a line each. */
+    @Test fun jobsAndServersInALine() {
+        val j = dev.herdertower.phone.api.AgentJob(what = "Restart v2 training", sinceMs = 1, progressMs = 2, busy = true)
+        assertEquals("Restart v2 training · since 01:21 · last progress 01:21 · working", SessionModel.jobLine(j) { "01:21" })
+        assertEquals("Restart v2 training · quiet, possibly stuck", SessionModel.jobLine(dev.herdertower.phone.api.AgentJob(what = "Restart v2 training", stuck = true)))
+        assertEquals("npm run dev · port 3002", SessionModel.serverLine(dev.herdertower.phone.api.AgentServer("npm run dev", ports = listOf(3002))))
+        assertEquals("Postgres in Docker", SessionModel.serverLine(dev.herdertower.phone.api.AgentServer("Postgres in Docker")))
+    }
 }

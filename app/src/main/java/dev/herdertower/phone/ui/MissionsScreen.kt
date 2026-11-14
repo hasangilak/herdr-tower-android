@@ -79,7 +79,13 @@ fun MissionsScreen(session: TowerSession, onSpace: (String) -> Unit, onNew: () -
         TopBar("Spaces", MissionsModel.counts(missions))
         PullToRefreshBox(refreshing, { refreshing = true; scope.launch { session.refreshLists(); refreshing = false } }, Modifier.fillMaxSize()) {
             LazyColumn(Modifier.fillMaxSize(), contentPadding = PaddingValues(start = 12.dp, end = 12.dp, top = 2.dp, bottom = 16.dp), verticalArrangement = Arrangement.spacedBy(2.dp)) {
-                accounts?.let { b -> item(key = "accounts") { AccountsStrip(b, now, Modifier.padding(bottom = 8.dp)) } }
+                accounts?.let { b ->
+                    item(key = "accounts") {
+                        val inSpaces = missions.spaces.flatMap { m -> m.sessions.map { it.address } + listOfNotNull(m.tower?.address) }.toSet()
+                        val outside = dev.herdertower.phone.api.AccountsApi.outside(state?.brains.orEmpty(), state?.agents.orEmpty(), inSpaces)
+                        AccountsStrip(b, now, Modifier.padding(bottom = 8.dp), outside = outside)
+                    }
+                }
                 plan?.let { p -> item(key = "plan") { PlanRow(p, scores, onClick = onPlan) } }
                 if (list.isEmpty() && missions.quiet.isEmpty() && plan == null) item(key = "none") {
                     EmptyBox("No spaces yet. Start one from a goal: the tower opens its sessions and hands the work out.", Modifier.padding(horizontal = 2.dp, vertical = 6.dp))

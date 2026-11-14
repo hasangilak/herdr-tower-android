@@ -79,7 +79,11 @@ object AccountsModel {
  * reset, and what the failover moved lately.
  */
 @Composable
-fun AccountsStrip(board: AccountsBoard, now: Long, modifier: Modifier = Modifier) {
+fun AccountsStrip(
+    board: AccountsBoard, now: Long, modifier: Modifier = Modifier,
+    /** The main tower and the sessions outside every space, with their accounts (the spaces' own are on each space's screen). */
+    outside: List<dev.herdertower.phone.api.Seat> = emptyList(),
+) {
     var open by rememberSaveable { mutableStateOf(false) }
     Column(
         modifier.fillMaxWidth().clip(RoundedCornerShape(16.dp)).background(tc.card)
@@ -98,6 +102,16 @@ fun AccountsStrip(board: AccountsBoard, now: Long, modifier: Modifier = Modifier
                     "Waiting for an account: " + w.joinToString(", ") { it.address } + ". The tower carries on with them when one is back.",
                     style = MaterialTheme.typography.bodySmall, color = tc.decisionInk,
                 )
+            }
+            if (outside.isNotEmpty()) {
+                Text("Outside the spaces", style = MaterialTheme.typography.labelMedium, color = tc.faint, modifier = Modifier.padding(top = 2.dp))
+                val def = board.list.firstOrNull { it.default }?.name
+                outside.forEach { s ->
+                    Row(verticalAlignment = Alignment.CenterVertically, horizontalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(s.label, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = if (s.tower) tc.text else tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                        SeatAccount(board, s.address, s.account, def)
+                    }
+                }
             }
             board.moves.takeLast(4).reversed().takeIf { it.isNotEmpty() }?.let { moves ->
                 Text("Moved lately", style = MaterialTheme.typography.labelMedium, color = tc.faint, modifier = Modifier.padding(top = 2.dp))

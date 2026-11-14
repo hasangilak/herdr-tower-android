@@ -117,6 +117,10 @@ object DecisionModel {
     fun mergeAllWhy(d: Decision, known: Map<String, Pr> = emptyMap()): String =
         "In order: " + goes(d, known).joinToString(", then ") { "#${it.number} into ${it.base.ifBlank { "its base" }}" } + ". Each shows what it does before it merges."
 
+    /** The PRs a merge leaves out, said in the confirmation: "#840 isn't in this merge: it's a draft." */
+    fun leftOutLines(d: Decision, known: Map<String, Pr> = emptyMap()): List<String> =
+        d.prs.indices.filter { leftOut(d, it, known) }.map { leftOutLabel(d, it, known).trimEnd('.') + "." }
+
     /** The sheet's line for the [i]th of [all]: "1 of 2 in this merge: #839, then #842". */
     fun chainNote(all: List<DecisionPr>, i: Int): String =
         "${i + 1} of ${all.size} in this merge: " + all.joinToString(", then ") { "#${it.number}" }
@@ -245,6 +249,45 @@ class DecisionHost(private val session: TowerSession, private val scope: Corouti
     /** The PRs as the phone knows them now (what a merge card's rows say beyond the decision). */
     val prs get() = session.prs
 
+    /** The tower's state: its running "Merge all" chains. */
+    val state get() = session.state
+
+    /** Whether the tower runs a card's "Merge all" itself when the phone asks. */
+    val chainOn get() = session.mergeChainSupported
+
+    /** A "Merge all" waiting for the user's yes: the card and its PRs, in order. */
+    var confirmingAll by mutableStateOf<Pair<Decision, List<DecisionPr>>?>(null)
+
+    /**
+     * Merge all: with a tower that takes it, the whole chain is handed to the
+     * tower after one yes (it waits for GitHub between them and has a PR that
+     * fell behind fixed by its session); else each PR's own look-then-merge,
+     * in order, from here.
+     */
+    fun mergeAllTapped(d: Decision, list: List<DecisionPr>) {
+        if (chainOn.value) confirmingAll = d to list else mergeAll(list)
+    }
+
+    private fun handOver(d: Decision, list: List<DecisionPr>) {
+        scope.launch {
+            session.mergeAll(d, list.map { it.key })
+                .onSuccess { snack("The tower merges ${DecisionModel.mergeWhat(list.map { it.number }, list.size)} in order.") }
+                .onFailure { e ->
+                    snack(
+                        if (e is dev.herdertower.phone.api.TowerApiException && e.code == "running") "The tower is merging these already."
+                        else "Couldn't hand the merge to the tower: ${TowerSession.describe(e)}",
+                    )
+                }
+        }
+    }
+
+    /** "Stop merging": nothing more of the chain is merged. */
+    fun stopChain(id: String) {
+        scope.launch {
+            session.stopMerges(id).onSuccess { snack("Stopped: nothing more is merged.") }.onFailure { snack("Couldn't stop it: ${TowerSession.describe(it)}") }
+        }
+    }
+
     /** The question sets blocked sessions have open now (a blocked card answers with its session's). */
     val questions get() = session.questions
 
@@ -357,6 +400,26 @@ class DecisionHost(private val session: TowerSession, private val scope: Corouti
                 onMerged = if (c != null) ({ mergedOne() }) else null,
             )
         }
+        confirmingAll?.let { (d, list) ->
+            AlertDialog(
+                onDismissRequest = { confirmingAll = null },
+                title = { Text("Merge ${DecisionModel.mergeWhat(list.map { it.number }, list.size)} in order?") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                        list.forEachIndexed { i, p -> Text("${i + 1}. #${p.number} into ${p.base.ifBlank { "its base" }}" + (p.title.takeIf { it.isNotBlank() }?.let { ": $it" } ?: ""), style = MaterialTheme.typography.bodyMedium, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+                        DecisionModel.leftOutLines(d).forEach { Text(it, style = MaterialTheme.typography.bodySmall, color = tc.muted) }
+                        Text("The tower merges them one after the other, each once the one before landed. One that falls behind or conflicts is fixed by its session first; only what can't be fixed comes back to you.", style = MaterialTheme.typography.bodySmall, color = tc.faint)
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        handOver(d, list)
+                        confirmingAll = null
+                    }) { Text("Merge in order") }
+                },
+                dismissButton = { TextButton(onClick = { confirmingAll = null }) { Text("Cancel") } },
+            )
+        }
         holding?.let { d ->
             var reason by remember(d.id) { mutableStateOf("") }
             AlertDialog(
@@ -411,6 +474,9 @@ fun DecisionCard(
     var menu by remember { mutableStateOf(false) }
     val known by host.prs.collectAsStateWithLifecycle()
     val sets by host.questions.collectAsStateWithLifecycle()
+    // Its "Merge all" the tower runs, if any: each PR's place in it, and Stop.
+    val towerState by host.state.collectAsStateWithLifecycle()
+    val chain = if (d.kind == "merge") remember(towerState?.merges, d.id) { dev.herdertower.phone.api.MergesApi.of(dev.herdertower.phone.api.MergesApi.parse(towerState?.merges), d.id) } else null
     // A blocked session whose dialog the tower has read since: answered here, with its own options.
     val blocked = DecisionModel.blockedSet(d, sets)
     Card(modifier, strong = true) {
@@ -474,10 +540,13 @@ fun DecisionCard(
                     Text("Carrying out your answer…", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
                 }
                 !d.open -> DoneLine(d)
+                chain?.running == true -> ChainBox(chain, onStop = { host.stopChain(chain.id) })
                 else -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // A chain that ended (merged, stopped, or one handed back): what it did, above the answers left.
+                    chain?.let { ChainBox(it, onStop = null) }
                     // Several go in: one button names exactly those, merged in order (each still shows what it does first).
                     val all = if (perPr(d) && !d.legacy) DecisionModel.mergeAllLabel(d, known) else null
-                    if (all != null) BigAnswer(all, primary = true, why = DecisionModel.mergeAllWhy(d, known)) { host.mergeAll(DecisionModel.goes(d, known)) }
+                    if (all != null) BigAnswer(all, primary = true, why = DecisionModel.mergeAllWhy(d, known)) { host.mergeAllTapped(d, DecisionModel.goes(d, known)) }
                     if (DecisionModel.answerable(d)) d.options.forEachIndexed { i, o ->
                         // Left out of the merge: its words say so ("#840 isn't in this merge: it's a draft"), not a button.
                         val out = DecisionModel.leftOut(d, i, known)
@@ -516,6 +585,37 @@ fun DecisionCard(
                 }
             }
         }
+    }
+}
+
+/** A "Merge all" the tower runs: where each PR stands, and Stop merging while it runs. */
+@Composable
+private fun ChainBox(c: dev.herdertower.phone.api.MergeChain, onStop: (() -> Unit)?) {
+    Column(
+        Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(tc.card).padding(12.dp)
+            .semantics(mergeDescendants = true) { liveRegion = LiveRegionMode.Polite },
+        verticalArrangement = Arrangement.spacedBy(4.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            if (c.running) {
+                CircularProgressIndicator(Modifier.size(14.dp), strokeWidth = 2.dp, color = tc.decisionInk)
+                Spacer(Modifier.width(8.dp))
+            }
+            Text(dev.herdertower.phone.api.MergesApi.head(c), style = MaterialTheme.typography.labelLarge, color = tc.text, fontWeight = FontWeight.SemiBold)
+        }
+        c.links.forEach { l ->
+            Text(
+                dev.herdertower.phone.api.MergesApi.line(l), style = MaterialTheme.typography.bodySmall,
+                color = when (l.step.step) {
+                    "merged" -> tc.live
+                    "back" -> tc.failed
+                    "waiting", "merging", "fixing" -> tc.decisionInk
+                    else -> tc.muted
+                },
+                maxLines = 3, overflow = TextOverflow.Ellipsis,
+            )
+        }
+        if (onStop != null) Row(Modifier.padding(top = 4.dp)) { PillButton("Stop merging", onClick = onStop) }
     }
 }
 

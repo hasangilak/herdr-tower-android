@@ -87,7 +87,32 @@ data class StateAgent(
     val status: String = "",
     val app: String = "",
     val account: String? = null,
+    /** Jobs it left running in the background (a tower with `jobs`). */
+    val jobs: List<AgentJob> = emptyList(),
+    /** Servers it keeps up (a dev server, a process holding a port): never jobs, never stuck. */
+    val servers: List<AgentServer> = emptyList(),
 )
+
+/** A job a session runs in the background: what, since when, its last progress, whether it works now or is quiet ([stuck]). */
+@Serializable
+data class AgentJob(
+    val what: String = "",
+    val command: String? = null,
+    @SerialName("since_ms") val sinceMs: Long = 0,
+    @SerialName("progress_ms") val progressMs: Long? = null,
+    val busy: Boolean = false,
+    val stuck: Boolean = false,
+    val pid: Long? = null,
+    val task: String? = null,
+    /** `background` (Claude Code's) or `declared` (the session said so). */
+    val source: String? = null,
+    val note: String? = null,
+    val watched: Boolean = false,
+)
+
+/** A server a session keeps up: what, its process and ports. */
+@Serializable
+data class AgentServer(val what: String = "", val pid: Long? = null, val ports: List<Int> = emptyList())
 
 @Serializable
 data class TowerState(
@@ -149,6 +174,8 @@ data class TowerState(
     val accounts: JsonElement? = null,
     /** The towers that run, the main one and each space's own, with the account each runs on. */
     val brains: List<StateBrain> = emptyList(),
+    /** The "Merge all N" chains the tower runs or ran lately: read with [MergesApi.parse]. */
+    val merges: JsonElement? = null,
 )
 
 /** The brain's current step, as the panel's working line shows it ("Delegating to orb-rust · 12s"). */
@@ -260,6 +287,10 @@ data class HistoryEntry(
     /** An answer: what it answers, in words ("↳ you asked: …"); [asksYou] false when it was the tower's message to a session. */
     val asks: String? = null,
     @SerialName("asks_you") val asksYou: Boolean = true,
+    /** An answer: the id of the message it answers. */
+    @SerialName("reply_to") val replyTo: String? = null,
+    /** A message that got an answer: the first answer's id. */
+    @SerialName("answered_by") val answeredBy: String? = null,
 )
 
 @Serializable
@@ -363,6 +394,9 @@ data class StreamHello(
 
     /** Each Claude account's usage, and what the failover moved. */
     val accounts: Boolean get() = features.orEmpty().contains("accounts")
+
+    /** "Merge all N" from the phone: the tower merges a card's PRs in order (`/v1/decisions/{id}/merge-all`). */
+    val mergeChain: Boolean get() = features.orEmpty().contains("merge_chain")
 }
 
 /** A screenshot a session sent to the tower (`GET /v1/screenshots`). */

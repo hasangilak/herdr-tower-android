@@ -73,7 +73,20 @@ data class StateBrain(
     val account: String? = null,
 )
 
+/** A tower or session outside every space, with the account it runs on: the Accounts view's "who runs where" for them. */
+data class Seat(val label: String, val address: String?, val account: String?, val tower: Boolean = false)
+
 object AccountsApi {
+    /**
+     * Who runs outside the spaces: the main tower (the brain with no space)
+     * first, then each session of [agents] no space lists, with its account.
+     */
+    fun outside(brains: List<StateBrain>, agents: List<dev.herdertower.phone.api.StateAgent>, inSpaces: Set<String>): List<Seat> {
+        val towers = brains.filter { it.space.isNullOrBlank() }.map { Seat(if (it.name == "tower" || it.name.isBlank()) "The main tower" else it.name, it.address, it.account, tower = true) }
+        val towerAddrs = brains.mapNotNull { it.address }.toSet()
+        val sessions = agents.filter { it.address !in inSpaces && it.address !in towerAddrs }.map { Seat(it.name.ifBlank { it.address }, it.address, it.account) }
+        return towers + sessions
+    }
     /** The state's `accounts`, read on its own: a board the app can't read never breaks the state. */
     fun parse(e: kotlinx.serialization.json.JsonElement?): AccountsBoard? =
         e?.takeIf { it is kotlinx.serialization.json.JsonObject }?.let { runCatching { TowerJson.decodeFromJsonElement(AccountsBoard.serializer(), it) }.getOrNull() }

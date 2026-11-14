@@ -57,7 +57,23 @@ object ChatModel {
         session = m.session, name = m.name, account = m.account, status = m.status,
         text = m.text, attachments = m.attachmentPaths(), id = m.id, diff = m.diff,
         asks = m.asks?.text?.takeIf { it.isNotBlank() }, asksYou = m.asks?.you ?: true,
+        replyTo = m.replyTo ?: m.asks?.id, answeredBy = m.answeredBy,
     )
+
+    /**
+     * A request's line under it: "answered ↓" when it got an answer, "waiting
+     * for an answer" while it is recent and has none (the tower doesn't say
+     * yet when none will come), else nothing.
+     */
+    fun requestState(e: HistoryEntry, now: Long, paired: Boolean): String? = when {
+        e.kind != "request" -> null
+        e.answeredBy != null -> "answered ↓"
+        paired && e.at > 0 && now - e.at in 0 until WAITS_MS -> "waiting for an answer"
+        else -> null
+    }
+
+    /** How long a request without an answer reads as waiting for one. */
+    const val WAITS_MS = 30 * 60_000L
 
     /** An answer's line on top: "↳ you asked: …" or "↳ the tower sent it: …", cut short; null when it answers nothing known. */
     fun asked(e: HistoryEntry, max: Int = 90): String? {
