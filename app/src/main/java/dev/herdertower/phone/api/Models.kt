@@ -178,6 +178,8 @@ data class TowerState(
     val brains: List<StateBrain> = emptyList(),
     /** The "Merge all N" chains the tower runs or ran lately: read with [MergesApi.parse]. */
     val merges: JsonElement? = null,
+    /** The launched plans (planning v2), each with `launched` its space's name: read with [PlansApi.live]. */
+    @SerialName("plans_live") val plansLive: JsonElement? = null,
 )
 
 /** The brain's current step, as the panel's working line shows it ("Delegating to orb-rust · 12s"). */

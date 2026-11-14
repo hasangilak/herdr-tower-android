@@ -264,6 +264,10 @@ fun MissionScreen(
                 held.forEach { d -> HeldCard(d, now, host, onQuestion, onSession, showSpace = false) }
             }
 
+            // The plan it was launched with (planning v2): how far the work is against it, and what changed.
+            val live = remember(state?.plansLive, name) { dev.herdertower.phone.api.PlansApi.liveOf(dev.herdertower.phone.api.PlansApi.live(state?.plansLive), name) }
+            live?.let { LivePlanCard(it) }
+
             // On prod, on dev, open; and its releases: as the Mac's space panel shows them.
             track?.takeIf { it.repos.isNotEmpty() }?.let { ReleaseTrackCard(it, now) }
 

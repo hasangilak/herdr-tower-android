@@ -27,6 +27,10 @@ object PlanModel {
             Tone.Failed, "failed",
         )
         p.status == "closed" -> Status("This plan is closed.", Tone.Closed, "closed")
+        p.status == "live" -> Status(
+            p.launched?.takeIf { it.isNotBlank() }?.let { "Launched as $it: the work goes against this plan." } ?: "Launched: the work goes against this plan.",
+            Tone.Ready, "live",
+        )
         p.status == "ready" -> Status(
             if (!p.url.isNullOrBlank()) "Ready: a ${form(p)} on your claude.ai account (private)." else "Ready, not published yet.",
             Tone.Ready, "ready",
