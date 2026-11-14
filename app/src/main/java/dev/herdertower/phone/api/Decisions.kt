@@ -48,6 +48,12 @@ data class DecisionPr(
     val validation: PrValidation? = null,
     /** Who outside depends on what it changes (a tower with `impact`). */
     val impact: PrImpact? = null,
+    /** Its description on GitHub ("": it has none); null: the tower hasn't looked (or doesn't say). */
+    val body: String? = null,
+    /** Its description in one or two plain sentences, what it changes for users and any risk ("": not made yet). */
+    val summary: String = "",
+    /** It had no description and the tower asked its session to write one. */
+    @SerialName("asked_body") val askedBody: Boolean = false,
 ) {
     val ref: PrRef? get() = PrRef.of(repo, number)
     val key: String get() = prKey.ifBlank { "$repo#$number" }

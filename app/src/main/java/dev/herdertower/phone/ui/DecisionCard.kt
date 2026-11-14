@@ -306,6 +306,8 @@ fun DecisionCard(
                         // risk; not when the break is its only reason), its planned checks, or that nothing outside depends on it.
                         if (d.kind == "merge") d.prs.getOrNull(i)?.let { p ->
                             val pad = Modifier.padding(start = 16.dp, end = 8.dp)
+                            // What it does, in a sentence or two; the whole description on request.
+                            PrAbout(p, pad)
                             BreakingBox(p.impact)
                             if (scoreShown(p.score, p.impact)) PrModel.score(p.score)?.let { (line, needs) -> ScoreLine(line, needs, pad) }
                             ValidationLine(p.validation, pad)
@@ -363,6 +365,7 @@ private fun PrRow(pr: DecisionPr, merge: (() -> Unit)?, onOpen: () -> Unit) {
         }
         if (merge != null) PillButton("Merge", onClick = merge)
     }
+    PrAbout(pr, Modifier.padding(top = 2.dp))
     BreakingBox(pr.impact, Modifier.padding(top = 4.dp))
     if (scoreShown(pr.score, pr.impact)) PrModel.score(pr.score)?.let { (line, needs) -> ScoreLine(line, needs) }
     ValidationLine(pr.validation)
