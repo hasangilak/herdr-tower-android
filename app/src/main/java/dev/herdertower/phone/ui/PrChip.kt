@@ -144,6 +144,8 @@ fun PrChip(pr: Pr, onMerge: () -> Unit, modifier: Modifier = Modifier, highlight
                 when (phase) {
                     PrModel.Phase.Waiting -> Pill("Waiting for you", tc.blocked)
                     PrModel.Phase.Draft -> Pill("Draft", tc.faint)
+                    PrModel.Phase.InReview -> Pill("In review", tc.faint)
+                    PrModel.Phase.Fixing -> Pill("Being fixed", tc.accentHi)
                     PrModel.Phase.Merged -> Pill(PrModel.mergedPill(pr), tc.done)
                     PrModel.Phase.Closed -> Pill("Closed", tc.faint)
                     else -> if (at > 0) Text(clock(at), style = MaterialTheme.typography.labelSmall, color = tc.faint)
@@ -175,6 +177,9 @@ fun PrChip(pr: Pr, onMerge: () -> Unit, modifier: Modifier = Modifier, highlight
             ValidationLine(pr.validation)
             // Nothing outside depends on what it changes: said quietly.
             QuietImpactLine(pr.impact)
+            // Its session resolves its conflicts (or brings it up to date): the tower's to finish, not the user's to merge yet.
+            PrModel.fixLine(pr)?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = if (phase == PrModel.Phase.Fixing) tc.accentHi else tc.decisionInk, fontWeight = FontWeight.Medium, maxLines = 3, overflow = TextOverflow.Ellipsis) }
+            pr.review?.takeIf { phase == PrModel.Phase.InReview && it.line.isNotBlank() }?.let { Text(it.line, style = MaterialTheme.typography.labelMedium, color = tc.muted, maxLines = 2, overflow = TextOverflow.Ellipsis) }
             PrModel.autoFailed(pr)?.let { Text(it, style = MaterialTheme.typography.labelSmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis) }
             pr.error?.takeIf { pr.open }?.let {
                 Text("The Mac couldn't ask GitHub lately: $it", style = MaterialTheme.typography.labelSmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis)
@@ -280,7 +285,13 @@ private fun QuietButton(text: String, modifier: Modifier = Modifier, icon: Image
  */
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-fun MergeSheet(session: TowerSession, pr: Pr, onDismiss: () -> Unit) {
+fun MergeSheet(
+    session: TowerSession, pr: Pr, onDismiss: () -> Unit,
+    /** Where it is in a merge of several ("1 of 2 in this merge: #839, then #842"), shown over its title. */
+    chain: String? = null,
+    /** Merged: the next of a merge of several opens instead of the sheet closing. */
+    onMerged: (() -> Unit)? = null,
+) {
     val ref = pr.ref
     if (ref == null) {
         LaunchedEffect(Unit) { onDismiss() }
@@ -300,7 +311,7 @@ fun MergeSheet(session: TowerSession, pr: Pr, onDismiss: () -> Unit) {
                 .onSuccess {
                     step = MergeStep.merged(it)
                     snack("Merged PR #${ref.number} into ${s.confirm.pr.base.ifBlank { pr.base }}")
-                    onDismiss()
+                    (onMerged ?: onDismiss)()
                 }
                 .onFailure { step = MergeStep.mergeFailed(it, s) }
             else -> {}
@@ -325,6 +336,7 @@ fun MergeSheet(session: TowerSession, pr: Pr, onDismiss: () -> Unit) {
             Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(start = 20.dp, end = 20.dp, bottom = 16.dp).navigationBarsPadding(),
             verticalArrangement = Arrangement.spacedBy(12.dp),
         ) {
+            chain?.let { Text(it, style = MaterialTheme.typography.labelLarge, color = tc.decisionInk, fontWeight = FontWeight.SemiBold) }
             Text("Merge PR #${p.number}?", Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, color = tc.text, fontWeight = FontWeight.SemiBold)
             Text(p.title.ifBlank { p.id }, style = MaterialTheme.typography.bodyLarge, color = tc.text, maxLines = 4, overflow = TextOverflow.Ellipsis)
             Column(Modifier.alpha(if (busy && shown != null) 0.6f else 1f), verticalArrangement = Arrangement.spacedBy(6.dp)) {

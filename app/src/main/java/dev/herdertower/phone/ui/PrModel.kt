@@ -10,19 +10,46 @@ import dev.herdertower.phone.api.UnreachableException
 object PrModel {
     enum class Tone { Pending, Good, Bad, Quiet }
 
-    /** Where it stands: open, waiting for you, a draft, merged, closed. */
-    enum class Phase { Open, Waiting, Draft, Merged, Closed, Unknown }
+    /**
+     * Where it stands: open, waiting for you, a draft, its review still
+     * running, being fixed by its session (conflicts, or behind its base),
+     * merged, closed. Only Waiting is the user's to merge.
+     */
+    enum class Phase { Open, Waiting, Draft, InReview, Fixing, Merged, Closed, Unknown }
 
     fun phase(pr: Pr): Phase = when (pr.state) {
         "merged" -> Phase.Merged
         "closed" -> Phase.Closed
         "open" -> when {
             pr.draft -> Phase.Draft
+            fixing(pr) -> Phase.Fixing
+            pr.review?.running == true -> Phase.InReview
             pr.waiting -> Phase.Waiting
             else -> Phase.Open
         }
         else -> Phase.Unknown
     }
+
+    /** What keeps it from merging that its session fixes, as the tower reads it: `conflicts`, `behind`, or null. */
+    fun trouble(pr: Pr): String? = dev.herdertower.phone.api.PrsApi.trouble(pr)
+
+    /** Its session is fixing it now (asked, not back with the user): the tower's, not the user's, until it merges cleanly. */
+    fun fixing(pr: Pr): Boolean = dev.herdertower.phone.api.PrsApi.fixing(pr)
+
+    /** "Being fixed by eyzflow: resolving its conflicts with dev.", or once it came back "Not fixed: … Yours to look at."; null otherwise. */
+    fun fixLine(pr: Pr): String? {
+        val f = pr.fix ?: return null
+        if (!pr.open || pr.draft) return null
+        f.back?.takeIf { it.isNotBlank() }?.let { return if (trouble(pr) != null) "Not fixed: ${it.trimEnd('.')}. Yours to look at." else null }
+        if (!fixing(pr)) return null
+        val who = f.toName.ifBlank { f.to }.ifBlank { "its session" }
+        val base = pr.base.ifBlank { "its base" }
+        val doing = if (f.what == "conflicts" || trouble(pr) == "conflicts") "resolving its conflicts with $base" else "bringing it up to date with $base"
+        return "Being fixed by $who: $doing."
+    }
+
+    /** Ready for the user's merge: open, not a draft, its review over, nothing its session is fixing. */
+    fun readyForUser(pr: Pr): Boolean = dev.herdertower.phone.api.PrsApi.readyForUser(pr)
 
     /** "PR #12 · owner/app". */
     fun heading(pr: Pr): String = buildString {
@@ -106,6 +133,8 @@ object PrModel {
         when (phase(pr)) {
             Phase.Waiting -> add("waiting for you")
             Phase.Draft -> add("a draft")
+            Phase.InReview -> add("its review still runs")
+            Phase.Fixing -> add("being fixed by its session")
             else -> {}
         }
         closedLine(pr)?.let { add(it) } ?: run {

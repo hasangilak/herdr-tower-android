@@ -156,4 +156,37 @@ class DecisionNoticesTest {
         assertEquals("Production data · 3 sessions wait", DecisionNotices.line(Decision(why = "Production data", waiting = 3)))
         assertEquals("Nothing is blocked", DecisionNotices.line(Decision()))
     }
+
+    /** Rule 5: a decision back from hold notifies once, as a new one, with why; one on hold never does. */
+    @Test fun aDecisionBackFromHoldNotifiesOnceAndOneOnHoldNever() {
+        val out = Recorded()
+        val kept = Kept()
+        val n = DecisionNotices({ true }, out, kept)
+        n.follow(listOf(d("d1")), background = true)
+        // Held: it leaves the list; never notified while held.
+        n.follow(emptyList(), background = true)
+        n.follow(listOf(d("d2").copy(hold = dev.herdertower.phone.api.DecisionHold("later"))), background = true)
+        assertEquals(listOf("d1"), out.posted)
+        // Back, saying why: once. Seen again with the same back: nothing.
+        val back = d("d1").copy(back = dev.herdertower.phone.api.DecisionBack("PR #829 merged, which it waited for", 5000))
+        n.follow(listOf(back), background = true)
+        n.follow(listOf(back), background = true)
+        assertEquals(listOf("d1", "d1"), out.posted)
+        assertEquals("Back from hold: PR #829 merged, which it waited for", DecisionNotices.line(back))
+        // After a restart the mark is still there; back once more (later) notifies again.
+        val again = DecisionNotices({ true }, out, kept)
+        again.follow(listOf(back), background = true)
+        again.follow(listOf(d("d1").copy(back = dev.herdertower.phone.api.DecisionBack("PR #830 has new commits", 9000))), background = true)
+        assertEquals(listOf("d1", "d1", "d1"), out.posted)
+    }
+
+    /** Let go from hold on this phone: no notification for it here. */
+    @Test fun oneLetGoHereDoesNotNotify() {
+        val out = Recorded()
+        val n = DecisionNotices({ true }, out, Kept())
+        val back = d("d1").copy(back = dev.herdertower.phone.api.DecisionBack("you let it go from hold", 7000))
+        n.seenBack(back)
+        n.follow(listOf(back), background = true)
+        assertEquals(emptyList<String>(), out.posted)
+    }
 }

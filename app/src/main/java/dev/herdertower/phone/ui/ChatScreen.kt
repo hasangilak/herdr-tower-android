@@ -244,7 +244,7 @@ fun ChatScreen(
         },
     )
     viewing?.let { (pics, i) -> PicViewer(pics, i) { viewing = null } }
-    merging?.let { p -> MergeSheet(session, prs[p.id] ?: p) { merging = null } }
+    merging?.let { p -> MergeSheet(session, prs[p.id] ?: p, onDismiss = { merging = null }) }
     }
 }
 
@@ -413,7 +413,7 @@ fun ChatContent(
                         when (r.e.kind) {
                             "request" -> UserBubble(r.e, sentFiles)
                             "behavior" -> BehaviorChangeCard(r.e.text, r.e.diff) { onBehavior(r.e.text) }
-                            "answer" -> ReplyBubble(r.e, replyShots)
+                            "answer", "reply" -> ReplyBubble(r.e, replyShots)
                             "pr" -> prChip(r.e)
                             "act" -> actCard(r.e)
                             "screenshot" -> if (r.e.id != null && !curated) ShotLine(r.e, accounts, onShot, thumb) else EventLine(r.e, accounts, onOpen)
@@ -471,6 +471,9 @@ fun ReplyBubble(e: HistoryEntry, shots: @Composable (List<ChatModel.ShotRef>, Mo
                 .border(1.dp, tc.edge, RoundedCornerShape(topStart = 8.dp, topEnd = 24.dp, bottomStart = 24.dp, bottomEnd = 24.dp))
                 .padding(horizontal = 18.dp, vertical = 12.dp),
         ) {
+            // What it answers, however much came in between.
+            ChatModel.asked(e)?.let { Text(it, Modifier.padding(bottom = 6.dp), style = MaterialTheme.typography.labelMedium, color = tc.faint, maxLines = 2, overflow = androidx.compose.ui.text.style.TextOverflow.Ellipsis) }
+            if (e.kind == "reply" && !e.name.isNullOrBlank()) Text(e.name, Modifier.padding(bottom = 2.dp), style = MaterialTheme.typography.labelMedium, color = tc.muted, fontWeight = androidx.compose.ui.text.font.FontWeight.SemiBold)
             if (text.isNotBlank()) MarkdownText(text, tc.text)
             if (refs.isNotEmpty()) shots(refs, Modifier.padding(top = 8.dp))
             Text(clock(e.at), Modifier.align(Alignment.End), style = MaterialTheme.typography.labelSmall, color = tc.faint)

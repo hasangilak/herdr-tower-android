@@ -128,8 +128,16 @@ fun MissionScreen(
 
     // This space's own decisions: a muted space's aren't in the queue, so they're read here.
     var own by remember(name) { mutableStateOf<List<Decision>?>(null) }
-    LaunchedEffect(name, queue, m.needs, m.mute) { own = session.spaceDecisions(name) }
-    val decisions = (own ?: queue.filter { it.space == name }).filter { it.live }
+    // And those put on hold here: listed apart, never counted.
+    val mainHeld by session.onHold.collectAsStateWithLifecycle()
+    var ownHeld by remember(name) { mutableStateOf<List<Decision>?>(null) }
+    LaunchedEffect(name, queue, mainHeld, m.needs, m.mute) {
+        val (open, held) = session.spaceQueue(name)
+        own = open
+        ownHeld = held
+    }
+    val decisions = (own ?: queue.filter { it.space == name }).filter { it.live && !it.held }
+    val held = ownHeld ?: mainHeld.filter { it.space == name }
 
     // What its sessions wrote each other: read once here, then kept current by the thread event.
     val threads by session.spaceThreads.collectAsStateWithLifecycle()
@@ -176,6 +184,7 @@ fun MissionScreen(
                 Column(Modifier.weight(1f).padding(start = 4.dp, top = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                     Labelled("Goal", m.goal?.takeIf { it.isNotBlank() } ?: "No goal yet. Say what this space is for.", dim = m.goal.isNullOrBlank())
                     m.doneWhen?.takeIf { it.isNotBlank() }?.let { Labelled("Done when", it) }
+                    GoalHistory(m)
                 }
                 if (full && m.state != "closed") Box(
                     Modifier.size(44.dp).clip(CircleShape).clickable(role = Role.Button, onClickLabel = "Change the goal") { editing = true }.semantics { contentDescription = "Change the goal" },
@@ -221,6 +230,10 @@ fun MissionScreen(
                 if (d.open) DecisionCard(d, now, host, onQuestion, onSession, showSpace = false, tag = if (i == 0 && decisions.count { it.open } > 1) "Next" else null)
                 else DecisionDone(d)
             }
+            if (held.isNotEmpty()) {
+                SectionLabel(DecisionModel.holdLabel(held.size))
+                held.forEach { d -> HeldCard(d, now, host, onQuestion, onSession, showSpace = false) }
+            }
 
             // On prod, on dev, open; and its releases: as the Mac's space panel shows them.
             track?.takeIf { it.repos.isNotEmpty() }?.let { ReleaseTrackCard(it, now) }
@@ -237,8 +250,21 @@ fun MissionScreen(
                 }
             }
 
+            // Which account each runs on, and what the failover moved (a tower with accounts).
+            val board = remember(state?.accounts) { dev.herdertower.phone.api.AccountsApi.parse(state?.accounts) }
+            fun seat(address: String?, account: String?) = dev.herdertower.phone.api.AccountsApi.seat(board, address, account, ::clock)
             if (m.sessions.isNotEmpty()) {
                 SectionLabel("Sessions")
+                // Its own tower first, with its account.
+                m.tower?.takeIf { it.status.isNotBlank() && it.status != "off" }?.let { t ->
+                    val acc = t.account ?: state?.brains?.firstOrNull { it.space == name }?.account
+                    SignRow(
+                        sign = { SessionSign(if (t.status == "working") "working" else if (t.status == "blocked") "blocked" else "idle") },
+                        name = "Its tower", right = SessionModel.statusWord(t.status), sub = t.name,
+                        note = seat(t.address, acc),
+                        onClick = t.address?.takeIf { it.isNotBlank() }?.let { a -> { onSession(a) } },
+                    )
+                }
                 m.sessions.forEach { s ->
                     SignRow(
                         sign = { SessionSign(if (s.runsJob) "working" else s.status) },
@@ -246,6 +272,7 @@ fun MissionScreen(
                         // A job it left running says what, since when and its last progress, over its last words.
                         sub = s.job?.line?.takeIf { it.isNotBlank() } ?: SessionModel.said(s, history, jobs),
                         mono = SessionModel.place(s).takeIf { it.isNotBlank() },
+                        note = seat(s.address, s.account),
                         onClick = { onSession(s.address) },
                     )
                 }
@@ -329,6 +356,34 @@ fun MissionScreen(
             },
             dismissButton = { TextButton(onClick = { busy = null }) { Text("Wait for them") } },
         )
+    }
+}
+
+/**
+ * How the goal came to be: "Goal, updated by your request at 15:55", the
+ * request and what it added; then the earlier versions, folded, newest first.
+ */
+@Composable
+private fun GoalHistory(m: Mission) {
+    val now = dev.herdertower.phone.api.GoalsApi.current(m)
+    dev.herdertower.phone.api.GoalsApi.how(now, ::clock)?.let { Text(it, style = MaterialTheme.typography.labelMedium, color = tc.faint) }
+    now?.takeIf { it.by == "request" }?.let { v ->
+        v.request?.takeIf { it.isNotBlank() }?.let { Text("Your request: “$it”", style = MaterialTheme.typography.bodySmall, color = tc.muted, maxLines = 3, overflow = TextOverflow.Ellipsis) }
+        v.why?.takeIf { it.isNotBlank() }?.let { Text(it.replaceFirstChar { c -> c.uppercase() }, style = MaterialTheme.typography.bodySmall, color = tc.muted) }
+    }
+    val earlier = dev.herdertower.phone.api.GoalsApi.earlier(m)
+    if (earlier.isEmpty()) return
+    var open by rememberSaveable(m.name) { mutableStateOf(false) }
+    TextButton(onClick = { open = !open }, modifier = Modifier.heightIn(min = 40.dp), contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 0.dp)) {
+        Text(if (open) "Hide the earlier versions" else "${earlier.size} earlier version${if (earlier.size == 1) "" else "s"}", color = tc.muted, style = MaterialTheme.typography.labelLarge)
+    }
+    if (open) earlier.forEach { v ->
+        Column(Modifier.padding(bottom = 6.dp), verticalArrangement = Arrangement.spacedBy(1.dp)) {
+            Text(listOf(if (v.atMs > 0) clock(v.atMs) else "", dev.herdertower.phone.api.GoalsApi.by(v)).filter { it.isNotBlank() }.joinToString(" · "), style = MaterialTheme.typography.labelSmall, color = tc.faint)
+            Text(v.goal, style = MaterialTheme.typography.bodySmall, color = tc.muted)
+            v.doneWhen.takeIf { it.isNotBlank() }?.let { Text("Done when $it", style = MaterialTheme.typography.bodySmall, color = tc.faint) }
+            v.request?.takeIf { it.isNotBlank() && v.by == "request" }?.let { Text("Your request: “$it”", style = MaterialTheme.typography.bodySmall, color = tc.faint, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+        }
     }
 }
 

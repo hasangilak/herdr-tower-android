@@ -49,6 +49,12 @@ data class Pr(
     val validation: PrValidation? = null,
     /** Who outside depends on what it changes (a tower with `impact`). */
     val impact: PrImpact? = null,
+    /** GitHub's word on its merge (`clean`, `behind`, `dirty`, `blocked`, `unknown`, …), lowercased; "" from an older tower. */
+    @SerialName("merge_state") val mergeState: String = "",
+    /** Its reviewer session's review, short (a tower with `reviews`); null when it has none. */
+    val review: PrReview? = null,
+    /** Its session asked to fix its conflicts (or bring it up to date with its base), and how that goes; null when nobody was. */
+    val fix: PrFix? = null,
 ) {
     val open: Boolean get() = state == "open"
 
@@ -75,6 +81,35 @@ data class PrScore(
     val planned: String? = null,
     /** The head commit whose files were read. */
     val sha: String? = null,
+)
+
+/** A PR's review by its reviewer session: [status] `reviewing`, `changes`, `agreed`, `stuck` or `ended`; [line] what its chip says. */
+@Serializable
+data class PrReview(
+    val status: String = "",
+    val rounds: Int = 0,
+    val critical: Int = 0,
+    val reviewer: String? = null,
+    @SerialName("reviewer_name") val reviewerName: String? = null,
+    val line: String = "",
+) {
+    /** The review still runs: its reviewer reads it, or its session fixes what the review found. */
+    val running: Boolean get() = status == "reviewing" || status == "changes"
+}
+
+/**
+ * A PR its session was asked to fix (herder-tower's `fixes`): [what]
+ * `conflicts` or `behind`, the session asked ([to], [toName]), when and how
+ * many times; [back]: why it came back to the user (it is theirs then).
+ */
+@Serializable
+data class PrFix(
+    val what: String = "",
+    val to: String = "",
+    @SerialName("to_name") val toName: String = "",
+    @SerialName("asked_ms") val askedMs: Long = 0,
+    val tries: Int = 0,
+    val back: String? = null,
 )
 
 /** The tower's own merge of a PR: `merged` or `failed`, and why. */
@@ -183,6 +218,26 @@ object PrsApi {
         }
         return out
     }
+
+    /** What keeps it from merging that its session fixes, as the tower reads it: `conflicts`, `behind`, or null. */
+    fun trouble(pr: Pr): String? = when {
+        !pr.open || pr.draft -> null
+        pr.mergeable == "conflicting" || pr.mergeState == "dirty" -> "conflicts"
+        pr.mergeState == "behind" -> "behind"
+        else -> null
+    }
+
+    /** Its session is fixing it now (asked, not back with the user): the tower's, not the user's, until it merges cleanly. */
+    fun fixing(pr: Pr): Boolean = pr.open && !pr.draft && pr.fix != null && pr.fix.back == null &&
+        (trouble(pr) != null || pr.mergeable == "unknown" || pr.mergeState == "unknown")
+
+    /**
+     * Ready for the user's merge, as the tower decides it: open, not a
+     * draft, no review of it still running (its reviewer reading it, or its
+     * session fixing what the review found), and nothing its session is
+     * fixing. Until then it waits for nobody: it is in no merge.
+     */
+    fun readyForUser(pr: Pr): Boolean = pr.open && !pr.draft && pr.review?.running != true && !fixing(pr)
 
     /** A chat message's PR, when it is a PR chip; a chip without one (not looked up yet) is just its key and title. */
     fun of(m: ChatMessage): Pr? = m.pr?.takeIf { m.role == "pr" || m.kind == "pr" }

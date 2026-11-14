@@ -368,6 +368,14 @@ class TowerClient(
         call(http, request(url("decisions", id)).delete().build(), Ignored.serializer())
     }
 
+    /** `POST /v1/decisions/{id}/hold`: off the user's plate, with their words ([reason]), until it changes. `409 closed`: over already. */
+    suspend fun holdDecision(id: String, reason: String?): Decision =
+        post(DecisionResponse.serializer(), DecisionsApi.holdBody(reason).toRequestBody(JSON), "decisions", id, "hold").decision
+
+    /** `POST /v1/decisions/{id}/unhold`: back in the queue. `409 not_on_hold`, `409 closed`. */
+    suspend fun unholdDecision(id: String, why: String? = null): Decision =
+        post(DecisionResponse.serializer(), DecisionsApi.unholdBody(why).toRequestBody(JSON), "decisions", id, "unhold").decision
+
     /** `GET /v1/missions`: every open space as a mission, the quiet ones and today's closed ones by name. */
     suspend fun missions(): MissionsResponse = get(MissionsResponse.serializer(), "missions")
 
