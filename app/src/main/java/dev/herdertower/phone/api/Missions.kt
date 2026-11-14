@@ -16,9 +16,35 @@ data class MissionSession(
     val port: Int? = null,
     /** Its last words, when the tower says them. */
     val said: String? = null,
+    /** A job it left running in the background (feature `jobs`): its turn may be done, its work isn't. */
+    val job: MissionJob? = null,
 ) {
     val label: String get() = name.ifBlank { address }
+
+    /** A job of it runs and isn't quiet: at work, whatever its turn says. */
+    val runsJob: Boolean get() = job != null && !job.stuck
+
+    /** Its status as its row says it: "running a job" (or "job quiet") while its turn is over and a job runs. */
+    val statusShown: String get() = when {
+        job != null && status in setOf("done", "idle", "") -> if (job.stuck) "job quiet" else "running a job"
+        else -> status
+    }
 }
+
+/**
+ * A job a session left running, as the tower shows it: what, since when, its
+ * last progress (Unix ms), [stuck] when every job of the session is quiet and
+ * idle, [more] other jobs, and [line] ("running a job: …, since 00:21, last progress 00:33").
+ */
+@Serializable
+data class MissionJob(
+    val what: String = "",
+    @SerialName("since_ms") val sinceMs: Long = 0,
+    @SerialName("progress_ms") val progressMs: Long? = null,
+    val stuck: Boolean = false,
+    val more: Int = 0,
+    val line: String = "",
+)
 
 /** A request of the user's in a space and how far it is: [done] of [total] tasks. */
 @Serializable
@@ -302,7 +328,8 @@ object MissionsApi {
         m.needs > 0 -> Mood.Needs
         m.state == "ready" -> Mood.Ready
         m.state == "quiet" || m.state == "closed" -> Mood.Quiet
-        m.sessions.any { it.status == "working" || it.status == "blocked" } -> Mood.Working
+        // A session whose turn is over while a job it started runs is at work too.
+        m.sessions.any { it.status == "working" || it.status == "blocked" || it.runsJob } -> Mood.Working
         m.requests.isNotEmpty() && m.requests.all { it.finished } -> Mood.Done
         else -> Mood.Idle
     }

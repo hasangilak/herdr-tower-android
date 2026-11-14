@@ -31,6 +31,28 @@ class MissionsTest {
         assertEquals(MissionRequest("a31", "Plan the storefront live editor", "done", 3, 3), s.requests[0])
     }
 
+    /** A session whose turn is done while a job it started in the background runs (feature `jobs`). */
+    @Test fun aSessionWithAJobRunningIsAtWork() {
+        val body = """{"spaces":[{"name":"search-llm","state":"open","requests":[{"id":"a1","title":"Train it","state":"done","done":1,"total":1}],"sessions":[
+            {"address":"t12r","name":"eyz search llm","status":"done","account":"orca",
+             "job":{"what":"Restart v2 training","since_ms":1794616860000,"progress_ms":1794618120000,"stuck":false,"more":1,"line":"running a job: Restart v2 training, since 01:21, last progress 01:42 (+1 more)"}},
+            {"address":"t12t","name":"sooner","status":"done"}]}],"quiet":[]}"""
+        val m = TowerJson.decodeFromString(MissionsResponse.serializer(), body).spaces[0]
+        val (r, t) = m.sessions
+        assertEquals("Restart v2 training", r.job?.what)
+        assertEquals(1794618120000L, r.job?.progressMs)
+        assertEquals(true, r.runsJob)
+        assertEquals("running a job", r.statusShown)
+        assertEquals("done", t.statusShown)
+        assertEquals(Mood.Working, MissionsApi.mood(m)) // its requests are done, but a job still runs
+        // Quiet and idle for long: shown as such, and the space isn't at work for it.
+        val quiet = r.copy(job = r.job?.copy(stuck = true))
+        assertEquals("job quiet", quiet.statusShown)
+        assertEquals(Mood.Done, MissionsApi.mood(m.copy(sessions = listOf(quiet, t))))
+        // A session still in its turn says so, job or not.
+        assertEquals("working", r.copy(status = "working").statusShown)
+    }
+
     @Test fun howEachStands() {
         val (sandbox, isa, m5, anna) = all.spaces
         assertEquals(Mood.Needs, MissionsApi.mood(sandbox)) // a decision waits there, whatever else
