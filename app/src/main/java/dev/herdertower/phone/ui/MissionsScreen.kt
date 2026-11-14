@@ -71,6 +71,8 @@ fun MissionsScreen(session: TowerSession, onSpace: (String) -> Unit, onNew: () -
     var quietOpen by rememberSaveable { mutableStateOf(false) }
     // In the tower's own order, as its window on the Mac lists them.
     val list = missions.spaces
+    // Each space's time at work moves between reads: the list's clock ticks while any has a count.
+    val now = rememberNow(list.any { it.active != null })
 
     Column(Modifier.fillMaxSize()) {
         TopBar("Spaces", MissionsModel.counts(missions))
@@ -83,7 +85,8 @@ fun MissionsScreen(session: TowerSession, onSpace: (String) -> Unit, onNew: () -
                 items(list, key = { "s:" + it.name }) { m ->
                     SignRow(
                         sign = { MoodGlyph(MissionsApi.mood(m), m.needs, m.mute) },
-                        name = m.name, right = MissionsApi.progress(m), sub = MissionsApi.line(m), note = summary(m.name),
+                        name = m.name, right = listOfNotNull(dev.herdertower.phone.api.ActiveTime.compact(m.active, now), MissionsApi.progress(m).takeIf { it.isNotBlank() }).joinToString(" · "),
+                        sub = MissionsApi.line(m), note = summary(m.name),
                         onClick = { onSpace(m.name) },
                     )
                 }

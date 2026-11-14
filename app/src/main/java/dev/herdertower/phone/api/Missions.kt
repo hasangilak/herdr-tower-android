@@ -85,6 +85,8 @@ data class Mission(
     @SerialName("ready_since_ms") val readySinceMs: Long? = null,
     /** When a ready space closes by itself (null: it won't). */
     @SerialName("auto_close_ms") val autoCloseMs: Long? = null,
+    /** How long its sessions have been at work, and waited on the user (absent from an older tower). */
+    val active: MissionActive? = null,
 ) {
     /** Its own tower takes what is asked here (else the main tower does, with the space named). */
     val ownTower: Boolean get() = tower?.status == "ready" || tower?.status == "working"
@@ -132,6 +134,85 @@ object GoalsApi {
         "launch" -> "launch"
         "tower" -> "the tower"
         else -> "before versions were kept"
+    }
+}
+
+/**
+ * A space's active time, as the tower last worked it out ([atMs]): [now]
+ * a session of it works or runs a background job (since [sinceMs]), its
+ * time at work today (the Mac's day) and since it opened, and the time it
+ * waited on the user. Its own tower, its reviewers and idle time don't count.
+ */
+@Serializable
+data class MissionActive(
+    @SerialName("at_ms") val atMs: Long = 0,
+    val now: Boolean = false,
+    @SerialName("since_ms") val sinceMs: Long? = null,
+    @SerialName("today_ms") val todayMs: Long = 0,
+    @SerialName("total_ms") val totalMs: Long = 0,
+    @SerialName("waiting_now") val waitingNow: Boolean = false,
+    @SerialName("waiting_today_ms") val waitingTodayMs: Long = 0,
+    @SerialName("waiting_total_ms") val waitingTotalMs: Long = 0,
+)
+
+/**
+ * Active time between two reads: the time since the tower's figures goes
+ * to what runs now (at work, or waiting on the user), so the numbers move
+ * without asking the tower again.
+ */
+object ActiveTime {
+    data class Live(val stretchMs: Long?, val todayMs: Long, val totalMs: Long, val waitingTodayMs: Long, val waitingTotalMs: Long)
+
+    fun live(a: MissionActive, now: Long): Live {
+        val gone = if (a.atMs > 0) (now - a.atMs).coerceAtLeast(0) else 0
+        val work = if (a.now) gone else 0
+        val wait = if (a.waitingNow && !a.now) gone else 0
+        return Live(
+            stretchMs = a.sinceMs?.takeIf { a.now && it > 0 }?.let { (now - it).coerceAtLeast(0) },
+            todayMs = a.todayMs + work, totalMs = a.totalMs + work,
+            waitingTodayMs = a.waitingTodayMs + wait, waitingTotalMs = a.waitingTotalMs + wait,
+        )
+    }
+
+    /** "42m" under an hour, else "1h 05m". */
+    fun duration(ms: Long): String {
+        val min = (ms / 60_000).coerceAtLeast(0)
+        return if (min < 60) "${min}m" else "${min / 60}h ${(min % 60).toString().padStart(2, '0')}m"
+    }
+
+    private const val MINUTE = 60_000L
+
+    /**
+     * The space screen's line, as the Mac's: "Active now · 1h 12m this
+     * stretch · 3h 05m today · 14h 20m since it opened · waited on you 25m
+     * today", "Not at work now · …", "Waiting on you now · …"; null when
+     * it has been at work under a minute in all and isn't now.
+     */
+    fun line(a: MissionActive?, now: Long): String? {
+        a ?: return null
+        val l = live(a, now)
+        if (!a.now && l.totalMs < MINUTE) return null
+        return buildList {
+            add(
+                when {
+                    a.now -> "Active now"
+                    a.waitingNow -> "Waiting on you now"
+                    else -> "Not at work now"
+                },
+            )
+            l.stretchMs?.let { add("${duration(it)} this stretch") }
+            add("${duration(l.todayMs)} today")
+            add("${duration(l.totalMs)} since it opened")
+            if (l.waitingTodayMs >= MINUTE) add("waited on you ${duration(l.waitingTodayMs)} today")
+        }.joinToString(" · ")
+    }
+
+    /** The spaces list's word: "at work 12m" (this stretch) while at work, else "1h 12m today"; null under a minute today. */
+    fun compact(a: MissionActive?, now: Long): String? {
+        a ?: return null
+        val l = live(a, now)
+        if (a.now) return "at work " + duration(l.stretchMs ?: 0)
+        return l.todayMs.takeIf { it >= MINUTE }?.let { "${duration(it)} today" }
     }
 }
 
