@@ -67,8 +67,78 @@ object DecisionModel {
      * fail (the tower's `merge` gate, as the Mac's card leaves it out). Its
      * answer is shown as not included, with why, and is never a merge button.
      */
-    fun leftOut(d: Decision, i: Int): Boolean =
-        d.kind == "merge" && d.prs.getOrNull(i)?.merge?.let { it.blocked != null || it.needsOverride != null } == true
+    fun leftOut(d: Decision, i: Int, known: Map<String, Pr> = emptyMap()): Boolean {
+        if (d.kind != "merge") return false
+        val p = d.prs.getOrNull(i) ?: return false
+        return p.merge?.let { it.blocked != null || it.needsOverride != null } == true ||
+            d.options.getOrNull(i)?.label?.contains("isn't in this merge") == true ||
+            known[p.key]?.let { !PrModel.readyForUser(it) } == true
+    }
+
+    /**
+     * A left-out PR's answer, in words: the tower's own ("#840 isn't in this
+     * merge: it's a draft"), or what the phone knows of it now (its session
+     * fixing it, its review still running, a draft).
+     */
+    fun leftOutLabel(d: Decision, i: Int, known: Map<String, Pr> = emptyMap()): String {
+        val label = d.options.getOrNull(i)?.label.orEmpty()
+        val p = d.prs.getOrNull(i) ?: return label
+        if (label.contains("isn't in this merge")) return label
+        val pr = known[p.key]
+        val why = when {
+            pr != null && PrModel.fixing(pr) -> PrModel.fixLine(pr)?.removeSuffix(".")?.replaceFirstChar { it.lowercase() } ?: "its session is fixing it"
+            pr?.draft == true -> "it's a draft"
+            pr?.review?.running == true -> "its review still runs"
+            else -> return label
+        }
+        return "#${p.number} isn't in this merge: $why"
+    }
+
+    /** The PRs a merge card merges, in order: those not left out. */
+    fun goes(d: Decision, known: Map<String, Pr> = emptyMap()): List<DecisionPr> =
+        if (d.kind != "merge") emptyList() else d.prs.filterIndexed { i, _ -> !leftOut(d, i, known) }
+
+    /**
+     * What a merge card's one button merges, named so it can't be misread (as
+     * the tower's `merge_what`): "#839 and #842", "all 4" (every PR of the
+     * card, three or more), "5 of 7" (too many to name). Never "both".
+     */
+    fun mergeWhat(numbers: List<Long>, total: Int): String = when {
+        numbers.size == total && total >= 3 -> "all $total"
+        numbers.size <= 4 -> numbers.map { "#$it" }.let { if (it.size < 2) it.joinToString() else it.dropLast(1).joinToString(", ") + " and " + it.last() }
+        else -> "${numbers.size} of $total"
+    }
+
+    /** The button that merges every PR going in, in order ("Merge #839 and #842"), or null when one or none goes. */
+    fun mergeAllLabel(d: Decision, known: Map<String, Pr> = emptyMap()): String? =
+        goes(d, known).takeIf { it.size >= 2 }?.let { "Merge " + mergeWhat(it.map { p -> p.number }, d.prs.size) }
+
+    /** Under it: "In order: #839 into dev, then #842 into dev." */
+    fun mergeAllWhy(d: Decision, known: Map<String, Pr> = emptyMap()): String =
+        "In order: " + goes(d, known).joinToString(", then ") { "#${it.number} into ${it.base.ifBlank { "its base" }}" } + ". Each shows what it does before it merges."
+
+    /** The sheet's line for the [i]th of [all]: "1 of 2 in this merge: #839, then #842". */
+    fun chainNote(all: List<DecisionPr>, i: Int): String =
+        "${i + 1} of ${all.size} in this merge: " + all.joinToString(", then ") { "#${it.number}" }
+
+    /** "Back from hold: PR #829 merged, which it waited for", on a card that came back; null otherwise. */
+    fun backLine(d: Decision): String? = d.back?.takeIf { d.hold == null }?.why?.trim()?.takeIf { it.isNotEmpty() }?.let { "Back from hold: $it" }
+
+    /** An On hold card's lines: the user's words in quotes (none: nothing), and who held it and since when ("Held by you, on a phone, since 14:20"). */
+    fun holdReason(d: Decision): String? = d.hold?.reason?.trim()?.takeIf { it.isNotEmpty() }?.let { "“$it”" }
+
+    fun holdLine(d: Decision): String {
+        val h = d.hold ?: return "On hold"
+        val since = if (h.sinceMs > 0) " since ${clock(h.sinceMs)}" else ""
+        val waits = h.untilPrs.takeIf { it.isNotEmpty() }?.joinToString(", ") { "#" + it.substringAfter('#') }?.let { " · back when $it merges" }.orEmpty()
+        return "Held by ${DecisionsApi.heldBy(h.by)}$since$waits"
+    }
+
+    /** "On hold · 2". */
+    fun holdLabel(n: Int): String = "On hold · $n"
+
+    /** Whether it can be put on hold from here: open, the tower's own (not one made here). */
+    fun holdable(d: Decision): Boolean = d.open && !d.legacy && d.hold == null
 
     /** "3 sessions wait · 2 min". */
     fun stakeLine(d: Decision, now: Long): String = listOf(DecisionsApi.stake(d), DecisionsApi.waited(d, now)).filter { it.isNotBlank() }.joinToString(" · ")
@@ -110,6 +180,22 @@ object DecisionModel {
      * one by one.
      */
     enum class Fallback { Questions, Words, Show, None }
+
+    /**
+     * A card the tower couldn't read (`blocked`, or a kind the app doesn't
+     * know) whose session has a question set open now: its dialog, read
+     * since. Its options are the card's answers, as on the Mac; Show on Mac
+     * stays only as the way out.
+     */
+    fun blockedSet(d: Decision, questions: List<dev.herdertower.phone.api.Question>): dev.herdertower.phone.api.Question? {
+        if (answerable(d)) return null
+        val here = d.sessions.map { it.address }.filter { it.isNotBlank() }.toSet()
+        return questions.filter { it.session in here && it.status in setOf("open", "failed") && it.tabs.isNotEmpty() }.maxByOrNull { it.atMs }
+    }
+
+    /** A blocked card's answers from its session's question set: the tower's recommendations, else a short menu's own options. */
+    fun blockedOptions(q: dev.herdertower.phone.api.Question): List<dev.herdertower.phone.api.DecisionOption> =
+        DecisionsApi.ofQuestion(q, "").options
 
     fun fallback(d: Decision): Fallback = when {
         !answerable(d) -> if (d.sessions.any { it.address.isNotBlank() }) Fallback.Show else Fallback.None
@@ -153,6 +239,64 @@ object DecisionModel {
 class DecisionHost(private val session: TowerSession, private val scope: CoroutineScope, private val snack: (String) -> Unit) {
     var words by mutableStateOf<Decision?>(null)
     var merging by mutableStateOf<Pr?>(null)
+    /** A merge of several, in order, while its sheet steps through them: the PRs and which one is up. */
+    var chain by mutableStateOf<Pair<List<DecisionPr>, Int>?>(null)
+
+    /** The PRs as the phone knows them now (what a merge card's rows say beyond the decision). */
+    val prs get() = session.prs
+
+    /** The question sets blocked sessions have open now (a blocked card answers with its session's). */
+    val questions get() = session.questions
+
+    /** A blocked card's answer, from its session's question set: typed into the dialog by the tower. */
+    fun answerSet(q: dev.herdertower.phone.api.Question, label: String) {
+        val choice = DecisionsApi.legacyChoice(q, label) ?: return snack("The question changed: open it to answer.")
+        scope.launch {
+            session.answerQuestion(q.id, listOf(dev.herdertower.phone.api.TabAnswer(0, choice)))
+                .onSuccess { snack("Answered: $label") }
+                .onFailure { snack("Couldn't answer: ${TowerSession.describe(it)}") }
+        }
+    }
+
+    /** Every PR the card merges, in order: each one's own look and merge, the next opening once one merged. */
+    fun mergeAll(list: List<DecisionPr>) {
+        if (list.isEmpty()) return
+        chain = list to 0
+        merge(list.first())
+    }
+
+    private fun mergedOne() {
+        val (list, i) = chain ?: return run { merging = null }
+        val next = list.getOrNull(i + 1)
+        if (next == null) {
+            chain = null
+            merging = null
+            if (list.size > 1) snack("Merged ${DecisionModel.mergeWhat(list.map { it.number }, list.size)}.")
+        } else {
+            chain = list to i + 1
+            merge(next)
+        }
+    }
+    /** The decision whose Hold asks for the user's reason now. */
+    var holding by mutableStateOf<Decision?>(null)
+
+    /** On hold, with the user's words: off the queue and every count until it changes. */
+    fun hold(d: Decision, reason: String) {
+        scope.launch {
+            session.holdDecision(d, reason)
+                .onSuccess { snack("On hold: it's off your queue until it changes.") }
+                .onFailure { snack(if (it is DecisionOver) it.message.orEmpty() else "Couldn't hold it: ${TowerSession.describe(it)}") }
+        }
+    }
+
+    /** "Back to waiting": in the queue again, counted. */
+    fun unhold(d: Decision) {
+        scope.launch {
+            session.unholdDecision(d)
+                .onSuccess { snack("Back on your queue.") }
+                .onFailure { snack(if (it is DecisionOver) it.message.orEmpty() else "Couldn't take it off hold: ${TowerSession.describe(it)}") }
+        }
+    }
 
     fun answer(d: Decision, index: Int) {
         if (d.kind == "merge") {
@@ -205,7 +349,34 @@ class DecisionHost(private val session: TowerSession, private val scope: Corouti
         }
         merging?.let { p ->
             val prs by session.prs.collectAsStateWithLifecycle()
-            MergeSheet(session, prs[p.id] ?: p) { merging = null }
+            val c = chain
+            MergeSheet(
+                session, prs[p.id] ?: p,
+                onDismiss = { merging = null; chain = null },
+                chain = c?.let { (list, i) -> DecisionModel.chainNote(list, i) },
+                onMerged = if (c != null) ({ mergedOne() }) else null,
+            )
+        }
+        holding?.let { d ->
+            var reason by remember(d.id) { mutableStateOf("") }
+            AlertDialog(
+                onDismissRequest = { holding = null },
+                title = { Text("Put it on hold") },
+                text = {
+                    Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                        Text(d.title, style = MaterialTheme.typography.bodyMedium, color = tc.muted, maxLines = 3, overflow = TextOverflow.Ellipsis)
+                        Text("It stays open, off your queue and uncounted, and comes back by itself when it changes.", style = MaterialTheme.typography.bodySmall, color = tc.faint)
+                        OutlinedTextField(reason, { reason = it }, Modifier.fillMaxWidth(), minLines = 1, maxLines = 4, placeholder = { Text("What it waits for (optional)") })
+                    }
+                },
+                confirmButton = {
+                    TextButton(onClick = {
+                        hold(d, reason.trim())
+                        holding = null
+                    }) { Text("Hold") }
+                },
+                dismissButton = { TextButton(onClick = { holding = null }) { Text("Cancel") } },
+            )
         }
     }
 }
@@ -238,6 +409,10 @@ fun DecisionCard(
     val context = LocalContext.current
     val snack = LocalSnack.current
     var menu by remember { mutableStateOf(false) }
+    val known by host.prs.collectAsStateWithLifecycle()
+    val sets by host.questions.collectAsStateWithLifecycle()
+    // A blocked session whose dialog the tower has read since: answered here, with its own options.
+    val blocked = DecisionModel.blockedSet(d, sets)
     Card(modifier, strong = true) {
         Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
             Row(verticalAlignment = Alignment.Top) {
@@ -267,11 +442,13 @@ fun DecisionCard(
                                 if (!openPr(context, Pr(repo = pr.repo, number = pr.number, url = pr.url.orEmpty()))) snack("No link for this pull request.")
                             })
                         }
+                        if (DecisionModel.holdable(d)) DropdownMenuItem(text = { Text("Put on hold…") }, onClick = { menu = false; host.holding = d })
                         if (d.open && !(d.legacy && d.kind == "merge")) DropdownMenuItem(text = { Text("Dismiss: it isn't mine") }, onClick = { menu = false; host.dismiss(d) })
                     }
                 }
             }
             Text(d.title, Modifier.semantics { heading() }, style = MaterialTheme.typography.titleLarge, color = tc.text, fontWeight = FontWeight.SemiBold)
+            DecisionModel.backLine(d)?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.decisionInk, fontWeight = FontWeight.Medium) }
             DecisionModel.detail(d)?.let { detail -> Text(
                 detail,
                 Modifier.fillMaxWidth().clip(RoundedCornerShape(14.dp)).background(tc.screen).heightIn(max = 160.dp).verticalScroll(rememberScrollState()).padding(12.dp),
@@ -298,10 +475,14 @@ fun DecisionCard(
                 }
                 !d.open -> DoneLine(d)
                 else -> Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    // Several go in: one button names exactly those, merged in order (each still shows what it does first).
+                    val all = if (perPr(d) && !d.legacy) DecisionModel.mergeAllLabel(d, known) else null
+                    if (all != null) BigAnswer(all, primary = true, why = DecisionModel.mergeAllWhy(d, known)) { host.mergeAll(DecisionModel.goes(d, known)) }
                     if (DecisionModel.answerable(d)) d.options.forEachIndexed { i, o ->
                         // Left out of the merge: its words say so ("#840 isn't in this merge: it's a draft"), not a button.
-                        val out = DecisionModel.leftOut(d, i)
-                        BigAnswer(o.label, primary = o.pick && !out, why = o.why, enabled = !out) { host.answer(d, i) }
+                        val out = DecisionModel.leftOut(d, i, known)
+                        val label = if (out) DecisionModel.leftOutLabel(d, i, known) else if (all != null) d.prs.getOrNull(i)?.let { "Merge only #${it.number} into ${it.base.ifBlank { "its base" }}" } ?: o.label else o.label
+                        BigAnswer(label, primary = o.pick && !out && all == null, why = o.why, enabled = !out) { host.answer(d, i) }
                         // A merge's row, as the Mac's: a breaking change first (rose), its review score (amber: needs review; cyan: low
                         // risk; not when the break is its only reason), its planned checks, or that nothing outside depends on it.
                         if (d.kind == "merge") d.prs.getOrNull(i)?.let { p ->
@@ -314,7 +495,14 @@ fun DecisionCard(
                             QuietImpactLine(p.impact, pad)
                         }
                     }
-                    when (DecisionModel.fallback(d)) {
+                    if (blocked != null) {
+                        val opts = DecisionModel.blockedOptions(blocked)
+                        if (opts.isNotEmpty() && blocked.tabs.size == 1) opts.forEach { o -> BigAnswer(o.label, primary = o.pick, why = o.why) { host.answerSet(blocked, o.label) } }
+                        else BigAnswer(if (blocked.tabs.size > 1) "Answer the ${blocked.tabs.size} questions" else "Answer", primary = true) { onQuestion(blocked.id) }
+                        d.sessions.firstOrNull { it.address == blocked.session }?.let { s ->
+                            TextButton(onClick = { host.show(s) }, modifier = Modifier.heightIn(min = 48.dp)) { Text(DecisionModel.showLabel(d, s), color = tc.muted) }
+                        }
+                    } else when (DecisionModel.fallback(d)) {
                         DecisionModel.Fallback.Questions -> BigAnswer(if (d.why.endsWith("questions")) "Answer the ${d.why}" else "Answer", primary = true) { d.questionId?.let(onQuestion) }
                         DecisionModel.Fallback.Words -> BigAnswer("Answer in my words", primary = true) { host.words = d }
                         DecisionModel.Fallback.Show -> d.sessions.filter { it.address.isNotBlank() }.forEachIndexed { i, s ->
@@ -411,6 +599,42 @@ fun DecisionRow(d: Decision, now: Long, onClick: () -> Unit, modifier: Modifier 
     ) {
         Text(d.title, style = MaterialTheme.typography.titleMedium, color = tc.text, fontWeight = FontWeight.SemiBold, maxLines = 2, overflow = TextOverflow.Ellipsis)
         Text(DecisionModel.rowLine(d, now), style = MaterialTheme.typography.bodySmall, color = tc.muted, maxLines = 1, overflow = TextOverflow.Ellipsis)
+        DecisionModel.backLine(d)?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = tc.decisionInk, maxLines = 2, overflow = TextOverflow.Ellipsis) }
+    }
+}
+
+/**
+ * A decision on hold: its title, the user's words in quotes, who held it and
+ * since when, and "Back to waiting". Tap it to see the whole card (it can
+ * still be answered, merged or dismissed while held).
+ */
+@Composable
+fun HeldCard(
+    d: Decision,
+    now: Long,
+    host: DecisionHost,
+    onQuestion: (String) -> Unit,
+    onSession: (String) -> Unit,
+    modifier: Modifier = Modifier,
+    showSpace: Boolean = true,
+) {
+    var open by remember(d.id) { mutableStateOf(false) }
+    Column(modifier, verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(
+            Modifier.fillMaxWidth().clip(RoundedCornerShape(18.dp)).background(tc.card)
+                .clickable(role = Role.Button, onClickLabel = if (open) "Fold this decision" else "Show this decision whole") { open = !open }
+                .padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalArrangement = Arrangement.spacedBy(4.dp),
+        ) {
+            if (showSpace && d.space.isNotBlank()) Text(d.space, style = MaterialTheme.typography.labelMedium, color = tc.faint, maxLines = 1, overflow = TextOverflow.Ellipsis)
+            Text(d.title, style = MaterialTheme.typography.titleMedium, color = tc.muted, fontWeight = FontWeight.SemiBold, maxLines = if (open) 6 else 2, overflow = TextOverflow.Ellipsis)
+            DecisionModel.holdReason(d)?.let { Text(it, style = MaterialTheme.typography.bodyMedium, color = tc.text) }
+            Text(DecisionModel.holdLine(d), style = MaterialTheme.typography.bodySmall, color = tc.faint)
+            Row(Modifier.padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                PillButton("Back to waiting", primary = true) { host.unhold(d) }
+            }
+        }
+        if (open) DecisionCard(d, now, host, onQuestion, onSession, showSpace = showSpace)
     }
 }
 

@@ -668,7 +668,7 @@ class TowerSession(
             }
             is TowerEvent.DecisionsChanged -> {
                 _decisionsSupported.value = true
-                ev.decisions?.let { setDecisions(it.decisions) } ?: scope.launch { loadDecisions() }
+                ev.decisions?.let { setDecisions(it) } ?: scope.launch { loadDecisions() }
             }
             is TowerEvent.MissionsChanged -> {
                 _missionsSupported.value = true
@@ -709,8 +709,24 @@ class TowerSession(
     /** Every open decision as the tower last gave it (muted ones marked), or as it was made here, before this phone's own marks on it. */
     private var queue: List<Decision> = emptyList()
 
+    /** Every decision the user put on hold, as the tower last gave them (muted spaces' marked): listed apart, never counted or notified. */
+    private var heldQueue: List<Decision> = emptyList()
+
+    private val _onHold = MutableStateFlow<List<Decision>>(emptyList())
+    /** The main queue's decisions on hold (a muted space's left out, as its decisions are), newest hold first: shown under On hold only. */
+    val onHold: StateFlow<List<Decision>> = _onHold.asStateFlow()
+
+    /** What the tower sent: its queue, and what is on hold apart from it. */
+    private fun setDecisions(r: dev.herdertower.phone.api.DecisionsResponse) {
+        val (open, held) = DecisionsApi.split(r)
+        heldQueue = held
+        setDecisions(open)
+    }
+
     private fun setDecisions(list: List<Decision>) {
-        queue = list
+        // One that carries a hold is on hold, wherever it was listed.
+        heldQueue = (heldQueue.filterNot { h -> list.any { it.id == h.id && !it.held } } + list.filter { it.held }).distinctBy { it.id }
+        queue = list.filterNot { it.held }
         showDecisions()
         decisionNotices.follow(held(queue), background = !_foreground.value)
         // A notification shows with the app away: keep an eye on it, so it goes soon after the decision is over.
@@ -721,6 +737,7 @@ class TowerSession(
     /** The main queue with this phone's marks: shown again whenever one of them changes. */
     private fun showDecisions() {
         _decisions.value = held(DecisionsApi.main(queue))
+        _onHold.value = heldQueue.filterNot { it.muted }
     }
 
     /** [list] as this phone shows it: an answer on its way stays "answering", a failed one says why. */
@@ -759,10 +776,10 @@ class TowerSession(
         for (wait in RELOAD_WAITS_MS) {
             val c = client ?: return
             try {
-                val list = c.decisions().decisions
+                val r = c.decisions()
                 _decisionsSupported.value = true
                 // The main queue leaves a muted space's out: those the event brought stay (they're seen, never notified).
-                setDecisions(list + queue.filter { it.muted && list.none { d -> d.id == it.id } })
+                setDecisions(withMuted(r))
                 return
             } catch (e: CancellationException) {
                 throw e
@@ -782,13 +799,67 @@ class TowerSession(
         }
     }
 
-    /** One space's own decisions (a muted space's aren't in the queue), in order. */
-    suspend fun spaceDecisions(space: String): List<Decision> {
+    /** The main queue as the tower read it, with a muted space's decisions the event brought kept (the call leaves them out). */
+    private fun withMuted(r: dev.herdertower.phone.api.DecisionsResponse) = r.copy(
+        decisions = r.decisions + queue.filter { it.muted && r.decisions.none { d -> d.id == it.id } },
+        onHold = r.onHold + heldQueue.filter { it.muted && r.onHold.none { d -> d.id == it.id } },
+    )
+
+    /** One space's own decisions (a muted space's aren't in the queue), in order; none on hold. */
+    suspend fun spaceDecisions(space: String): List<Decision> = spaceQueue(space).first
+
+    /** One space's own decisions in order, and those on hold there (newest hold first). */
+    suspend fun spaceQueue(space: String): Pair<List<Decision>, List<Decision>> {
         if (_decisionsSupported.value == true) {
-            act { it.decisions(space) }.onSuccess { return held(it.decisions) }
+            act { it.decisions(space) }.onSuccess { r ->
+                val (open, held) = DecisionsApi.split(r)
+                return held(open) to held
+            }
         }
-        return held(queue.filter { it.space == space })
+        return held(queue.filter { it.space == space }) to heldQueue.filter { it.space == space }
     }
+
+    /**
+     * Puts [d] on hold with the user's words: it leaves the queue and every
+     * count at once (before the tower's event says so), and is listed under
+     * On hold until it changes or is let go.
+     */
+    suspend fun holdDecision(d: Decision, reason: String?): Result<Decision> {
+        if (d.legacy) return Result.failure(IllegalStateException("This tower can't hold a decision: answer or dismiss it."))
+        return act { it.holdDecision(d.id, reason) }.map { got ->
+            // The tower's copy, with its hold; one that came back without it is held here all the same.
+            val now = (if (got.id.isBlank()) d else got).let { if (it.hold == null) it.copy(hold = dev.herdertower.phone.api.DecisionHold(reason?.trim().orEmpty(), "phone", System.currentTimeMillis())) else it }
+            decisionNotices.answered(d.id)
+            heldQueue = listOf(now) + heldQueue.filterNot { it.id == d.id }
+            queue = queue.filterNot { it.id == d.id }
+            showDecisions()
+            // Its space's badge drops at once too; the tower's missions event says the same soon after.
+            needsIn(d.space, -1)
+            deriveMissions()
+            now
+        }.recoverCatching { e -> DecisionsApi.closedBy(e)?.let { throw DecisionOver(DecisionsApi.closedWords(it)) } ?: throw e }
+    }
+
+    /** Lets [d] go from hold: back in the queue (counted again), its card saying why. */
+    suspend fun unholdDecision(d: Decision, why: String? = null): Result<Decision> =
+        act { it.unholdDecision(d.id, why) }.map { got ->
+            val back = (if (got.id.isBlank()) d else got).copy(hold = null)
+            heldQueue = heldQueue.filterNot { it.id == d.id }
+            queue = queue.filterNot { it.id == d.id } + back
+            // Let go from here: seen, so it doesn't notify on this phone.
+            decisionNotices.seenBack(back)
+            showDecisions()
+            needsIn(d.space, +1)
+            deriveMissions()
+            back
+        }.recoverCatching { e ->
+            if (e is TowerApiException && e.code == "not_on_hold") {
+                heldQueue = heldQueue.filterNot { it.id == d.id }
+                showDecisions()
+                scope.launch { loadDecisions() }
+                d.copy(hold = null)
+            } else DecisionsApi.closedBy(e)?.let { throw DecisionOver(DecisionsApi.closedWords(it)) } ?: throw e
+        }
 
     /** Answers [d] with its option [index]; the tower carries it out. A merge goes through its PR's own two steps instead. */
     suspend fun answerDecision(d: Decision, index: Int): Result<Unit> {
@@ -847,6 +918,8 @@ class TowerSession(
         if (d.legacy) return Result.failure(IllegalStateException("Merge or close the pull requests: they wait until then."))
         return act { it.dismissDecision(d.id) }.onSuccess {
             decisionNotices.answered(d.id)
+            // Dismissed while on hold: it leaves On hold too.
+            heldQueue = heldQueue.filterNot { it.id == d.id }
             setDecisions(queue.filterNot { it.id == d.id })
         }
     }
@@ -913,9 +986,9 @@ class TowerSession(
             val quiet = c.hello().features.orEmpty().contains("quiet")
             if (quiet) {
                 _decisionsSupported.value = true
-                val list = c.decisions().decisions
-                setDecisions(list + queue.filter { it.muted && list.none { d -> d.id == it.id } })
-                "${list.size} open"
+                val r = c.decisions()
+                setDecisions(withMuted(r))
+                "${r.decisions.count { !it.held }} open"
             } else {
                 // A tower from before the queue: what needs the user is its escalated questions and its waiting PRs.
                 _decisionsSupported.value = false
@@ -1029,6 +1102,12 @@ class TowerSession(
     private val _missionsSupported = MutableStateFlow<Boolean?>(null)
     /** Whether the tower has missions (`/v1/missions`); false: they're made here from its spaces and jobs. */
     val missionsSupported: StateFlow<Boolean?> = _missionsSupported.asStateFlow()
+
+    /** A space's count of what waits there, moved by [by] before the tower's own missions event comes. */
+    private fun needsIn(space: String, by: Int) {
+        if (space.isBlank() || _missionsSupported.value != true) return
+        _missions.value = _missions.value.copy(spaces = _missions.value.spaces.map { if (it.name == space) it.copy(needs = (it.needs + by).coerceAtLeast(0)) else it })
+    }
 
     private fun deriveMissions() {
         if (_missionsSupported.value != false) return

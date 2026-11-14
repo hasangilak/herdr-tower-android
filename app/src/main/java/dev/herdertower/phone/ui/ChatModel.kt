@@ -56,7 +56,15 @@ object ChatModel {
         },
         session = m.session, name = m.name, account = m.account, status = m.status,
         text = m.text, attachments = m.attachmentPaths(), id = m.id, diff = m.diff,
+        asks = m.asks?.text?.takeIf { it.isNotBlank() }, asksYou = m.asks?.you ?: true,
     )
+
+    /** An answer's line on top: "↳ you asked: …" or "↳ the tower sent it: …", cut short; null when it answers nothing known. */
+    fun asked(e: HistoryEntry, max: Int = 90): String? {
+        val words = e.asks?.removePrefix("[voice] ")?.replace(Regex("""\s+"""), " ")?.trim()?.takeIf { it.isNotEmpty() } ?: return null
+        val cut = if (words.length > max) words.take(max).trimEnd() + "…" else words
+        return (if (e.asksYou) "↳ you asked: " else "↳ the tower sent it: ") + cut
+    }
 
     /** A message sent from here, shown until the thread brings it back; [space]: the space's tower it went to. */
     data class Pending(val text: String, val atMs: Long, val files: Int, val space: String? = null)

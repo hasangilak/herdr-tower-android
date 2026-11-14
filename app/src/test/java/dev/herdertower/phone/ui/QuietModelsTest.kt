@@ -393,4 +393,131 @@ class QuietModelsTest {
         assertTrue(SettingsModel.routeWords("mac").startsWith("The Mac speaks"))
         assertTrue(SettingsModel.voiceWords(false).contains("every 15 minutes"))
     }
+
+    // 14 Nov: what the tower did in the night, on the phone
+
+    /** A merge card's button names exactly the PRs it merges (never "both"), as the tower's merge_what. */
+    @Test fun aMergeButtonNamesThePrsItMerges() {
+        assertEquals("#839 and #842", DecisionModel.mergeWhat(listOf(839, 842), 4))
+        assertEquals("#839 and #842", DecisionModel.mergeWhat(listOf(839, 842), 2))
+        assertEquals("all 4", DecisionModel.mergeWhat(listOf(1, 2, 3, 4), 4))
+        assertEquals("#1, #2 and #3", DecisionModel.mergeWhat(listOf(1, 2, 3), 4))
+        assertEquals("5 of 7", DecisionModel.mergeWhat(listOf(1, 2, 3, 4, 5), 7))
+        val d = Decision(
+            kind = "merge",
+            prs = listOf(
+                DecisionPr(repo = "o/app", number = 839, base = "dev", merge = PrGate(can = true)),
+                DecisionPr(repo = "o/app", number = 840, base = "dev", merge = PrGate(can = false, blocked = "It's a draft: mark it ready for review first.")),
+                DecisionPr(repo = "o/app", number = 842, base = "dev", merge = PrGate(can = true)),
+            ),
+            options = listOf(DecisionOption("Merge PR #839 into dev (o/app)", pick = true), DecisionOption("#840 isn't in this merge: it's a draft"), DecisionOption("Merge PR #842 into dev (o/app)")),
+        )
+        assertEquals("Merge #839 and #842", DecisionModel.mergeAllLabel(d))
+        assertEquals(listOf(839L, 842L), DecisionModel.goes(d).map { it.number })
+        assertEquals("1 of 2 in this merge: #839, then #842", DecisionModel.chainNote(DecisionModel.goes(d), 0))
+        // One that goes alone: its own answer is the button.
+        assertNull(DecisionModel.mergeAllLabel(d.copy(prs = d.prs.take(2), options = d.options.take(2))))
+    }
+
+    /** A PR its session is fixing, a draft, or one still in review is left out of a merge, with why, as the phone knows it now. */
+    @Test fun aPrBeingFixedIsLeftOutOfItsMerge() {
+        val fixing = dev.herdertower.phone.api.Pr(
+            key = "o/app#841", repo = "o/app", number = 841, base = "dev", state = "open", mergeable = "conflicting", waiting = true,
+            fix = dev.herdertower.phone.api.PrFix(what = "conflicts", to = "t13y", toName = "eyzflow"),
+        )
+        assertEquals(PrModel.Phase.Fixing, PrModel.phase(fixing))
+        assertEquals("Being fixed by eyzflow: resolving its conflicts with dev.", PrModel.fixLine(fixing))
+        assertFalse(PrModel.readyForUser(fixing))
+        val back = fixing.copy(fix = fixing.fix!!.copy(back = "two tries didn't fix it"))
+        assertEquals(PrModel.Phase.Waiting, PrModel.phase(back))
+        assertEquals("Not fixed: two tries didn't fix it. Yours to look at.", PrModel.fixLine(back))
+        val reviewing = fixing.copy(key = "o/app#843", number = 843, mergeable = "mergeable", fix = null, review = dev.herdertower.phone.api.PrReview(status = "changes"))
+        assertEquals(PrModel.Phase.InReview, PrModel.phase(reviewing))
+        val d = Decision(
+            kind = "merge",
+            prs = listOf(DecisionPr(repo = "o/app", number = 841, base = "dev", merge = PrGate(can = true)), DecisionPr(repo = "o/app", number = 843, base = "dev", merge = PrGate(can = true))),
+            options = listOf(DecisionOption("Merge PR #841 into dev (o/app)"), DecisionOption("Merge PR #843 into dev (o/app)")),
+        )
+        val known = mapOf(fixing.key to fixing, reviewing.key to reviewing)
+        assertTrue(DecisionModel.leftOut(d, 0, known))
+        assertEquals("#841 isn't in this merge: being fixed by eyzflow: resolving its conflicts with dev", DecisionModel.leftOutLabel(d, 0, known))
+        assertEquals("#843 isn't in this merge: its review still runs", DecisionModel.leftOutLabel(d, 1, known))
+        assertNull(DecisionModel.mergeAllLabel(d, known))
+        // A tower without the queue makes no merge of them either.
+        assertEquals(emptyList<Decision>(), dev.herdertower.phone.api.DecisionsApi.fromLegacy(emptyList(), listOf(fixing, reviewing, fixing.copy(key = "o/app#844", number = 844, draft = true, fix = null)), { "s" }, 0))
+    }
+
+    /** On hold: the user's words in quotes, who held it and since when; back: why, on the card. */
+    @Test fun onHoldSaysWhoHeldItAndWhy() {
+        val at = java.util.Calendar.getInstance().apply { set(2026, 10, 14, 14, 20, 0) }.timeInMillis
+        val d = Decision(id = "d1", title = "Merge PR #839", hold = dev.herdertower.phone.api.DecisionHold("wait for the ingest filters", "phone:d_x", at, listOf("o/app#829")))
+        assertEquals("“wait for the ingest filters”", DecisionModel.holdReason(d))
+        assertEquals("Held by you on a phone since 14:20 · back when #829 merges", DecisionModel.holdLine(d))
+        assertNull(DecisionModel.holdReason(d.copy(hold = dev.herdertower.phone.api.DecisionHold())))
+        assertFalse(DecisionModel.holdable(d))
+        assertEquals("Back from hold: PR #829 merged", DecisionModel.backLine(Decision(back = dev.herdertower.phone.api.DecisionBack("PR #829 merged", 1))))
+        assertEquals("the sandbox tower on your word", dev.herdertower.phone.api.DecisionsApi.heldBy("tower-sandbox"))
+    }
+
+    /** A blocked card whose session has a question set open is answered with that set's options. */
+    @Test fun aBlockedCardAnswersWithItsSessionsSet() {
+        val q = dev.herdertower.phone.api.Question(
+            id = "q1", session = "t5", kind = "claude-permission", title = "Edit notes.md",
+            tabs = listOf(dev.herdertower.phone.api.QuestionTab(question = "Do you want to make this edit to notes.md?", options = listOf(dev.herdertower.phone.api.QuestionOption("Yes"), dev.herdertower.phone.api.QuestionOption("No")))),
+            status = "open", atMs = 5,
+        )
+        val d = Decision(id = "d1", kind = "blocked", sessions = listOf(dev.herdertower.phone.api.DecisionSession("t5", "web")))
+        assertEquals("q1", DecisionModel.blockedSet(d, listOf(q))?.id)
+        assertEquals(listOf("Yes", "No"), DecisionModel.blockedOptions(q).map { it.label })
+        assertNull(DecisionModel.blockedSet(d, listOf(q.copy(session = "t9"))))
+        assertNull(DecisionModel.blockedSet(d.copy(kind = "permission"), listOf(q)))
+    }
+
+    /** Each account's usage: the 5-hour row only when it has one, amber from 80 %, out until when; a moved seat says from where. */
+    @Test fun accountsShowTheirUsageAndWhatTheFailoverMoved() {
+        val clock: (Long) -> String = { "15:00" }
+        val orca = dev.herdertower.phone.api.AccountUsage(name = "orca", sevenDay = dev.herdertower.phone.api.UsageWindow(99.0, 1))
+        assertEquals(listOf("7d"), dev.herdertower.phone.api.AccountsApi.rows(orca).map { it.first })
+        assertTrue(AccountsModel.high(orca.sevenDay))
+        val def = dev.herdertower.phone.api.AccountUsage(name = "default", default = true, fiveHour = dev.herdertower.phone.api.UsageWindow(100.0), sevenDay = dev.herdertower.phone.api.UsageWindow(40.0), outUntilMs = 10_000, outWhy = "5-hour limit")
+        assertEquals(listOf("5h", "7d"), dev.herdertower.phone.api.AccountsApi.rows(def).map { it.first })
+        assertEquals("out until 15:00 (5-hour limit)", dev.herdertower.phone.api.AccountsApi.outLine(def, 5_000, clock))
+        assertNull(dev.herdertower.phone.api.AccountsApi.outLine(def, 20_000, clock))
+        val board = dev.herdertower.phone.api.AccountsBoard(
+            list = listOf(def, orca), startsOn = "orca",
+            moves = listOf(dev.herdertower.phone.api.AccountMove(atMs = 1, address = "t12", name = "fix-login", space = "sandbox", from = "default", to = "orca", how = "moved", why = "default hit its 5-hour limit")),
+        )
+        assertEquals("Accounts · default out until 15:00 (5-hour limit)", AccountsModel.head(board, 5_000, clock))
+        assertEquals("Accounts · new sessions start on orca", AccountsModel.head(board, 20_000, clock))
+        assertEquals("orca · moved from default at 15:00", dev.herdertower.phone.api.AccountsApi.seat(board, "t12", "orca", clock))
+        assertEquals("default", dev.herdertower.phone.api.AccountsApi.seat(board, "t3", "default", clock))
+        assertEquals("fix-login (sandbox): default → orca at 15:00, default hit its 5-hour limit", AccountsModel.move(board.moves.single(), clock))
+        // The board read off the state; one the app can't read is none.
+        assertEquals("orca", dev.herdertower.phone.api.AccountsApi.parse(dev.herdertower.phone.api.TowerJson.parseToJsonElement("""{"list":[{"name":"orca","five_hour":null,"seven_day":{"used":12.0}}],"starts_on":"orca","moves":[{"at_ms":1,"address":"t7","name":"tower","tower":"tower","from":"default","to":"orca","how":"moved"}]}"""))?.startsOn)
+        assertNull(dev.herdertower.phone.api.AccountsApi.parse(dev.herdertower.phone.api.TowerJson.parseToJsonElement("[]")))
+    }
+
+    /** A space's goal says how it came to be: "updated by your request", and the earlier versions, newest first. */
+    @Test fun aGoalSaysHowItChanged() {
+        val m = Mission(
+            name = "fix-login", goal = "Fix the login redirect and the logout link", doneWhen = "logout returns to /login",
+            goalHistory = listOf(
+                dev.herdertower.phone.api.GoalVersion("Fix the login redirect", "", 1, "launch"),
+                dev.herdertower.phone.api.GoalVersion("Fix the login redirect and the logout link", "logout returns to /login", 2, "request", "the logout link is broken too", "adds the logout link"),
+            ),
+        )
+        assertEquals("Goal, updated by your request at 15:55", dev.herdertower.phone.api.GoalsApi.how(dev.herdertower.phone.api.GoalsApi.current(m)) { "15:55" })
+        assertEquals(listOf("Fix the login redirect"), dev.herdertower.phone.api.GoalsApi.earlier(m).map { it.goal })
+        // Edited since without a version: how it was set isn't known.
+        assertNull(dev.herdertower.phone.api.GoalsApi.current(m.copy(goal = "Something else")))
+    }
+
+    /** An answer says what it answers, however much came in between. */
+    @Test fun anAnswerSaysWhatItAnswers() {
+        val m = ChatMessage(id = "h9", role = "tower", kind = "answer", text = "Done.", asks = dev.herdertower.phone.api.ChatAsks("h4", "[voice] what's left in sandbox?", true), replyTo = "h4")
+        assertEquals("↳ you asked: what's left in sandbox?", ChatModel.asked(ChatModel.entry(m)))
+        val r = ChatMessage(id = "h10", role = "session", kind = "reply", text = "Pushed.", asks = dev.herdertower.phone.api.ChatAsks(null, "Push and open the PR", false))
+        assertEquals("↳ the tower sent it: Push and open the PR", ChatModel.asked(ChatModel.entry(r)))
+        assertNull(ChatModel.asked(ChatModel.entry(ChatMessage(id = "h11", role = "tower", text = "Hi"))))
+    }
 }

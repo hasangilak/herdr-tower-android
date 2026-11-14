@@ -145,6 +145,10 @@ data class TowerState(
     @SerialName("auto_merge") val autoMerge: Boolean? = null,
     /** Each space's release track, by space (a tower with `releases`): read with [ReleasesApi.parse]. */
     val releases: JsonElement? = null,
+    /** Each Claude account's usage and the failover's moves (a tower with `accounts`): read with [AccountsApi.parse]. */
+    val accounts: JsonElement? = null,
+    /** The towers that run, the main one and each space's own, with the account each runs on. */
+    val brains: List<StateBrain> = emptyList(),
 )
 
 /** The brain's current step, as the panel's working line shows it ("Delegating to orb-rust · 12s"). */
@@ -253,6 +257,9 @@ data class HistoryEntry(
     val from: String? = null,
     @SerialName("from_name") val fromName: String? = null,
     @SerialName("to_name") val toName: String? = null,
+    /** An answer: what it answers, in words ("↳ you asked: …"); [asksYou] false when it was the tower's message to a session. */
+    val asks: String? = null,
+    @SerialName("asks_you") val asksYou: Boolean = true,
 )
 
 @Serializable
@@ -353,6 +360,9 @@ data class StreamHello(
 
     /** Release tracks: where each space's changes stand, on dev and on prod. */
     val releases: Boolean get() = features.orEmpty().contains("releases")
+
+    /** Each Claude account's usage, and what the failover moved. */
+    val accounts: Boolean get() = features.orEmpty().contains("accounts")
 }
 
 /** A screenshot a session sent to the tower (`GET /v1/screenshots`). */
@@ -406,6 +416,12 @@ data class ChatMessage(
     val pr: Pr? = null,
     /** kind = act: what the tower opened for the request before it, with what it assumed (it changes in place too). */
     val act: Act? = null,
+    /** An answer (or a session's reply): the message it answers, its words, and whether they were the user's. */
+    val asks: ChatAsks? = null,
+    /** The message an answer answers (its id), or null. */
+    @SerialName("reply_to") val replyTo: String? = null,
+    /** A message that got an answer: the first answer's id. */
+    @SerialName("answered_by") val answeredBy: String? = null,
 ) {
     val mine: Boolean get() = role == "user" || role == "you" || role == "request"
     val fromTower: Boolean get() = role == "tower" || role == "assistant" || role == "answer"
@@ -437,6 +453,10 @@ data class ChatMessage(
         }
     }
 }
+
+/** What an answer answers: the message ([id], null when it was no chat message), its [text], and whether it was the user's own ([you]). */
+@Serializable
+data class ChatAsks(val id: String? = null, val text: String = "", val you: Boolean = true)
 
 @Serializable
 data class ChatPage(

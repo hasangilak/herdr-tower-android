@@ -94,9 +94,16 @@ data class Decision(
     val muted: Boolean = false,
     /** What it is about in full (a command, a plan), when the title alone doesn't say (from a question set). */
     val detail: String = "",
+    /** On hold: the user took it off their plate until it changes (it is listed apart, never counted or notified). */
+    val hold: DecisionHold? = null,
+    /** Back from hold: why it came back (it stays on the card until it is answered or held again). */
+    val back: DecisionBack? = null,
     /** Why the last answer from this phone didn't go in (never from the tower). */
     @Transient val error: String? = null,
 ) {
+    /** On hold: under On hold only, never counted. */
+    val held: Boolean get() = hold != null
+
     /** It can be answered now. */
     val open: Boolean get() = state == "open"
 
@@ -107,12 +114,38 @@ data class Decision(
     val legacy: Boolean get() = id.startsWith(DecisionsApi.LEGACY)
 }
 
-/** `GET /v1/decisions` and the `decisions` event: the open ones in queue order; [count] is the badge (outside muted spaces). */
+/**
+ * A decision on hold: the user's words ([reason], "" when none), who held it
+ * (`mac`, `phone:<device>`, `tower`, `tower-<space>`, `cli`), since when,
+ * and the PRs its reason names (one merging brings it back).
+ */
+@Serializable
+data class DecisionHold(
+    val reason: String = "",
+    val by: String = "",
+    @SerialName("since_ms") val sinceMs: Long = 0,
+    @SerialName("until_prs") val untilPrs: List<String> = emptyList(),
+)
+
+/** Why a decision came back from hold, and when. */
+@Serializable
+data class DecisionBack(val why: String = "", @SerialName("at_ms") val atMs: Long = 0)
+
+/** `POST /v1/decisions/{id}/hold` and `/unhold`: the decision as it is now. */
+@Serializable
+data class DecisionResponse(val decision: Decision = Decision())
+
+/**
+ * `GET /v1/decisions` and the `decisions` event: the open ones in queue
+ * order; [count] is the badge (outside muted spaces, none on hold); [onHold]
+ * those the user put on hold, newest hold first, in neither.
+ */
 @Serializable
 data class DecisionsResponse(
     val space: String? = null,
     val count: Int? = null,
     val decisions: List<Decision> = emptyList(),
+    @SerialName("on_hold") val onHold: List<Decision> = emptyList(),
     val closed: List<Decision> = emptyList(),
 )
 
@@ -170,8 +203,35 @@ object DecisionsApi {
     /** Whether its answers can be sent from the app: a `blocked` one is answered in the session itself, a kind the app doesn't know isn't answered from here. */
     fun answerable(d: Decision): Boolean = d.kind in ANSWERED_HERE
 
-    /** The main queue: what is shown and counted (a muted space's decisions are in its own view only). */
-    fun main(list: List<Decision>): List<Decision> = list.filterNot { it.muted }
+    /** The main queue: what is shown and counted (a muted space's decisions are in its own view only, one on hold under On hold only). */
+    fun main(list: List<Decision>): List<Decision> = list.filterNot { it.muted || it.held }
+
+    /**
+     * What a queue and its On hold list are, from what the tower sent: a
+     * decision that carries a hold is on hold wherever it was listed (a tower
+     * can list one in `decisions` a moment before it moves it), and one in
+     * `on_hold` without a hold too. Held ones newest hold first.
+     */
+    fun split(r: DecisionsResponse): Pair<List<Decision>, List<Decision>> {
+        val held = r.onHold.map { if (it.hold == null) it.copy(hold = DecisionHold()) else it } + r.decisions.filter { it.held }
+        return r.decisions.filterNot { it.held } to held.distinctBy { it.id }.sortedByDescending { it.hold?.sinceMs ?: 0 }
+    }
+
+    /** `{"reason": "…"}`, or `{}` without words. */
+    fun holdBody(reason: String?): String = buildJsonObject { reason?.trim()?.takeIf { it.isNotEmpty() }?.let { put("reason", it) } }.toString()
+
+    /** `{"why": "…"}`, or `{}`. */
+    fun unholdBody(why: String?): String = buildJsonObject { why?.trim()?.takeIf { it.isNotEmpty() }?.let { put("why", it) } }.toString()
+
+    /** Who put it on hold, in words: "you on the Mac", "you on a phone", "the tower", "the sandbox tower", "you in the terminal". */
+    fun heldBy(by: String): String = when {
+        by == "mac" -> "you on the Mac"
+        by.startsWith("phone") -> "you on a phone"
+        by == "tower" -> "the tower on your word"
+        by.startsWith("tower-") -> "the ${by.removePrefix("tower-")} tower on your word"
+        by == "cli" -> "you in the terminal"
+        else -> by.ifBlank { "you" }
+    }
 
     /** "3 sessions wait", "1 session waits", "Nothing is blocked". */
     fun stake(d: Decision): String = when (d.waiting) {
@@ -214,7 +274,8 @@ object DecisionsApi {
     fun fromLegacy(questions: List<Question>, prs: Collection<Pr>, spaceOf: (String) -> String?, now: Long): List<Decision> {
         // One just answered stays (as answered, a quiet line) until the tower closes it.
         val asked = questions.filter { it.decision == "escalate" }.map { ofQuestion(it, spaceOf(it.session).orEmpty()) }
-        val merges = prs.filter { it.waiting && it.open }
+        // Drafts, PRs whose review still runs and PRs their session is fixing wait for nobody: in no merge.
+        val merges = prs.filter { it.waiting && PrsApi.readyForUser(it) }
             .groupBy { (it.space ?: spaceOf(it.session)).orEmpty() to it.repo }
             .map { (at, list) -> ofPrs(at.first, at.second, list) }
         return order(asked + merges, now)

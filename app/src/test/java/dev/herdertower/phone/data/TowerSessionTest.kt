@@ -850,6 +850,48 @@ class TowerSessionTest {
         assertTrue(calls.any { it.startsWith("GET /v1/decisions?space=isa") })
     }
 
+    /** 14 Nov: a space whose only decision was on hold still showed a 1; held is never counted, only listed under On hold. */
+    @Test fun aDecisionOnHoldIsListedApartAndCountedNowhere() = runBlocking {
+        val held = decision("d2").removeSuffix("}") + ""","hold":{"reason":"wait for the ingest filters","by":"mac","since_ms":2000,"until_prs":["o/app#829"]}}"""
+        extra = { r ->
+            when {
+                r.url.encodedPath == "/v1/decisions" -> json("""{"count":1,"decisions":[${decision("d1")}],"on_hold":[$held]}""")
+                r.url.encodedPath == "/v1/decisions/d1/hold" -> json("""{"decision":${decision("d1").removeSuffix("}")},"hold":{"reason":"after the launch","by":"phone:d_test","since_ms":3000}}}""")
+                r.url.encodedPath == "/v1/decisions/d2/unhold" -> json("""{"decision":${decision("d2").removeSuffix("}")},"back":{"why":"you let it go from hold","at_ms":4000}}}""")
+                else -> null
+            }
+        }
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "the queue") { s.decisions.value.size == 1 && s.onHold.value.size == 1 }
+        assertEquals(listOf("d1"), s.decisions.value.map { it.id })
+        assertEquals("wait for the ingest filters", s.onHold.value.single().hold?.reason)
+        // Held from here: off the queue at once, before the tower's event says so.
+        assertTrue(s.holdDecision(s.decisions.value.single(), "after the launch").isSuccess)
+        assertTrue(calls.any { it == "POST /v1/decisions/d1/hold {\"reason\":\"after the launch\"}" })
+        assertEquals(emptyList<String>(), s.decisions.value.map { it.id })
+        assertEquals(listOf("d1", "d2"), s.onHold.value.map { it.id })
+        // Let go: back in the queue, counted, saying why.
+        assertTrue(s.unholdDecision(s.onHold.value.first { it.id == "d2" }).isSuccess)
+        assertEquals(listOf("d2"), s.decisions.value.map { it.id })
+        assertEquals("you let it go from hold", s.decisions.value.single().back?.why)
+        assertEquals(listOf("d1"), s.onHold.value.map { it.id })
+    }
+
+    /** A tower can list a held one among its decisions a moment before it moves it: it is on hold all the same. */
+    @Test fun aDecisionCarryingAHoldIsNeverInTheQueue() {
+        val held = decision("d2").removeSuffix("}") + ""","hold":{"reason":"","by":"tower","since_ms":2000}}"""
+        val first = "event: state\ndata: {\"phase\":\"idle\"}\n\n" +
+            "event: decisions\ndata: {\"count\":1,\"decisions\":[${decision("d1")},$held]}\n\n"
+        extra = { r -> if (r.url.encodedPath == "/v1/decisions") json("""{"count":1,"decisions":[${decision("d1")},$held]}""") else null }
+        answers = listOf({ stream(hello(), first) })
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "the queue") { s.decisions.value.size == 1 && s.onHold.value.size == 1 }
+        assertEquals(listOf("d1"), s.decisions.value.map { it.id })
+        assertEquals(listOf("d2"), s.onHold.value.map { it.id })
+    }
+
     // A tower from before the queue: the same from its questions and its waiting PRs
 
     private val escalated = """{"id":"q2","session":"t5","name":"web","kind":"claude-permission","title":"Run a command","detail":"rm -rf build/",""" +

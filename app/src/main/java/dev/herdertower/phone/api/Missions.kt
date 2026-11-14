@@ -68,6 +68,8 @@ data class Mission(
     val name: String = "",
     val goal: String? = null,
     @SerialName("done_when") val doneWhen: String? = null,
+    /** How the goal came to be, oldest first: the last is the goal now (empty from a tower that doesn't keep it). */
+    @SerialName("goal_history") val goalHistory: List<GoalVersion> = emptyList(),
     val standing: Boolean = false,
     val state: String = "open",
     val follow: Boolean = false,
@@ -88,9 +90,54 @@ data class Mission(
     val ownTower: Boolean get() = tower?.status == "ready" || tower?.status == "working"
 }
 
+/**
+ * One version of a space's goal: [by] `request` (the tower, after the user's
+ * [request]; [why] what it added), `you`, `launch`, `tower`, or "" (before
+ * versions were kept); [atMs] when it became the goal.
+ */
+@Serializable
+data class GoalVersion(
+    val goal: String = "",
+    @SerialName("done_when") val doneWhen: String = "",
+    @SerialName("at_ms") val atMs: Long = 0,
+    val by: String = "",
+    val request: String? = null,
+    val why: String? = null,
+)
+
+object GoalsApi {
+    /** The version that is the goal now: the last, when it says what the space says; null otherwise. */
+    fun current(m: Mission): GoalVersion? = m.goalHistory.lastOrNull()?.takeIf { it.goal.trim() == m.goal.orEmpty().trim() && it.doneWhen.trim() == m.doneWhen.orEmpty().trim() }
+
+    /** "Goal, updated by your request at 15:55", "Goal, set by you at …", "Goal, set at launch"; null when how it was set isn't known. */
+    fun how(v: GoalVersion?, clock: (Long) -> String): String? {
+        v ?: return null
+        val at = if (v.atMs > 0) " at ${clock(v.atMs)}" else ""
+        return when (v.by) {
+            "request" -> "Goal, updated by your request$at"
+            "you" -> "Goal, set by you$at"
+            "launch" -> "Goal, set at launch"
+            "tower" -> "Goal, set by the tower on your word$at"
+            else -> null
+        }
+    }
+
+    /** The earlier versions, newest first. */
+    fun earlier(m: Mission): List<GoalVersion> = (if (current(m) != null) m.goalHistory.dropLast(1) else m.goalHistory).reversed()
+
+    /** Who set a version, in a few words: "your request", "you", "launch", "the tower". */
+    fun by(v: GoalVersion): String = when (v.by) {
+        "request" -> "your request"
+        "you" -> "you"
+        "launch" -> "launch"
+        "tower" -> "the tower"
+        else -> "before versions were kept"
+    }
+}
+
 /** A space's own tower (its own brain): [status] `ready`, `working`, `starting`, `blocked` or `off`. */
 @Serializable
-data class MissionTower(val name: String = "", val status: String = "", val address: String? = null)
+data class MissionTower(val name: String = "", val status: String = "", val address: String? = null, val account: String? = null)
 
 @Serializable
 data class MissionsResponse(

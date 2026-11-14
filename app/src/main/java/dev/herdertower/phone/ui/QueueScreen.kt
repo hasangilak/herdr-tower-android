@@ -65,6 +65,8 @@ fun QueueScreen(
     onOpened: () -> Unit = {},
 ) {
     val decisions by session.decisions.collectAsStateWithLifecycle()
+    val onHold by session.onHold.collectAsStateWithLifecycle()
+    var heldOpen by rememberSaveable { mutableStateOf(false) }
     val missions by session.missions.collectAsStateWithLifecycle()
     val link by session.link.collectAsStateWithLifecycle()
     val host = rememberDecisionHost(session)
@@ -107,6 +109,15 @@ fun QueueScreen(
             if (rest.isNotEmpty()) {
                 item(key = "more") { SectionLabel("${rest.size} more waiting") }
                 items(rest, key = { "r" + it.id }) { d -> DecisionRow(d, now, onClick = { picked = d.id }) }
+            }
+            // On hold: still open and still the user's, but off the queue and every count, until it changes.
+            if (onHold.isNotEmpty()) {
+                item(key = "held") {
+                    TextButton(onClick = { heldOpen = !heldOpen }, modifier = Modifier.heightIn(min = 44.dp)) {
+                        Text(DecisionModel.holdLabel(onHold.size) + if (heldOpen) "  ▴" else "  ▾", color = tc.muted)
+                    }
+                }
+                if (heldOpen) items(onHold, key = { "h" + it.id }) { d -> HeldCard(d, now, host, onQuestion, onSession) }
             }
         }
     }

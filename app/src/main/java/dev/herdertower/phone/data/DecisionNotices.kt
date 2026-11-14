@@ -67,12 +67,14 @@ class DecisionNotices internal constructor(
         var changed = false
         for (d in all) {
             val new = known.add(d.id)
-            changed = changed || new
-            if (!d.open || d.muted) {
+            // Back from hold: notified once, as a new one is, for each time it came back (the mark is kept with the seen ids).
+            val back = d.back?.takeIf { it.atMs > 0 }?.let { known.add(backMark(d.id, it.atMs)) } == true
+            changed = changed || new || back
+            if (!d.open || d.muted || d.held) {
                 if (!new) out.cancel(d.id)
                 continue
             }
-            if (new && background && canPost()) out.post(d)
+            if ((new || back) && background && canPost()) out.post(d)
         }
         val here = all.map { it.id }.toSet()
         (out.active() - here).forEach(out::cancel)
@@ -80,6 +82,14 @@ class DecisionNotices internal constructor(
             while (known.size > MAX_SEEN) known.remove(known.first())
             seen.save(known.toList())
         }
+    }
+
+    /** Let go from hold on this phone: its coming back is no news here. */
+    fun seenBack(d: Decision) {
+        known.add(d.id)
+        val at = d.back?.atMs?.takeIf { it > 0 } ?: return seen.save(known.toList())
+        known.add(backMark(d.id, at))
+        seen.save(known.toList())
     }
 
     /** The app came on screen: the cards show there. */
@@ -245,7 +255,12 @@ class DecisionNotices internal constructor(
         const val EXTRA_LABEL = "label"
 
         /** "sandbox · 3 sessions wait". */
-        fun line(d: Decision): String = listOf(d.why, DecisionsApi.stake(d)).filter { it.isNotBlank() }.joinToString(" · ")
+        fun line(d: Decision): String =
+            d.back?.why?.takeIf { it.isNotBlank() }?.let { "Back from hold: $it" }
+                ?: listOf(d.why, DecisionsApi.stake(d)).filter { it.isNotBlank() }.joinToString(" · ")
+
+        /** The seen set's mark for a decision back from hold at [atMs]. */
+        internal fun backMark(id: String, atMs: Long) = "$id@back:$atMs"
 
         /**
          * The answers a notification offers: the first two, each with its
