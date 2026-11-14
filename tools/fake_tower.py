@@ -1386,8 +1386,12 @@ def plan_v2():
         {"id": "a2", "text": "MediaRoom's webhook takes our payload as it is", "check": "a test call before stage 3", "by": "s3", "status": "open"},
         {"id": "a3", "text": "No migration is needed for saved changes", "check": "read the schema", "status": "open"},
     ]
+    stages[1]["tasks"] = [{"id": "a9.1", "title": "The save endpoint", "state": "running", "session": "s1", "name": "eyzflow"},
+                          {"id": "a9.2", "title": "The flag", "state": "verified", "session": "", "name": ""}]
     return {"stages": stages, "progress": {"stages": 4, "done": 1, "at": 2}, "questions": questions, "open_questions": 2, "assumptions": assumptions,
-            "findings": [], "revisions": [], "version": 1}
+            "findings": [], "revisions": [], "version": 1, "account": "orca",
+            "critic": {"status": "done", "at_ms": now() - 30 * MIN, "gaps": ["Stage s3 has no check that a published change reaches MediaRoom's cache",
+                                                                           "Assumption a3 is checked by nobody"], "why": ""}}
 
 
 def plan_live():
@@ -1397,13 +1401,20 @@ def plan_live():
     v["stages"][1]["state"] = "failing"
     v["stages"][1]["post"][1]["status"] = "failed"
     v["stages"][1]["post"][1]["proof"] = "with the flag off, Save still sent a PATCH"
+    # The spike is done, but what it found waits for the plan's revision: the stages after it wait.
+    v["spikes_pending"] = ["s1"]
+    v["stages"][1]["tasks"] = [{"id": "a12.1", "title": "The save endpoint", "state": "running", "session": "t5", "name": "eyzflow"},
+                               {"id": "a12.2", "title": "The flag", "state": "verified", "session": "t6", "name": "admin"}]
+    v.pop("critic", None)
     return dict(v, id="p3", status="live", launched="isa", url="https://claude.ai/artifact/fake-plan-p3", version=3,
                 progress={"stages": 4, "done": 1, "at": 2}, open_questions=0,
                 questions=[dict(q, status="answered", answer=q.get("answer") or "At once", by=q.get("by") or "you") for q in v["questions"]],
                 findings=[{"id": "f1", "at_ms": now() - 90 * MIN, "kind": "split-pr", "text": "PR 2 is two changes: the save and the flag", "stage": "s2", "revision": 2},
+                          {"id": "f0", "at_ms": now() - 100 * MIN, "kind": "other", "text": "The sandbox logs every write", "stage": "s1", "session": "t5", "revision": 1},
                           {"id": "f2", "at_ms": now() - 30 * MIN, "kind": "assumption-wrong", "text": "MediaRoom's webhook wants a signed payload", "stage": "s3", "assumption": "a2", "revision": 3},
                           {"id": "f3", "at_ms": now() - 5 * MIN, "kind": "check-cant-run", "text": "The health log isn't reachable from the phone's network", "stage": "s4"}],
-                revisions=[{"n": 2, "at_ms": now() - 85 * MIN, "by": "tower", "why": "PR 2 split in two", "findings": ["f1"], "changes": ["Stage s2 delivers PR 1, PR 2, PR 5", "PR 5: the flag on its own"], "size": "small", "status": "applied"},
+                revisions=[{"n": 1, "at_ms": now() - 95 * MIN, "by": "tower", "why": "the sandbox logging every write changes nothing in the plan", "findings": ["f0"], "changes": [], "size": "none", "status": "kept"},
+                           {"n": 2, "at_ms": now() - 85 * MIN, "by": "tower", "why": "PR 2 split in two", "findings": ["f1"], "changes": ["Stage s2 delivers PR 1, PR 2, PR 5", "PR 5: the flag on its own"], "size": "small", "status": "applied"},
                            {"n": 3, "at_ms": now() - 25 * MIN, "by": "tower", "why": "MediaRoom wants signed payloads", "findings": ["f2"], "changes": ["Stage s3 signs its payload with the MediaRoom key", "A pre-check: the key is on dev"], "size": "big", "status": "proposed", "card": "d-planrev"}])
 
 

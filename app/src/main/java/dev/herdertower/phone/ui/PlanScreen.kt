@@ -101,6 +101,9 @@ fun PlanScreen(session: TowerSession, onBack: () -> Unit) {
                 )
             }
             // Planning v2: no plan goes out with questions open; then its stages, questions and assumptions.
+            // The critic read the draft before its questions went out; the planner's account.
+            PlanCriticLine(plan)
+            plan.account?.takeIf { it.isNotBlank() }?.let { Text("Its planner runs on $it.", Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodySmall, color = tc.faint) }
             PlansApi.launchWaits(plan)?.let { Text(it, Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodyMedium, color = tc.decisionInk) }
             PlanStages(plan)
             PlanQuestions(plan)

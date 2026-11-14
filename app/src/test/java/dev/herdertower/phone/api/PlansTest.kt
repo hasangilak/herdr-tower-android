@@ -123,4 +123,26 @@ class PlansTest {
         assertTrue(PlansApi.isRevisionCard(Decision(why = "plan", key = "plan:p3:rev:3")))
         assertFalse(PlansApi.isRevisionCard(Decision(why = "plan", key = "plan:p3:q3")))
     }
+
+    /** Slice 3: the critic's line, a stage's tasks, a spike that waits, a kept revision. */
+    @Test fun aPlanSaysItsCriticTasksSpikesAndKeptRevisions() {
+        val p = PlansApi.parse(TowerJson.parseToJsonElement(
+            """{"id":"p4","account":"orca","spikes_pending":["s1"],"critic":{"status":"done","at_ms":1,"gaps":["a","b"],"why":""},""" +
+                """"stages":[{"id":"s1","title":"Spike","kind":"spike","done_when":"x","post":[],"state":"done"},{"id":"s2","title":"B","done_when":"y","post":[],"state":"waiting",""" +
+                """"tasks":[{"id":"a9.1","title":"t","state":"running","session":"t5","name":"api"},{"id":"a9.2","title":"u","state":"verified","session":"","name":""}]}],""" +
+                """"findings":[{"id":"f0","text":"logs","session":"t5","revision":1}],"revisions":[{"n":1,"why":"it changes nothing.","findings":["f0"],"changes":[],"size":"none","status":"kept"}]}""",
+        ))!!
+        assertEquals("orca", p.account)
+        assertEquals("A critic read the plan first: 2 gaps sent to the planner. Its questions came to you after.", PlansApi.criticLine(p.critic))
+        assertEquals("A critic read the plan first: 1 gap sent to the planner. Its questions came to you after.", PlansApi.criticLine(PlanCritic("done", gaps = listOf("a"))))
+        assertEquals("A critic read the plan and found no gaps.", PlansApi.criticLine(PlanCritic("done")))
+        assertEquals("A critic is reading the plan before its questions go out to you.", PlansApi.criticLine(PlanCritic("reading")))
+        assertEquals("The critic couldn't read the plan; its questions went out as they were.", PlansApi.criticLine(PlanCritic("failed")))
+        assertNull(PlansApi.criticLine(PlanCritic("")))
+        assertNull(PlansApi.criticLine(null))
+        assertEquals("a9.1 running (t5) · a9.2 verified", PlansApi.tasksLine(p.stages[1].tasks))
+        assertEquals(listOf("s1"), p.spikesPending)
+        assertEquals("t5", p.findings.single().session)
+        assertEquals("Revision 1 · kept: it changes nothing", PlansApi.revisionLine(p.revisions.single()))
+    }
 }

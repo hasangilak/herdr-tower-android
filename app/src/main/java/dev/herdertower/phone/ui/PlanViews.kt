@@ -2,6 +2,9 @@ package dev.herdertower.phone.ui
 
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.setValue
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
@@ -65,7 +68,7 @@ private fun StageCheck(`when`: String, c: PrCheck) {
 
 /** A stage's card: "Stage N · s2 · build" and its chip, its title, what counts as done, what it delivers, and its checks before and after. */
 @Composable
-private fun StageCard(i: Int, s: PlanStage) {
+private fun StageCard(i: Int, s: PlanStage, spikeWaits: Boolean = false) {
     val (word, bad) = PlansApi.stageWord(s.state)
     val color = stageColor(s.state, bad)
     Column(
@@ -83,6 +86,8 @@ private fun StageCard(i: Int, s: PlanStage) {
         Text(s.title, style = MaterialTheme.typography.titleSmall, color = tc.text, fontWeight = FontWeight.SemiBold)
         if (s.doneWhen.isNotBlank()) Text("Done when: ${s.doneWhen}", style = MaterialTheme.typography.bodyMedium, color = tc.muted)
         PlansApi.stageLine(s).takeIf { it.isNotBlank() }?.let { Text(it, style = MaterialTheme.typography.bodySmall, color = tc.faint) }
+        if (s.tasks.isNotEmpty()) Text("Tasks: ${PlansApi.tasksLine(s.tasks)}", style = MaterialTheme.typography.bodySmall, color = tc.muted)
+        if (spikeWaits) Text(PlansApi.SPIKE_WAITS, style = MaterialTheme.typography.bodySmall, color = tc.decisionInk)
         if (s.pre.isNotEmpty()) {
             SmallCaps("Before it starts · ${s.pre.size}", Modifier.padding(top = 4.dp))
             s.pre.forEach { StageCheck("pre", it) }
@@ -98,7 +103,7 @@ fun PlanStages(p: Plan) {
     if (p.stages.isEmpty()) return
     Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
         HeadWith("Stages", PlansApi.stagesHead(p))
-        p.stages.forEachIndexed { i, s -> StageCard(i, s) }
+        p.stages.forEachIndexed { i, s -> StageCard(i, s, spikeWaits = s.id in p.spikesPending) }
         Text(
             "A stage is done only when every check of it passed with evidence, and the PRs it delivers passed theirs.",
             Modifier.padding(horizontal = 4.dp), style = MaterialTheme.typography.bodySmall, color = tc.faint,
@@ -183,6 +188,8 @@ fun LivePlanCard(p: Plan) {
                     Column(Modifier.weight(1f)) {
                         Text(s.title, style = MaterialTheme.typography.bodyMedium, color = tc.text, fontWeight = FontWeight.SemiBold)
                         Text(PlansApi.liveStageLine(s), style = MaterialTheme.typography.bodySmall, color = tc.faint)
+                        if (s.tasks.isNotEmpty()) Text("Tasks: ${PlansApi.tasksLine(s.tasks)}", style = MaterialTheme.typography.bodySmall, color = tc.muted)
+                        if (s.id in p.spikesPending) Text(PlansApi.SPIKE_WAITS_LIVE, style = MaterialTheme.typography.bodySmall, color = tc.decisionInk)
                     }
                     Text(word, style = MaterialTheme.typography.labelMedium, color = stageColor(s.state, bad), fontWeight = FontWeight.SemiBold)
                 }
@@ -198,6 +205,25 @@ fun LivePlanCard(p: Plan) {
                     }
                 }
             }
+        }
+    }
+}
+
+/** The critic's read of the draft in a line, and the gaps it found, folded. */
+@Composable
+fun PlanCriticLine(p: Plan) {
+    val line = PlansApi.criticLine(p.critic) ?: return
+    var open by androidx.compose.runtime.saveable.rememberSaveable(p.id) { androidx.compose.runtime.mutableStateOf(false) }
+    val gaps = p.critic?.gaps.orEmpty()
+    Column(Modifier.padding(horizontal = 4.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
+        Text(line, style = MaterialTheme.typography.bodyMedium, color = if (p.critic?.status == "failed") tc.decisionInk else tc.muted)
+        if (gaps.isNotEmpty()) {
+            Text(
+                if (open) "Hide the gaps ▴" else "The ${gaps.size} gap${if (gaps.size == 1) "" else "s"} ▾",
+                Modifier.clip(RoundedCornerShape(8.dp)).clickable(role = androidx.compose.ui.semantics.Role.Button) { open = !open }.padding(vertical = 6.dp),
+                style = MaterialTheme.typography.labelLarge, color = tc.muted,
+            )
+            if (open) gaps.forEach { Text("• $it", Modifier.padding(start = 8.dp), style = MaterialTheme.typography.bodySmall, color = tc.faint) }
         }
     }
 }

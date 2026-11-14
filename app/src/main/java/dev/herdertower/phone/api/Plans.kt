@@ -103,7 +103,21 @@ data class Plan(
     /** How the plan changed since it launched. */
     val revisions: List<PlanRevision> = emptyList(),
     val version: Int = 0,
+    /** A critic reads a draft before its questions go out to the user. */
+    val critic: PlanCritic? = null,
+    /** Spikes done whose findings the plan hasn't taken in yet (stage ids): the stages after them wait. */
+    @SerialName("spikes_pending") val spikesPending: List<String> = emptyList(),
+    /** The planner's Claude account. */
+    val account: String? = null,
 )
+
+/** The critic's read of a draft: [status] "" (not yet), `reading`, `done` or `failed`; the gaps it sent the planner. */
+@Serializable
+data class PlanCritic(val status: String = "", @SerialName("at_ms") val atMs: Long = 0, val gaps: List<String> = emptyList(), val why: String = "")
+
+/** An agenda task sent for a stage: its id, title, state (queued, running, blocked, done-claimed, verified, failed, …) and session. */
+@Serializable
+data class StageTask(val id: String = "", val title: String = "", val state: String = "", val session: String = "", val name: String = "")
 
 /** A stage of a plan: [kind] `spike`, `build` or `release`; [state] `waiting`, `ready`, `active`, `failing` or `done`. */
 @Serializable
@@ -121,6 +135,8 @@ data class PlanStage(
     /** Done when these pass. */
     val post: List<PrCheck> = emptyList(),
     val state: String = "",
+    /** The agenda tasks sent for it. */
+    val tasks: List<StageTask> = emptyList(),
 )
 
 @Serializable
@@ -161,11 +177,12 @@ data class PlanFinding(
     val text: String = "",
     val stage: String = "",
     val assumption: String = "",
+    /** The session whose Handoff block it came from. */
     val session: String = "",
     val revision: Int? = null,
 )
 
-/** A revision of a live plan: [size] `small` or `big`; [status] `applied`, `proposed` (waits for the user's word) or `rejected`. */
+/** A revision of a live plan: [size] `small`, `big` or `none`; [status] `applied`, `proposed` (waits for the user's word), `rejected` or `kept` (a finding changes nothing). */
 @Serializable
 data class PlanRevision(
     val n: Int = 0,
@@ -243,6 +260,22 @@ object PlansApi {
         else -> "Being routed."
     }
 
+    /** The critic's read in a line (the Mac's critic_line); null before it reads. */
+    fun criticLine(c: PlanCritic?): String? = when (c?.status) {
+        "reading" -> "A critic is reading the plan before its questions go out to you."
+        "done" -> if (c.gaps.isEmpty()) "A critic read the plan and found no gaps."
+        else "A critic read the plan first: ${c.gaps.size} gap${if (c.gaps.size == 1) "" else "s"} sent to the planner. Its questions came to you after."
+        "failed" -> "The critic couldn't read the plan; its questions went out as they were."
+        else -> null
+    }
+
+    /** "a9.1 running (t5) · a9.2 verified" (the Mac's tasks_line). */
+    fun tasksLine(tasks: List<StageTask>): String = tasks.joinToString(" · ") { if (it.session.isBlank()) "${it.id} ${it.state}" else "${it.id} ${it.state} (${it.session})" }
+
+    /** On a spike whose findings wait: the plan screen's words and the live card's. */
+    const val SPIKE_WAITS = "Done: what it found waits for the plan's revision; the stages after it wait too."
+    const val SPIKE_WAITS_LIVE = "Its findings wait for the plan's revision"
+
     /** "2 open of 4", "All 4 answered". */
     fun questionsHead(p: Plan): String =
         if (p.openQuestions == 0) "All ${p.questions.size} answered" else "${p.openQuestions} open of ${p.questions.size}"
@@ -281,6 +314,7 @@ object PlansApi {
 
     /** "Revision 2 · small, applied by itself: <why> (from f2)", "… · waiting for your word: …". */
     fun revisionLine(r: PlanRevision): String {
+        if (r.status == "kept") return "Revision ${r.n} · kept: ${r.why.trimEnd('.')}"
         val what = when {
             r.status == "proposed" -> "waiting for your word"
             r.status == "rejected" -> "kept out by you"
