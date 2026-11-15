@@ -73,6 +73,11 @@ class VoiceService : Service() {
             app.session.voiceOn.collect { if (!it) stopSelf() }
         }
         scope.launch {
+            // The Mac is offline: the phone stopped trying, so this service (its wake and Wi-Fi locks) goes too.
+            // The app starts it again when it next comes on screen.
+            app.session.offline.collect { if (it) stopSelf() }
+        }
+        scope.launch {
             // Muted (tower-wide), the notification says so and offers the way back.
             app.session.muted.collect { mutedNow = it; refresh() }
         }
@@ -148,6 +153,7 @@ class VoiceService : Service() {
         is Link.Live -> if (link.voice) "The phone is the tower's voice" else "Connected"
         is Link.Connecting -> link.failing?.let { "Reconnecting…" } ?: "Connecting…"
         is Link.Retrying -> "Reconnecting in ${link.seconds} s"
+        is Link.Offline -> "The Mac is offline"
         is Link.Revoked -> "Not paired any more. Open the app to pair again."
         is Link.CertificateChanged -> "The tower's certificate changed. Open the app."
         Link.Idle, Link.Unpaired -> "Not connected"

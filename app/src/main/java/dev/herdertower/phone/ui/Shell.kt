@@ -388,14 +388,27 @@ fun ConnectionNotice(link: Link, session: TowerSession, onRepair: () -> Unit, mo
     if (localNet.needed) return LocalNetworkNotice(localNet, modifier)
     val notice = LinkModel.connectionNotice(link) ?: return
     val retry = notice.action == NoticeAction.Retry
+    val connect = notice.action == NoticeAction.Connect
+    val context = androidx.compose.ui.platform.LocalContext.current
     GlassCard(modifier.fillMaxWidth()) {
         Column {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Dot(if (retry) tc.accentHi else tc.blocked)
+                // Offline is calm: a quiet dot, no countdown.
+                Dot(if (connect) tc.idle else if (retry) tc.accentHi else tc.blocked)
                 Spacer(Modifier.size(10.dp))
                 Text(notice.message, Modifier.weight(1f), style = MaterialTheme.typography.bodySmall, color = tc.text)
-                if (!notice.scan) TextButton(onClick = if (retry) session::reconnect else onRepair) {
-                    Text(if (retry) "Retry now" else "Pair again", color = tc.text, fontWeight = FontWeight.Medium)
+                if (!notice.scan) TextButton(onClick = {
+                    when {
+                        connect -> {
+                            session.reconnect()
+                            // The phone as the voice: its service went with the giving up; back with the connect.
+                            if (session.voiceOn.value) dev.herdertower.phone.voice.VoiceService.start(context)
+                        }
+                        retry -> session.reconnect()
+                        else -> onRepair()
+                    }
+                }) {
+                    Text(if (connect) "Connect" else if (retry) "Retry now" else "Pair again", color = tc.text, fontWeight = FontWeight.Medium)
                 }
             }
             // Not on any network the tower was seen on: what the search on this Wi-Fi did, then pair again here or try once more.

@@ -191,6 +191,21 @@ class Settings(context: Context) {
         get() = prefs.getBoolean("voice", false)
         set(v) = prefs.edit { putBoolean("voice", v) }
 
+    /**
+     * Since when the Mac is offline as far as this phone knows (0: it isn't):
+     * the phone stopped trying, and tries again only when the app opens, on
+     * Connect, or when the network changes. Kept across restarts, so the
+     * background check stays off too.
+     */
+    var offlineSince: Long
+        get() = prefs.getLong("offline_since", 0L)
+        set(v) = prefs.edit { putLong("offline_since", v) }
+
+    /** Background checks in a row that couldn't reach the Mac (two make it offline). */
+    var missedChecks: Int
+        get() = prefs.getInt("missed_checks", 0)
+        set(v) = prefs.edit { putInt("missed_checks", v) }
+
     private companion object {
         /** What the tower takes: 8 to 64 letters, digits, - and _. */
         val INSTALL_ID = Regex("[A-Za-z0-9_-]{8,64}")

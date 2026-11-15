@@ -30,7 +30,8 @@ class DecisionCheck(context: Context, params: WorkerParameters) : CoroutineWorke
         Log.i(TAG, "background check: $did")
         // A decision's notification still shows: look again in a minute, so it goes soon after the decision is over
         // (answered or dismissed on the Mac, or in its session). None: the 15-minute check is enough.
-        if (inputData.getBoolean(WATCH, false) && withContext(Dispatchers.Main) { session.noticesShowing() }) watch(applicationContext, next = true)
+        // Not while the Mac is offline: nothing is checked then.
+        if (inputData.getBoolean(WATCH, false) && withContext(Dispatchers.Main) { session.noticesShowing() && !session.offline.value }) watch(applicationContext, next = true)
         // Another try comes with the next period: no retries in between.
         return Result.success()
     }
@@ -57,7 +58,7 @@ class DecisionCheck(context: Context, params: WorkerParameters) : CoroutineWorke
             runCatching { WorkManager.getInstance(context).enqueueUniqueWork(WATCH_NAME, policy, request) }
         }
 
-        /** Paired: the check runs every 15 minutes (kept as it is when it runs already). Not paired: it stops. */
+        /** Paired (and the Mac not offline): the check runs every 15 minutes (kept as it is when it runs already). Otherwise it stops. */
         fun follow(context: Context, paired: Boolean) {
             val wm = WorkManager.getInstance(context)
             if (!paired) {

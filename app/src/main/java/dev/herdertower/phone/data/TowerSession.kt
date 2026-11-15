@@ -92,6 +92,13 @@ sealed interface Link {
     data class Live(val voice: Boolean) : Link
     /** Dropped; trying again in [seconds]. */
     data class Retrying(val seconds: Int, val reason: String, val attempt: Int) : Link
+    /**
+     * The Mac didn't answer for a while (shut down, asleep, away): the phone
+     * stopped trying, so nothing wakes it or drains the battery. It tries
+     * again when the app comes on screen, on Connect, or when the network
+     * changes. [reason] is the last failure, [sinceMs] when the outage began.
+     */
+    data class Offline(val reason: String, val sinceMs: Long) : Link
     /** The token stopped working (revoked, or the Mac forgot this phone): pair again. */
     data class Revoked(val message: String) : Link
     /** The tower's certificate isn't the paired one. */
@@ -113,6 +120,10 @@ class TowerSession(
     private val net: PhoneNet = SystemPhoneNet(context),
     /** Finds the tower on this network by Bonjour when no stored address answers. */
     private val finder: TowerFinder = NsdTowerFinder(context),
+    /** How long the tower may stay unreachable before the phone stops trying ([GIVE_UP_MS]; tests shorten it). */
+    private val giveUpMs: Long = GIVE_UP_MS,
+    /** And how many tries it takes at least ([GIVE_UP_TRIES]). */
+    private val giveUpTries: Int = GIVE_UP_TRIES,
 ) {
     val scope = CoroutineScope(SupervisorJob() + Dispatchers.Main.immediate)
 
@@ -190,6 +201,14 @@ class TowerSession(
             field = v
             settings.lastClip = v
         }
+
+    private val _offline = MutableStateFlow(settings.offlineSince > 0)
+    /**
+     * The Mac is offline: the phone gave up trying and waits for the app to
+     * open, Connect, or a network change. The voice service stops, and the
+     * background check is off, while it is.
+     */
+    val offline: StateFlow<Boolean> = _offline.asStateFlow()
 
     private val _foreground = MutableStateFlow(false)
     /**
@@ -274,6 +293,8 @@ class TowerSession(
         _foreground.value = fg
         // On screen, the cards show: their notifications go.
         if (fg) decisionNotices.clearAll()
+        // The app opened: the one time the phone tries again by itself after giving up.
+        if (fg && _offline.value) tryAgain()
     }
 
     fun setVoice(on: Boolean) {
@@ -281,9 +302,28 @@ class TowerSession(
         _voiceOn.value = on && _creds.value != null
     }
 
-    /** Skip the backoff wait and reconnect now. */
+    /** Skip the backoff wait and reconnect now; after giving up (the Mac offline), try again for another while (Connect). */
     fun reconnect() {
+        if (_offline.value) tryAgain() else retryNow.trySend(Unit)
+    }
+
+    /** Leaves the offline state and tries again: a fresh window, given up again if the Mac still doesn't answer. */
+    private fun tryAgain() {
+        _offline.value = false
         retryNow.trySend(Unit)
+    }
+
+    /** The Mac answered: whatever gave up is back on (the background check, the counts). */
+    private fun markOnline() {
+        if (_offline.value) _offline.value = false
+        if (settings.offlineSince != 0L) settings.offlineSince = 0L
+        if (settings.missedChecks != 0) settings.missedChecks = 0
+    }
+
+    /** The phone stops trying: the Mac is offline since [sinceMs]. */
+    private fun markOffline(sinceMs: Long) {
+        settings.offlineSince = sinceMs
+        _offline.value = true
     }
 
     /**
@@ -307,6 +347,15 @@ class TowerSession(
     /** After a network change has settled: is the route in use still there, and is the LAN back? */
     private suspend fun recheckRoute() {
         val c = _creds.value ?: return
+        // Offline and no stream wanted (the app in the background, not the voice): one look, which turns it back on if the Mac answers.
+        if (_offline.value && _link.value == Link.Idle) {
+            checkInBackground(force = true)
+            return
+        }
+        if (_offline.value) {
+            tryAgain()
+            return
+        }
         if (_link.value !is Link.Live) {
             retryNow.trySend(Unit)
             return
@@ -513,10 +562,13 @@ class TowerSession(
         var attempt = 0
         var failing: String? = null
         var switching = false
+        // When this outage began (its first failed try); null while the tower answers.
+        var downSince: Long? = null
         while (true) {
             val creds = _creds.value ?: return
             // Moving to another route: the app stays "live" until it lands (no flash of Not connected).
             if (!switching) _link.value = Link.Connecting(attempt, failing)
+            Log.i(TAG, "stream: connecting (try ${attempt + 1}${if (voice) ", voice" else ""})")
             switching = false
             kick.tryReceive() // a move asked for before this connect
             var route: TowerHost? = null
@@ -558,6 +610,8 @@ class TowerSession(
                         }
                         attempt = 0
                         failing = null
+                        downSince = null
+                        markOnline()
                         retryNow.tryReceive() // a retry asked for before this connect is done
                         _link.value = Link.Live(voice)
                         refreshAll()
@@ -600,9 +654,24 @@ class TowerSession(
             }
             // A clip half-played when the voice dropped won't be resumed; the Mac takes over.
             if (voice) player.hush()
-            val wait = BACKOFF[minOf(attempt, BACKOFF.lastIndex)]
             attempt++
             failing = reason
+            val now = System.currentTimeMillis()
+            val since = downSince ?: now.also { downSince = it }
+            if (givesUp(since, attempt, now, giveUpMs, giveUpTries)) {
+                // Unreachable for a while: stop trying. Nothing is timed from here on; only the app opening, Connect or a
+                // network change wakes this (each a fresh window).
+                markOffline(since)
+                _link.value = Link.Offline(reason, since)
+                Log.i(TAG, "stream: the Mac is offline after $attempt tries in ${(now - since) / 1000} s: stopped trying")
+                retryNow.receive()
+                Log.i(TAG, "stream: trying again (the app opened, Connect, or the network changed)")
+                attempt = 0
+                failing = null
+                downSince = null
+                continue
+            }
+            val wait = BACKOFF[minOf(attempt - 1, BACKOFF.lastIndex)]
             _link.value = Link.Retrying(wait, reason, attempt)
             withTimeoutOrNull(wait * 1000L) { retryNow.receive() }
         }
@@ -972,20 +1041,24 @@ class TowerSession(
      * the same. With the stream open it has nothing to do: the stream follows
      * the queue. Returns what it did, for the log and the tests.
      */
-    suspend fun checkInBackground(): String {
+    suspend fun checkInBackground(force: Boolean = false): String {
         val creds = _creds.value ?: return "not paired"
         if (_blocked.value != null) return "blocked: ${_blocked.value}"
         if (_link.value is Link.Live) return "the stream is open"
+        // The Mac is offline: no tries in the background until the app opens or the network changes ([force]).
+        if (_offline.value && !force) return "the Mac is offline: not trying"
         val c = when (val p = pick(creds)) {
             is Pick.Found -> clientAt(creds, p.host)
             is Pick.Mismatch -> {
                 block(Link.CertificateChanged(p.got))
                 return "another certificate"
             }
-            is Pick.Nowhere -> return "unreachable: ${p.message}"
+            is Pick.Nowhere -> return missedCheck("unreachable: ${p.message}")
         }
         return try {
             val quiet = c.hello().features.orEmpty().contains("quiet")
+            // It answered: the background check stays on, and the stream may try again.
+            markOnline()
             if (quiet) {
                 _decisionsSupported.value = true
                 val r = c.decisions()
@@ -1004,9 +1077,20 @@ class TowerSession(
         } catch (e: UnauthorizedException) {
             block(Link.Revoked(e.message))
             "revoked"
+        } catch (e: UnreachableException) {
+            missedCheck("unreachable: ${e.javaClass.simpleName}")
         } catch (e: Exception) {
             "failed: ${e.javaClass.simpleName}"
         }
+    }
+
+    /** A background check that missed the Mac: two in a row (15 min apart) and the phone stops checking until the app opens. */
+    private fun missedCheck(what: String): String {
+        val missed = settings.missedChecks + 1
+        settings.missedChecks = missed
+        if (missed < MISSED_CHECKS) return what
+        if (!_offline.value) markOffline(System.currentTimeMillis())
+        return "$what; the Mac is offline: not checking until the app opens"
     }
 
     /** What this tower has, from its hello: the Quiet Tower's calls, or the queue and missions made here from the ones before it. */
@@ -1937,6 +2021,21 @@ class TowerSession(
         private const val TAG = "TowerSession"
         /** Seconds between reconnects, as the contract asks: 1, 2, 5, 10, then every 10. */
         val BACKOFF = intArrayOf(1, 2, 5, 10)
+
+        /** How long the tower may stay unreachable before the phone stops trying (a brief drop reconnects well before). */
+        const val GIVE_UP_MS = 120_000L
+        /** And at least this many tries (a phone asleep through the window gets its tries all the same). */
+        const val GIVE_UP_TRIES = 4
+        /** Background checks in a row that miss the Mac before it counts as offline (each 15 min apart). */
+        const val MISSED_CHECKS = 2
+
+        /**
+         * Whether to stop trying: the tower has been unreachable since
+         * [downSinceMs] for [giveUpMs] or more, over [attempts] tries, at least
+         * [minTries] of them.
+         */
+        fun givesUp(downSinceMs: Long, attempts: Int, now: Long, giveUpMs: Long = GIVE_UP_MS, minTries: Int = GIVE_UP_TRIES): Boolean =
+            attempts >= minTries && now - downSinceMs >= giveUpMs
         /** Missed clips younger than this are played on reconnect. */
         const val RECENT_MS = 60_000L
         /** How long the stream stays open after asking, with the app in the background. */

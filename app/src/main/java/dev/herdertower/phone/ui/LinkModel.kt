@@ -3,7 +3,7 @@ package dev.herdertower.phone.ui
 import dev.herdertower.phone.api.AudioClip
 import dev.herdertower.phone.data.Link
 
-enum class NoticeAction { Retry, Repair }
+enum class NoticeAction { Retry, Repair, Connect }
 
 /** The connection card's words and its button. */
 data class ConnectionNoticeUi(
@@ -42,8 +42,18 @@ object LinkModel {
             "The tower's certificate isn't the one this phone paired with. If you remade it, pair again; otherwise someone may be in between.",
             NoticeAction.Repair,
         )
+        is Link.Offline -> ConnectionNoticeUi(offlineWords(link), NoticeAction.Connect)
         is Link.Live, Link.Idle, Link.Unpaired -> null
     }
+
+    /**
+     * The calm card while the phone has stopped trying: "The Mac is offline.
+     * The phone stopped trying at 18:05, so it doesn't wake or drain the
+     * battery; it tries again when you open the app, or tap Connect."
+     */
+    fun offlineWords(link: Link.Offline, clock: (Long) -> String = { dayClock(it) }): String =
+        "The Mac is offline. The phone stopped trying" + (if (link.sinceMs > 0) " (no answer since ${clock(link.sinceMs)})" else "") +
+            ", so it doesn't wake or drain the battery; it tries again when you open the app, or tap Connect."
 
     private fun otherNetwork(reason: String) = reason.startsWith(dev.herdertower.phone.data.RouteWords.OTHER_NETWORK)
 }

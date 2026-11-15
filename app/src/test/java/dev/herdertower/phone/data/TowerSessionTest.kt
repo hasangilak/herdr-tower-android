@@ -134,9 +134,12 @@ class TowerSessionTest {
             .build()
     }
 
-    private fun session(voice: Boolean = false): TowerSession {
+    private fun session(voice: Boolean = false, giveUpMs: Long = TowerSession.GIVE_UP_MS, giveUpTries: Int = TowerSession.GIVE_UP_TRIES, settings: Settings? = null): TowerSession {
         val creds = Credentials(server.hostName, server.port, fp, "htk_test", "d_test", "test phone")
-        val s = TowerSession(FakeContext(), FakeStore(creds), Settings(FakeContext()).also { it.voice = voice; it.towerName = "Test Mac" })
+        val s = TowerSession(
+            FakeContext(), FakeStore(creds), settings ?: Settings(FakeContext()).also { it.voice = voice; it.towerName = "Test Mac" },
+            giveUpMs = giveUpMs, giveUpTries = giveUpTries,
+        )
         sessions += s
         return s
     }
@@ -209,6 +212,62 @@ class TowerSessionTest {
         assertEquals("The tower is busy.", retry.failing)
         // And the card shows for every state after the first failure: it never blinks out.
         assertTrue(afterFirst.all { dev.herdertower.phone.ui.LinkModel.connectionNotice(it) != null })
+    }
+
+    /**
+     * The Mac off: after the window the phone stops trying and says so (no
+     * countdown); no further attempt follows until Connect (or the app
+     * opening), which tries for another window and connects once it answers.
+     */
+    @Test fun anUnreachableTowerIsGivenUpOnAndTriedAgainOnlyWhenAsked() {
+        var up = false
+        answers = listOf({ if (up) stream(hello(), state(muted = false)) else json("""{"error": {"code": "busy", "message": "The tower is busy."}}""", 503) })
+        val s = session(voice = true, giveUpMs = 2_000, giveUpTries = 2)
+        s.setForeground(true)
+        until(timeoutMs = 10_000, what = "giving up") { s.link.value is Link.Offline }
+        assertTrue(s.offline.value)
+        val tries = streams.size
+        assertTrue("it tried more than once before giving up ($tries)", tries >= 2)
+        assertEquals(dev.herdertower.phone.ui.NoticeAction.Connect, dev.herdertower.phone.ui.LinkModel.connectionNotice(s.link.value)?.action)
+        // Nothing more while offline: the backoff would have tried at least twice in this time.
+        Thread.sleep(6_000)
+        assertEquals("no attempt while offline", tries, streams.size)
+        assertTrue(s.link.value is Link.Offline)
+        // Connect, with the Mac back: it tries at once and connects; offline is over.
+        up = true
+        s.reconnect()
+        until(what = "live again") { s.link.value is Link.Live }
+        assertFalse(s.offline.value)
+    }
+
+    /** Back on screen after giving up: it tries again by itself (and gives up again while the Mac stays off). */
+    @Test fun theAppOpeningTriesAgainAfterGivingUp() {
+        answers = listOf({ json("""{"error": {"code": "busy", "message": "The tower is busy."}}""", 503) })
+        val s = session(voice = true, giveUpMs = 1_500, giveUpTries = 2)
+        s.setForeground(true)
+        until(timeoutMs = 10_000, what = "giving up") { s.link.value is Link.Offline }
+        val tries = streams.size
+        s.setForeground(false)
+        Thread.sleep(1_500)
+        assertEquals(tries, streams.size)
+        s.setForeground(true)
+        // Trying again: not offline any more (the voice service may start), until it gives up again.
+        assertFalse(s.offline.value)
+        until(what = "a fresh try") { streams.size > tries }
+        until(timeoutMs = 10_000, what = "giving up again") { s.link.value is Link.Offline }
+        assertTrue(s.offline.value)
+    }
+
+    /** The background check: two misses in a row and it stops until the app opens; an answer turns it back on. */
+    @Test fun theBackgroundCheckStopsAfterTwoMisses() = runBlocking {
+        server.close()
+        val settings = Settings(FakeContext()).also { it.voice = false; it.towerName = "Test Mac" }
+        val s = session(settings = settings)
+        assertFalse(s.checkInBackground().contains("offline"))
+        assertTrue(s.checkInBackground().contains("the Mac is offline"))
+        assertTrue(s.offline.value)
+        assertTrue(settings.offlineSince > 0)
+        assertEquals("the Mac is offline: not trying", s.checkInBackground())
     }
 
     @Test fun aRefusedTokenStopsTheStreamUntilPairingAgain() {

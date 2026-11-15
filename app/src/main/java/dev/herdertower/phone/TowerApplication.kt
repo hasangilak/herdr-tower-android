@@ -79,9 +79,11 @@ class TowerApplication : Application() {
         }
         // A decision's notification showing with the app away is checked every minute, so it goes once it's over on the Mac.
         session.onNoticeShowing = { dev.herdertower.phone.data.DecisionCheck.watch(this) }
-                // A decision notifies with the app closed too: a check every 15 minutes while paired, none otherwise.
+                // A decision notifies with the app closed too: a check every 15 minutes while paired, none otherwise,
+        // and none while the Mac is offline (nothing wakes the phone then; the app opening tries again).
         kotlinx.coroutines.MainScope().launch {
-            session.credentials.collect { dev.herdertower.phone.data.DecisionCheck.follow(this@TowerApplication, paired = it != null) }
+            kotlinx.coroutines.flow.combine(session.credentials, session.offline) { c, off -> c != null && !off }
+                .collect { dev.herdertower.phone.data.DecisionCheck.follow(this@TowerApplication, paired = it) }
         }
                 ProcessLifecycleOwner.get().lifecycle.addObserver(LifecycleEventObserver { _, e ->
             when (e) {
