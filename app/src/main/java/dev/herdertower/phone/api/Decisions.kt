@@ -98,6 +98,8 @@ data class Decision(
     val hold: DecisionHold? = null,
     /** Back from hold: why it came back (it stays on the card until it is answered or held again). */
     val back: DecisionBack? = null,
+    /** A merge card's: what the user asked to have added to its PRs, as sent to their sessions, oldest first (the card stays open). */
+    val notes: List<PrNote> = emptyList(),
     /** Why the last answer from this phone didn't go in (never from the tower). */
     @Transient val error: String? = null,
 ) {
@@ -130,6 +132,20 @@ data class DecisionHold(
 /** Why a decision came back from hold, and when. */
 @Serializable
 data class DecisionBack(val why: String = "", @SerialName("at_ms") val atMs: Long = 0)
+
+/**
+ * More the user asked for on a merge card's PRs: their words, the PRs it was
+ * about (`owner/repo#n`), the sessions it went to, who sent it (`mac`,
+ * `phone:<id>`, …) and when.
+ */
+@Serializable
+data class PrNote(
+    val text: String = "",
+    val prs: List<String> = emptyList(),
+    val to: List<String> = emptyList(),
+    val by: String = "",
+    @SerialName("at_ms") val atMs: Long = 0,
+)
 
 /** `POST /v1/decisions/{id}/hold` and `/unhold`: the decision as it is now. */
 @Serializable
@@ -170,6 +186,10 @@ data class DecisionAnswered(
     val abandoned: kotlinx.serialization.json.JsonElement? = null,
     /** Whether the answer can become a standing rule, and the words that would ask for it. */
     val rule: DecisionRule? = null,
+    /** Words on a merge card: what went ([note]), about which PRs, to which sessions; [state] stays `open`. */
+    val note: String? = null,
+    val prs: List<String> = emptyList(),
+    val to: List<String> = emptyList(),
 )
 
 object DecisionsApi {
@@ -183,6 +203,16 @@ object DecisionsApi {
 
     /** `{"other": "…"}`. */
     fun otherBody(text: String): String = buildJsonObject { put("other", text) }.toString()
+
+    /**
+     * Words on a merge card, for its PRs: `{"other": "…"}`, or with [pr]
+     * (`owner/repo#n`) `{"other": "…", "pr": "…"}` for one PR of several.
+     * Without it the tower sends them to the PRs they name (`#n`), else all.
+     */
+    fun prNoteBody(text: String, pr: String? = null): String = buildJsonObject {
+        put("other", text)
+        pr?.takeIf { it.isNotBlank() }?.let { put("pr", it) }
+    }.toString()
 
     /**
      * The `decisions` event: `{"count", "decisions":[…]}` (every open one,

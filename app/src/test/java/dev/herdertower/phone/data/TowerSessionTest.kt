@@ -951,6 +951,46 @@ class TowerSessionTest {
         assertEquals(listOf("d2"), s.onHold.value.map { it.id })
     }
 
+    /**
+     * "In the PR cards in the queue let me write something if I want something
+     * more into the PR": the words go with the card's answer route, the card
+     * stays open for the merge (never "answered"), and shows what was asked.
+     */
+    @Test fun wordsOnAMergeCardGoToItsPrsAndTheCardStaysOpen() = runBlocking {
+        val merge = """{"id":"d1","key":"k-d1","kind":"merge","space":"sandbox","sessions":[{"address":"t1qx","name":"app","waiting":true}],"waiting":1,"title":"Merge 2 PRs","why":"","options":[{"label":"Merge #987","why":"","pick":true},{"label":"Merge #988","why":"","pick":false}],"pick":"Merge #987",""" +
+            """"prs":[{"key":"o/app#987","repo":"o/app","number":987,"base":"dev","title":"Year filter","session":"t1qx"},{"key":"o/app#988","repo":"o/app","number":988,"base":"dev","title":"Catalogue","session":"t1qy"}],"first_ms":1000,"last_ms":1000,"count":1,"state":"open","muted":false}"""
+        extra = { r ->
+            when {
+                r.url.encodedPath == "/v1/decisions" && r.method == "GET" -> json("""{"decisions":[$merge]}""")
+                r.url.encodedPath == "/v1/decisions/d1/answer" && "o/app#988" in r.body!!.utf8() -> json("""{"ok":true,"id":"d1","state":"open","note":"Squash the fixups.","prs":["o/app#988"],"to":["t1qy"],"sent":[],"errors":[]}""")
+                r.url.encodedPath == "/v1/decisions/d1/answer" -> json("""{"ok":true,"id":"d1","state":"open","note":"Add a test for an empty catalogue.","prs":["o/app#987","o/app#988"],"to":["t1qx","t1qy"],"sent":[],"errors":[]}""")
+                else -> null
+            }
+        }
+        val s = session(voice = false)
+        s.setForeground(true)
+        until(what = "the queue") { s.decisions.value.size == 1 }
+        val d = s.decisions.value.single()
+        val r = s.askMoreOnPrs(d, "  Add a test for an empty catalogue. ").getOrThrow()
+        assertTrue(calls.any { it == """POST /v1/decisions/d1/answer {"other":"Add a test for an empty catalogue."}""" })
+        assertEquals(listOf("t1qx", "t1qy"), r.to)
+        // Still open, still a merge to make: not answered, not "answering", no error.
+        val c = s.decisions.value.single()
+        assertEquals("open", c.state)
+        assertTrue(c.open)
+        assertNull(c.error)
+        assertEquals(listOf("Add a test for an empty catalogue."), c.notes.map { it.text })
+        // One PR of the two, by its key.
+        s.askMoreOnPrs(c, "Squash the fixups.", pr = "o/app#988").getOrThrow()
+        assertTrue(calls.any { it == """POST /v1/decisions/d1/answer {"other":"Squash the fixups.","pr":"o/app#988"}""" })
+        assertEquals(listOf("o/app#988"), s.decisions.value.single().notes.last().prs)
+        assertEquals("open", s.decisions.value.single().state)
+        // Nothing typed: nothing sent.
+        val before = calls.size
+        assertTrue(s.askMoreOnPrs(c, "   ").isFailure)
+        assertEquals(before, calls.size)
+    }
+
     /** "Merge all" handed to the tower: the card's PRs, in order, to its merge-all route. */
     @Test fun mergeAllIsHandedToTheTower() = runBlocking {
         extra = { r ->

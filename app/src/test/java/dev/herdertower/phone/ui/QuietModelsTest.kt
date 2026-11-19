@@ -26,6 +26,24 @@ class QuietModelsTest {
     // The queue
 
     /** 14 Nov: eyzflow's card had two drafts among four PRs; on the phone each still looked like a Merge answer. */
+    /** A merge card takes words for its PRs (the tower's own, open), and says what was asked: which PR only when it was some of several. */
+    @Test fun aMergeCardTakesWordsAndSaysWhatWasAsked() {
+        val one = Decision(id = "d1", kind = "merge", prs = listOf(DecisionPr(repo = "o/app", number = 987)))
+        val two = one.copy(prs = one.prs + DecisionPr(repo = "o/app", number = 988))
+        assertTrue(DecisionModel.takesPrWords(one))
+        assertFalse("answered", DecisionModel.takesPrWords(one.copy(state = "answered")))
+        assertFalse("made here", DecisionModel.takesPrWords(one.copy(id = "legacy-m:o/app")))
+        assertFalse("no PRs", DecisionModel.takesPrWords(one.copy(prs = emptyList())))
+        assertFalse("not a merge", DecisionModel.takesPrWords(one.copy(kind = "question")))
+        val clock = { _: Long -> "14:20" }
+        val n = dev.herdertower.phone.api.PrNote("Squash the fixups. ", listOf("o/app#988"), listOf("t1qy"), "phone", 5000)
+        assertEquals("You asked: Squash the fixups. · for #988 · 14:20", DecisionModel.noteLine(two, n, clock))
+        assertEquals("You asked: Squash the fixups. · 14:20", DecisionModel.noteLine(one, n.copy(prs = listOf("o/app#987")), clock))
+        assertEquals("all of them: no PR named", "You asked: Squash the fixups. · 14:20", DecisionModel.noteLine(two, n.copy(prs = listOf("o/app#987", "o/app#988")), clock))
+        assertEquals("You asked: Squash the fixups.", DecisionModel.noteLine(two, n.copy(prs = emptyList(), atMs = 0), clock))
+        assertEquals("Want something more in this PR? Type it here…", DecisionModel.PR_WORDS_HINT)
+    }
+
     @Test fun aMergesDraftIsShownAsLeftOut() {
         val ready = DecisionPr(repo = "o/app", number = 839, base = "dev", merge = PrGate(can = true))
         val draft = DecisionPr(repo = "o/app", number = 840, base = "dev", merge = PrGate(can = false, blocked = "It's a draft: mark it ready for review first."))

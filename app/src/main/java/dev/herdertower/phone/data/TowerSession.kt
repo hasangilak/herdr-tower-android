@@ -952,6 +952,38 @@ class TowerSession(
         return sendDecision(d.id, d, text) { it.answerDecision(d.id, DecisionsApi.otherBody(text)) }
     }
 
+    /**
+     * More for a merge card's PRs, in the user's words (all of them, or [pr]
+     * alone): the tower sends it to each PR's session as a change to make.
+     * The card stays open for the merge: it is never marked answered, and
+     * the note shows on it at once ("You asked: …"), before the tower's
+     * `decisions` event carries it.
+     */
+    suspend fun askMoreOnPrs(d: Decision, text: String, pr: String? = null): Result<DecisionAnswered> {
+        val words = text.trim()
+        if (words.isEmpty()) return Result.failure(IllegalArgumentException("Type what you want added first."))
+        val sentAt = System.currentTimeMillis()
+        return act { it.answerDecision(d.id, DecisionsApi.prNoteBody(words, pr)) }.onSuccess { r ->
+            decisionErrors.remove(d.id)
+            val note = dev.herdertower.phone.api.PrNote(
+                text = r.note?.takeIf { it.isNotBlank() } ?: words,
+                prs = r.prs.ifEmpty { listOfNotNull(pr) },
+                to = r.to, by = "phone", atMs = sentAt,
+            )
+            // The tower's event may have brought it already: added once.
+            fun add(c: Decision) = if (c.id != d.id || c.notes.any { it.text == note.text && it.atMs >= sentAt - NOTE_SAME_MS }) c else c.copy(notes = c.notes + note)
+            queue = queue.map(::add)
+            heldQueue = heldQueue.map(::add)
+            showDecisions()
+        }.recoverCatching { e ->
+            DecisionsApi.closedBy(e)?.let { over ->
+                scope.launch { loadDecisions() }
+                throw DecisionOver(DecisionsApi.closedWords(over))
+            }
+            throw e
+        }
+    }
+
     private suspend fun sendDecision(id: String, d: Decision? = null, words: String? = null, call: suspend (TowerClient) -> DecisionAnswered): Result<Unit> {
         decisionHold[id] = "answering" to Long.MAX_VALUE
         decisionErrors.remove(id)
@@ -2053,6 +2085,8 @@ class TowerSession(
         private const val DISCOVERY_EVERY_MS = 30_000L
         private const val ACTION_WATCH_MS = 15 * 60_000L
 
+        /** A note the tower's event already carries: the same words, sent within this of the phone's. */
+        const val NOTE_SAME_MS = 60_000L
         /** The stream to keep open: the voice whenever this phone is it (on screen or not), else the feed while on screen or lingering. */
         fun streamMode(voice: Boolean, foreground: Boolean, lingering: Boolean): StreamMode = when {
             voice -> StreamMode.Voice
