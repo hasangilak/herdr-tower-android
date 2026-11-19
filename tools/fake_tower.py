@@ -1524,6 +1524,27 @@ def d_answer(d, body):
     return {"ok": True, "id": d["id"], "state": "answered", "answer": label, "sent": sent, "errors": [], "rule": {"can": can, "text": d["rule"]}}
 
 
+def d_pr_note(d, body):
+    """Words on a merge card, as the tower (dbb7fef): to the PRs `pr` names, else those the words name (#n), else all; the card stays open."""
+    text = body["other"].strip()
+    key = lambda p: f"{p['repo']}#{p['number']}"
+    pick = body.get("pr")
+    pick = [] if pick is None else [str(x) for x in (pick if isinstance(pick, list) else [pick])]
+    named = lambda p, w: w.strip().lstrip("#") in (key(p), str(p["number"]))
+    if pick:
+        prs = [p for p in d["prs"] if any(named(p, w) for w in pick)]
+        if not prs:
+            return {"error": f"{d['id']} has no PR {', '.join(pick)}: its PRs are {', '.join(key(p) for p in d['prs'])}"}
+    else:
+        prs = [p for p in d["prs"] if re.search(rf"#{p['number']}(?!\d)", text)] or list(d["prs"])
+    to = sorted({PRS.get(key(p), {}).get("session") or "t1" for p in prs})
+    print(f"decision {d['id']}: more for {[key(p) for p in prs]} -> {to}: {text!r}", flush=True)
+    d.setdefault("notes", []).append({"text": text, "prs": [key(p) for p in prs], "to": to, "by": "phone", "at_ms": now()})
+    d_changed()
+    return {"ok": True, "id": d["id"], "state": "open", "note": text, "prs": [key(p) for p in prs], "to": to,
+            "sent": [{"session": a, "queue_id": f"q{i + 1}", "sent": False} for i, a in enumerate(to)], "errors": []}
+
+
 def action_publish(a):
     ACTIONS[a["id"]] = a
     publish("action", dict(a))
@@ -1753,8 +1774,12 @@ def quiet_route(h, method, seg, q, b):
             if d["state"] not in ("open", "answering"):
                 h.err(409, "closed", f"{did} is {d['state']} already", state=d["state"])
                 return True
+            if d["kind"] == "merge" and (body.get("other") or "").strip() and d["prs"]:
+                r = d_pr_note(d, body)
+                h.send(200, r) if "error" not in r else h.err(400, "bad_answer", r["error"])
+                return True
             if d["kind"] == "merge":
-                h.err(400, "merge", "a merge is merged through its PRs' confirm and merge calls", prs=[f"{p['repo']}#{p['number']}" for p in d["prs"]])
+                h.err(400, "merge", "a merge is merged through its PRs' confirm and merge calls; words for its PRs (other) go to their sessions", prs=[f"{p['repo']}#{p['number']}" for p in d["prs"]])
                 return True
             if "choice" in body and not (0 <= body["choice"] < len(d["options"])) or ("choice" not in body and not (body.get("other") or "").strip()):
                 h.err(400, "bad_answer", "no such option, or no words")
