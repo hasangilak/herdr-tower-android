@@ -103,6 +103,19 @@ class DecisionsTest {
         assertEquals("""{"other":"only the read, \"once\""}""", DecisionsApi.otherBody("only the read, \"once\""))
     }
 
+    /** Words on a merge card: `{"other"}` for all its PRs, `"pr"` added for one of several; the tower's 200 keeps it open with its notes. */
+    @Test fun wordsOnAMergeCardForItsPrs() {
+        assertEquals("""{"other":"also rename the filter"}""", DecisionsApi.prNoteBody("also rename the filter"))
+        assertEquals("""{"other":"squash the fixups","pr":"o/app#988"}""", DecisionsApi.prNoteBody("squash the fixups", "o/app#988"))
+        assertEquals("""{"other":"x"}""", DecisionsApi.prNoteBody("x", " "))
+        val r = TowerJson.decodeFromString(DecisionAnswered.serializer(), """{"ok":true,"id":"d1","state":"open","note":"squash the fixups","prs":["o/app#988"],"to":["t1qy"],"sent":[{"session":"t1qy","queue_id":"q1","sent":false}],"errors":[]}""")
+        assertEquals(Triple("open", listOf("o/app#988"), listOf("t1qy")), Triple(r.state, r.prs, r.to))
+        val d = TowerJson.decodeFromString(Decision.serializer(), """{"id":"d1","kind":"merge","state":"open","notes":[{"text":"squash the fixups","prs":["o/app#988"],"to":["t1qy"],"by":"mac","at_ms":5000}]}""")
+        assertTrue(d.open)
+        assertEquals(PrNote("squash the fixups", listOf("o/app#988"), listOf("t1qy"), "mac", 5000), d.notes.single())
+        assertEquals(emptyList<PrNote>(), TowerJson.decodeFromString(Decision.serializer(), """{"id":"d2","kind":"merge"}""").notes)
+    }
+
     @Test fun whatWaitsAndForHowLong() {
         val now = 100 * 60_000L
         assertEquals("3 sessions wait", DecisionsApi.stake(Decision(waiting = 3)))

@@ -176,6 +176,30 @@ object DecisionModel {
 
     fun answerable(d: Decision): Boolean = DecisionsApi.answerable(d)
 
+    /** A merge card the user can ask more of, in words, for its PRs: the tower's own (not made here), open, with PRs. */
+    fun takesPrWords(d: Decision): Boolean = d.kind == "merge" && !d.legacy && d.open && d.prs.isNotEmpty()
+
+    /** The field under the Merge button. */
+    const val PR_WORDS_HINT = "Want something more in this PR? Type it here…"
+
+    /**
+     * What a merge card says of a note sent: "You asked: also rename the
+     * filter", then which PR when the card has several and it was for some
+     * ("for #987"), and when ("14:20").
+     */
+    fun noteLine(d: Decision, n: dev.herdertower.phone.api.PrNote, clock: (Long) -> String = { dayClock(it) }): String {
+        val some = n.prs.takeIf { d.prs.size > 1 && it.isNotEmpty() && it.size < d.prs.size }
+        val tail = listOfNotNull(
+            some?.joinToString(" and ", prefix = "for ") { "#" + it.substringAfterLast('#') },
+            n.atMs.takeIf { it > 0 }?.let(clock),
+        )
+        return "You asked: ${n.text.trim()}" + if (tail.isEmpty()) "" else " · " + tail.joinToString(" · ")
+    }
+
+    /** The snack once it went: "Sent to its session: …" (several: "to 2 sessions"). */
+    fun noteSent(r: dev.herdertower.phone.api.DecisionAnswered): String =
+        if (r.to.size > 1) "Sent to ${r.to.size} sessions. The card stays here for the merge." else "Sent to its session. The card stays here for the merge."
+
     /**
      * What a card without answers to tap offers instead: the stepper for a
      * question set, the user's own words for one that takes them, Show on
@@ -348,6 +372,15 @@ class DecisionHost(private val session: TowerSession, private val scope: Corouti
             return
         }
         scope.launch { session.answerDecision(d, index).onFailure(::failed) }
+    }
+
+    /** More for a merge card's PRs (all, or [pr] alone): the card stays open; [done] says whether it went (the field clears then). */
+    fun askMore(d: Decision, text: String, pr: String?, done: (Boolean) -> Unit) {
+        scope.launch {
+            session.askMoreOnPrs(d, text, pr)
+                .onSuccess { snack(DecisionModel.noteSent(it)); done(true) }
+                .onFailure { snack(if (it is DecisionOver) it.message.orEmpty() else "Couldn't send it: ${TowerSession.describe(it)}"); done(false) }
+        }
     }
 
     fun sendWords(d: Decision, text: String) {
@@ -566,6 +599,8 @@ fun DecisionCard(
                             QuietImpactLine(p.impact, pad)
                         }
                     }
+                    // Under the Merge button: more for its PRs, in the user's words, and what was asked already.
+                    if (DecisionModel.takesPrWords(d)) PrWords(d, host)
                     if (blocked != null) {
                         val opts = DecisionModel.blockedOptions(blocked)
                         if (opts.isNotEmpty() && blocked.tabs.size == 1) opts.forEach { o -> BigAnswer(o.label, primary = o.pick, why = o.why) { host.answerSet(blocked, o.label) } }
@@ -584,6 +619,43 @@ fun DecisionCard(
                     if (DecisionModel.takesWords(d)) TextButton(onClick = { if (d.questionId != null) onQuestion(d.questionId) else host.words = d }, modifier = Modifier.heightIn(min = 48.dp)) {
                         Text("Other answer", color = tc.muted)
                     }
+                }
+            }
+        }
+    }
+}
+
+/**
+ * More for a merge card's PRs: what was asked already ("You asked: …"), a
+ * field, which PR when the card has several (all by default), and Send. It
+ * goes to the PR's session as a change to make; the card stays for the merge.
+ */
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PrWords(d: Decision, host: DecisionHost) {
+    var text by remember(d.id) { mutableStateOf("") }
+    var pick by remember(d.id) { mutableStateOf<String?>(null) }
+    var sending by remember(d.id) { mutableStateOf(false) }
+    Column(Modifier.padding(top = 4.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        d.notes.forEach { n ->
+            Text(DecisionModel.noteLine(d, n), style = MaterialTheme.typography.bodySmall, color = tc.muted, maxLines = 4, overflow = TextOverflow.Ellipsis)
+        }
+        OutlinedTextField(
+            text, { text = it }, Modifier.fillMaxWidth(), enabled = !sending, minLines = 1, maxLines = 6,
+            placeholder = { Text(DecisionModel.PR_WORDS_HINT, color = tc.faint) },
+            colors = androidx.compose.material3.OutlinedTextFieldDefaults.colors(focusedTextColor = tc.text, unfocusedTextColor = tc.text, focusedBorderColor = tc.accent, unfocusedBorderColor = tc.edge, cursorColor = tc.accent),
+            shape = RoundedCornerShape(18.dp),
+        )
+        if (d.prs.size > 1 && text.isNotBlank()) FlowRow(horizontalArrangement = Arrangement.spacedBy(8.dp), verticalArrangement = Arrangement.spacedBy(6.dp)) {
+            Toggle("All ${d.prs.size}", on = pick == null) { pick = null }
+            d.prs.forEach { p -> Toggle("#${p.number}", on = pick == p.key) { pick = p.key } }
+        }
+        if (text.isNotBlank() || sending) Row(verticalAlignment = Alignment.CenterVertically) {
+            PillButton(if (sending) "Sending…" else if (d.prs.size > 1 && pick == null) "Send to their sessions" else "Send to its session", enabled = !sending && text.isNotBlank()) {
+                sending = true
+                host.askMore(d, text, pick) { ok ->
+                    sending = false
+                    if (ok) { text = ""; pick = null }
                 }
             }
         }
